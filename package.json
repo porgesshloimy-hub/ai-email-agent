@@ -1,0 +1,30 @@
+{
+  "name": "ai-email-agent",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "14.2.5",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "@supabase/supabase-js": "^2.45.0",
+    "@supabase/ssr": "^0.4.0",
+    "openai": "^4.55.0",
+    "googleapis": "^140.0.1",
+    "twilio": "^5.2.2",
+    "inngest": "^3.19.10",
+    "stripe": "^16.6.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "@types/node": "^20.14.15",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0"
+  }
+}

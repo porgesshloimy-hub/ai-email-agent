@@ -11,7 +11,7 @@ async function getGmailClient(tenantId: string) {
 }
 
 /**
- * Read an entire Gmail thread.
+ * Read a Gmail thread.
  */
 export async function readThread(
   tenantId: string,
@@ -29,12 +29,112 @@ export async function readThread(
 }
 
 /**
+ * Read a single Gmail message.
+ */
+export async function readMessage(
+  tenantId: string,
+  messageId: string
+) {
+  const gmail = await getGmailClient(tenantId);
+
+  const message = await gmail.users.messages.get({
+    userId: "me",
+    id: messageId,
+    format: "full",
+  });
+
+  return message.data;
+}
+
+/**
+ * Get Gmail history changes after a specific historyId.
+ *
+ * This is used by the Pub/Sub notification pipeline to discover
+ * new messages without repeatedly scanning the entire inbox.
+ */
+export async function getHistoryChanges(
+  tenantId: string,
+  startHistoryId: string
+) {
+  const gmail = await getGmailClient(tenantId);
+
+  const changes: Array<{
+    messageId: string;
+    threadId: string;
+  }> = [];
+
+  let pageToken: string | undefined;
+
+  do {
+    const response =
+      await gmail.users.history.list({
+        userId: "me",
+        startHistoryId,
+        historyTypes: ["messageAdded"],
+        pageToken,
+      });
+
+    for (const history of response.data.history ?? []) {
+      for (const messageAdded of history.messagesAdded ?? []) {
+        const message = messageAdded.message;
+
+        if (message?.id && message.threadId) {
+          changes.push({
+            messageId: message.id,
+            threadId: message.threadId,
+          });
+        }
+      }
+    }
+
+    pageToken =
+      response.data.nextPageToken ?? undefined;
+  } while (pageToken);
+
+  return {
+    historyId:
+      (
+        await gmail.users.history.list({
+          userId: "me",
+          startHistoryId,
+          maxResults: 1,
+        })
+      ).data.historyId ?? startHistoryId,
+    messages: changes,
+  };
+}
+
+/**
+ * Start/renew Gmail push notifications.
+ *
+ * Gmail sends notifications to the Google Cloud Pub/Sub
+ * topic configured for this project.
+ */
+export async function watchGmail(
+  tenantId: string,
+  topicName: string
+) {
+  const gmail = await getGmailClient(tenantId);
+
+  const response =
+    await gmail.users.watch({
+      userId: "me",
+      requestBody: {
+        topicName,
+        labelIds: ["INBOX"],
+        labelFilterAction: "include",
+      },
+    });
+
+  return response.data;
+}
+
+/**
  * Creates a Gmail draft that is properly threaded as a reply
  * to the original message.
  *
- * Gmail's threadId tells Gmail which conversation the message
- * belongs to, while In-Reply-To and References provide the
- * proper email-level threading information.
+ * originalMessageId should be the Gmail message ID of the
+ * incoming email whenever possible.
  */
 export async function createDraft(
   tenantId: string,
@@ -51,7 +151,6 @@ export async function createDraft(
 
   try {
     if (originalMessageId) {
-      // We already know the exact Gmail message ID.
       const originalMessage =
         await gmail.users.messages.get({
           userId: "me",
@@ -76,7 +175,6 @@ export async function createDraft(
         "References"
       );
     } else {
-      // Fallback: retrieve the latest message in the thread.
       const thread =
         await gmail.users.threads.get({
           userId: "me",
@@ -110,13 +208,6 @@ export async function createDraft(
       }
     }
   } catch (error) {
-    /**
-     * Don't prevent draft creation if retrieving the
-     * threading headers fails.
-     *
-     * Gmail's threadId still gives us conversation-level
-     * threading.
-     */
     console.warn(
       "Could not retrieve Gmail threading headers:",
       error
@@ -147,9 +238,6 @@ export async function createDraft(
 
 /**
  * Sends an existing Gmail draft.
- *
- * This should only be called by the permission-approved
- * sending path.
  */
 export async function sendDraft(
   tenantId: string,
@@ -208,9 +296,8 @@ function getHeaderValue(
 /**
  * Build a properly formatted RFC 2822 email.
  *
- * In-Reply-To and References tell Gmail and other email
- * clients that this message is a reply to the existing
- * conversation.
+ * In-Reply-To and References tell Gmail that this is a
+ * reply to the existing conversation.
  */
 function buildRawMessage({
   to,
@@ -232,18 +319,12 @@ function buildRawMessage({
     "MIME-Version: 1.0",
   ];
 
-  /**
-   * Reply to the exact original message.
-   */
   if (messageIdHeader) {
     headers.push(
       `In-Reply-To: ${messageIdHeader}`
     );
   }
 
-  /**
-   * Preserve the existing References chain.
-   */
   if (referencesHeader) {
     if (messageIdHeader) {
       headers.push(

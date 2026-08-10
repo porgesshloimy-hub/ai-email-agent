@@ -14,13 +14,13 @@ export async function GET(request: Request) {
 
   if (!code) {
     return NextResponse.redirect(
-      new URL("/settings?error=missing_google_code", requestUrl.origin)
+      new URL("/dashboard/settings?error=missing_google_code", requestUrl.origin)
     );
   }
 
   if (!state || !storedState || state !== storedState) {
     return NextResponse.redirect(
-      new URL("/settings?error=invalid_google_state", requestUrl.origin)
+      new URL("/dashboard/settings?error=invalid_google_state", requestUrl.origin)
     );
   }
 
@@ -51,7 +51,7 @@ export async function GET(request: Request) {
     console.error("Google token exchange failed:", tokenData);
 
     return NextResponse.redirect(
-      new URL("/settings?error=google_token_exchange_failed", requestUrl.origin)
+      new URL("/dashboard/settings?error=google_token_exchange_failed", requestUrl.origin)
     );
   }
 
@@ -65,7 +65,7 @@ export async function GET(request: Request) {
     console.error("Google did not return an access token:", tokenData);
 
     return NextResponse.redirect(
-      new URL("/settings?error=missing_google_access_token", requestUrl.origin)
+      new URL("/dashboard/settings?error=missing_google_access_token", requestUrl.origin)
     );
   }
 
@@ -85,7 +85,7 @@ export async function GET(request: Request) {
     console.error("Google userinfo failed:", userInfo);
 
     return NextResponse.redirect(
-      new URL("/settings?error=google_userinfo_failed", requestUrl.origin)
+      new URL("/dashboard/settings?error=google_userinfo_failed", requestUrl.origin)
     );
   }
 
@@ -114,7 +114,7 @@ export async function GET(request: Request) {
     console.error("Tenant lookup failed:", tenantError);
 
     return NextResponse.redirect(
-      new URL("/settings?error=tenant_not_found", requestUrl.origin)
+      new URL("/dashboard/settings?error=tenant_not_found", requestUrl.origin)
     );
   }
 
@@ -177,12 +177,12 @@ export async function GET(request: Request) {
     console.error("Failed to save Google connection:", saveError);
 
     return NextResponse.redirect(
-      new URL("/settings?error=google_connection_save_failed", requestUrl.origin)
+      new URL("/dashboard/settings?error=google_connection_save_failed", requestUrl.origin)
     );
   }
 
   const response = NextResponse.redirect(
-    new URL("/settings?google_connected=true", requestUrl.origin)
+    new URL("/dashboard/settings?google_connected=true", requestUrl.origin)
   );
 
   // Delete the OAuth state cookie after successful use.

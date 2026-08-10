@@ -6,12 +6,16 @@ export default function LandingPage() {
   const handleGoogleLogin = async () => {
     const supabase = createClient();
 
-    await supabase.auth.signInWithOAuth({
+    const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: {
         redirectTo: `${window.location.origin}/auth/callback`,
       },
     });
+
+    if (error) {
+      console.error("Google sign-in error:", error);
+    }
   };
 
   return (
@@ -90,7 +94,6 @@ export default function LandingPage() {
               background: "#635bff",
             }}
           />
-
           Your inbox, on autopilot.
         </div>
 
@@ -129,6 +132,7 @@ export default function LandingPage() {
         {/* Google Sign-In */}
         <div style={{ marginTop: 42 }}>
           <button
+            type="button"
             onClick={handleGoogleLogin}
             style={{
               display: "inline-flex",

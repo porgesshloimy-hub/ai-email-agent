@@ -12,6 +12,22 @@ export async function readThread(tenantId: string, threadId: string) {
   return thread.data;
 }
 
+export async function watchGmail(tenantId: string) {
+  const gmail = await getGmailClient(tenantId);
+
+  const response = await gmail.users.watch({
+    userId: "me",
+    requestBody: {
+      topicName:
+        `projects/${process.env.GOOGLE_CLOUD_PROJECT_ID}/topics/gmail-notifications`,
+      labelIds: ["INBOX"],
+      labelFilterBehavior: "INCLUDE",
+    },
+  });
+
+  return response.data;
+}
+
 /**
  * Creates a Gmail draft. This is the ONLY write path used when an action
  * requires approval — the agent never calls sendMessage() in that case.

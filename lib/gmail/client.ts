@@ -110,21 +110,25 @@ export async function getHistoryChanges(
  * Gmail sends notifications to the Google Cloud Pub/Sub
  * topic configured for this project.
  */
-export async function watchGmail(
-  tenantId: string,
-  topicName: string
-) {
+export async function watchGmail(tenantId: string) {
   const gmail = await getGmailClient(tenantId);
 
-  const response =
-    await gmail.users.watch({
-      userId: "me",
-      requestBody: {
-        topicName,
-        labelIds: ["INBOX"],
-        labelFilterAction: "include",
-      },
-    });
+  const topicName = process.env.GOOGLE_PUBSUB_TOPIC;
+
+  if (!topicName) {
+    throw new Error(
+      "GOOGLE_PUBSUB_TOPIC environment variable is not set"
+    );
+  }
+
+  const response = await gmail.users.watch({
+    userId: "me",
+    requestBody: {
+      topicName,
+      labelIds: ["INBOX"],
+      labelFilterAction: "include",
+    },
+  });
 
   return response.data;
 }

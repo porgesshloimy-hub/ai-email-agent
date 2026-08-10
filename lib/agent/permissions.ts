@@ -1,5 +1,5 @@
 import { createServiceSupabase } from "@/lib/supabase/server";
-import type { GmailAction, PermissionLevel } from "@/types";
+import type { AgentAction, GmailAction, PermissionLevel } from "@/types";
 
 /**
  * The permission engine is the enforcement point — never the model.
@@ -10,7 +10,7 @@ import type { GmailAction, PermissionLevel } from "@/types";
  */
 export async function getPermissionLevel(
   tenantId: string,
-  action: GmailAction
+  action: AgentAction
 ): Promise<PermissionLevel> {
   const supabase = createServiceSupabase();
 
@@ -32,7 +32,7 @@ export async function getPermissionLevel(
  * deliberately excluded — for those, only drafting is ever exposed to the
  * model (see resolveSendCapability below).
  */
-export async function getAutonomousActions(tenantId: string): Promise<GmailAction[]> {
+export async function getAutonomousActions(tenantId: string): Promise<AgentAction[]> {
   const supabase = createServiceSupabase();
   const { data } = await supabase
     .from("agent_permissions")
@@ -41,7 +41,7 @@ export async function getAutonomousActions(tenantId: string): Promise<GmailActio
 
   return (data ?? [])
     .filter((row) => row.level === "allowed")
-    .map((row) => row.action as GmailAction);
+    .map((row) => row.action as AgentAction);
 }
 
 /**
@@ -59,6 +59,29 @@ export async function resolveSendCapability(
   if (sendLevel === "allowed") return "send";
   if (draftLevel === "allowed" || draftLevel === "approval_required") return "draft_only";
   return "none";
+}
+
+/**
+ * Same pattern as resolveSendCapability, applied to calendar writes: if
+ * calendar.write requires approval, the model never gets a "create_event"
+ * tool that actually creates anything — it only gets a "propose_event" tool
+ * that logs a suggestion for the owner to confirm in-app. There's no Gmail-
+ * draft equivalent for calendar (you can't "draft" an event the same way),
+ * so approval-required calendar actions become an approval-queue entry
+ * instead, resolved by the owner clicking Confirm.
+ */
+export async function resolveCalendarWriteCapability(
+  tenantId: string
+): Promise<"write" | "propose_only" | "none"> {
+  const writeLevel = await getPermissionLevel(tenantId, "calendar.write");
+  if (writeLevel === "allowed") return "write";
+  if (writeLevel === "approval_required") return "propose_only";
+  return "none";
+}
+
+export async function canReadCalendar(tenantId: string): Promise<boolean> {
+  const level = await getPermissionLevel(tenantId, "calendar.read");
+  return level === "allowed" || level === "approval_required"; // reading is never gated behind approval, only writes are
 }
 
 /**

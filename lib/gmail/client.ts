@@ -1,47 +1,13 @@
 import { google } from "googleapis";
-import { createServiceSupabase } from "@/lib/supabase/server";
-import { decryptToken, encryptToken } from "@/lib/crypto";
+import { getGoogleAuthedClient } from "@/lib/google/authClient";
 
-async function getAuthedClient(tenantId: string) {
-  const supabase = createServiceSupabase();
-  const { data: conn } = await supabase
-    .from("gmail_connections")
-    .select("*")
-    .eq("tenant_id", tenantId)
-    .single();
-
-  if (!conn) throw new Error(`No Gmail connection for tenant ${tenantId}`);
-
-  const oauth2Client = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET,
-    process.env.GOOGLE_REDIRECT_URI
-  );
-
-  oauth2Client.setCredentials({
-    access_token: decryptToken(conn.access_token_encrypted),
-    refresh_token: decryptToken(conn.refresh_token_encrypted),
-    expiry_date: new Date(conn.token_expiry).getTime(),
-  });
-
-  // Persist refreshed access tokens automatically.
-  oauth2Client.on("tokens", async (tokens) => {
-    if (tokens.access_token) {
-      await supabase
-        .from("gmail_connections")
-        .update({
-          access_token_encrypted: encryptToken(tokens.access_token),
-          token_expiry: new Date(tokens.expiry_date!).toISOString(),
-        })
-        .eq("tenant_id", tenantId);
-    }
-  });
-
-  return google.gmail({ version: "v1", auth: oauth2Client });
+async function getGmailClient(tenantId: string) {
+  const auth = await getGoogleAuthedClient(tenantId);
+  return google.gmail({ version: "v1", auth });
 }
 
 export async function readThread(tenantId: string, threadId: string) {
-  const gmail = await getAuthedClient(tenantId);
+  const gmail = await getGmailClient(tenantId);
   const thread = await gmail.users.threads.get({ userId: "me", id: threadId, format: "full" });
   return thread.data;
 }
@@ -57,7 +23,7 @@ export async function createDraft(
   subject: string,
   body: string
 ) {
-  const gmail = await getAuthedClient(tenantId);
+  const gmail = await getGmailClient(tenantId);
   const raw = buildRawMessage(to, subject, body);
 
   const draft = await gmail.users.drafts.create({
@@ -75,7 +41,7 @@ export async function createDraft(
  * "allowed" outright — never directly by the model's tool call.
  */
 export async function sendDraft(tenantId: string, draftId: string) {
-  const gmail = await getAuthedClient(tenantId);
+  const gmail = await getGmailClient(tenantId);
   const sent = await gmail.users.drafts.send({
     userId: "me",
     requestBody: { id: draftId },
@@ -84,7 +50,7 @@ export async function sendDraft(tenantId: string, draftId: string) {
 }
 
 export async function archiveThread(tenantId: string, threadId: string) {
-  const gmail = await getAuthedClient(tenantId);
+  const gmail = await getGmailClient(tenantId);
   return gmail.users.threads.modify({
     userId: "me",
     id: threadId,

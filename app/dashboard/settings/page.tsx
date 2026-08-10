@@ -29,6 +29,21 @@ export default async function SettingsPage() {
         )}
       </section>
 
+      <section style={{ marginBottom: 32 }}>
+        <h2>Google Chat</h2>
+        <p style={{ fontSize: 14 }}>
+          Message the agent directly by finding "{process.env.NEXT_PUBLIC_APP_NAME ?? "your app"}" in Google Chat and
+          starting a DM. It recognizes you automatically if you chat from{" "}
+          {gmailConnection?.gmail_address ?? "your connected Gmail address"}.
+        </p>
+        {/* Form bound to a server action that updates tenants.owner_google_email,
+            for owners who want to chat from a different Google account. */}
+        <label style={{ fontSize: 13, display: "block", marginBottom: 4 }}>
+          Chatting from a different Google account? Enter it here:
+        </label>
+        <input type="email" defaultValue={tenant?.owner_google_email ?? ""} placeholder="you@gmail.com" />
+      </section>
+
       <section>
         <h2>Business information</h2>
         {/* Form wiring omitted — POST to a server action or route handler that

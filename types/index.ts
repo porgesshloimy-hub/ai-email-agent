@@ -2,8 +2,12 @@ export type PermissionLevel = "denied" | "approval_required" | "allowed";
 
 export type GmailAction = "gmail.read" | "gmail.draft" | "gmail.send" | "gmail.archive" | "gmail.delete";
 
+export type CalendarAction = "calendar.read" | "calendar.write";
+
+export type AgentAction = GmailAction | CalendarAction;
+
 export interface AgentPermission {
-  action: GmailAction;
+  action: AgentAction;
   level: PermissionLevel;
 }
 
@@ -23,6 +27,7 @@ export interface Tenant {
   businessName: string;
   businessDescription: string | null;
   phoneNumber: string | null;
+  ownerGoogleEmail: string | null;
 }
 
 export type EmailActionStatus = "processed" | "pending_approval" | "approved" | "rejected" | "sent";

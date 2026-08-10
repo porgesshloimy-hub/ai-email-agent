@@ -43,12 +43,19 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(new URL("/dashboard/settings?gmail_error=no_tenant", req.url));
   }
 
+  // tokens.scope is a space-separated string of every scope the user actually
+  // granted — check for calendar specifically rather than assuming, since a
+  // user can partially deny scopes on Google's consent screen.
+  const grantedScopes = (tokens.scope ?? "").split(" ");
+  const calendarGranted = grantedScopes.some((s) => s.includes("calendar"));
+
   await supabase.from("gmail_connections").upsert({
     tenant_id: tenant.id,
     gmail_address: profile.data.emailAddress,
     access_token_encrypted: encryptToken(tokens.access_token),
     refresh_token_encrypted: encryptToken(tokens.refresh_token),
     token_expiry: new Date(tokens.expiry_date!).toISOString(),
+    calendar_scope_granted: calendarGranted,
   });
 
   // Register Gmail push notifications (Pub/Sub) so new mail triggers

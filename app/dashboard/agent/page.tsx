@@ -1,7 +1,7 @@
 import { createServerSupabase } from "@/lib/supabase/server";
-import type { GmailAction } from "@/types";
+import type { AgentAction } from "@/types";
 
-const ACTIONS: { key: GmailAction; label: string }[] = [
+const EMAIL_ACTIONS: { key: AgentAction; label: string }[] = [
   { key: "gmail.read", label: "Read / search email" },
   { key: "gmail.draft", label: "Create drafts" },
   { key: "gmail.send", label: "Send email" },
@@ -9,8 +9,13 @@ const ACTIONS: { key: GmailAction; label: string }[] = [
   { key: "gmail.delete", label: "Delete" },
 ];
 
+const CALENDAR_ACTIONS: { key: AgentAction; label: string }[] = [
+  { key: "calendar.read", label: "Read calendar / check availability" },
+  { key: "calendar.write", label: "Create / modify events" },
+];
+
 export default async function AgentPage() {
-const supabase = await createServerSupabase();
+  const supabase = await createServerSupabase();
   const {
     data: { user },
   } = await supabase.auth.getUser();
@@ -46,10 +51,10 @@ const supabase = await createServerSupabase();
       </section>
 
       <section style={{ marginBottom: 32 }}>
-        <h2>Permissions</h2>
+        <h2>Email permissions</h2>
         <table>
           <tbody>
-            {ACTIONS.map((a) => (
+            {EMAIL_ACTIONS.map((a) => (
               <tr key={a.key}>
                 <td>{a.label}</td>
                 <td>
@@ -67,6 +72,30 @@ const supabase = await createServerSupabase();
         <p style={{ fontSize: 13, color: "#666" }}>
           When "Send" is set to draft-only, the agent never sends on its own — it prepares a draft in your Gmail and
           notifies you to review it.
+        </p>
+      </section>
+
+      <section style={{ marginBottom: 32 }}>
+        <h2>Calendar permissions</h2>
+        <table>
+          <tbody>
+            {CALENDAR_ACTIONS.map((a) => (
+              <tr key={a.key}>
+                <td>{a.label}</td>
+                <td>
+                  <select defaultValue={levelFor(a.key)}>
+                    <option value="denied">Never</option>
+                    <option value="approval_required">Propose only — I confirm before it's booked</option>
+                    <option value="allowed">Automatic</option>
+                  </select>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p style={{ fontSize: 13, color: "#666" }}>
+          When "Create / modify events" is set to propose-only, the agent never books anything directly — it queues a
+          suggested event on the Approvals page for you to confirm.
         </p>
       </section>
 

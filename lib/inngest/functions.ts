@@ -1,6 +1,7 @@
 import { inngest } from "@/lib/inngest/client";
 import { createServiceSupabase } from "@/lib/supabase/server";
 import { processIncomingEmail } from "@/lib/agent/run";
+import { reconcileUnreportedUsage } from "@/lib/billing/meter";
 
 /**
  * Fires on every Gmail push notification. Looks up which tenant owns this
@@ -60,5 +61,35 @@ export const renewGmailWatches = inngest.createFunction(
     // Query gmail_connections where watch_expiry < now() + 24h, call
     // gmail.users.watch() again for each, update watch_expiry.
     return { checked: true };
+  }
+);
+
+/**
+ * Retries any usage_events that failed to report to Stripe (outage, tenant
+ * hadn't connected billing yet at the time, etc.) so nothing silently goes
+ * unbilled. Runs hourly — usage reporting is otherwise real-time via
+ * recordUsage(), so this is just a safety net, not the primary path.
+ */
+export const reconcileUsageReporting = inngest.createFunction(
+  { id: "reconcile-usage-reporting" },
+  { cron: "0 * * * *" }, // hourly
+  async ({ step }) => {
+    const supabase = createServiceSupabase();
+
+    const tenantIds = await step.run("find-tenants-with-unreported-usage", async () => {
+      const { data } = await supabase
+        .from("usage_events")
+        .select("tenant_id")
+        .eq("stripe_reported", false);
+      return [...new Set((data ?? []).map((r) => r.tenant_id))];
+    });
+
+    let totalRetried = 0;
+    for (const tenantId of tenantIds) {
+      const result = await step.run(`reconcile-${tenantId}`, () => reconcileUnreportedUsage(tenantId));
+      totalRetried += result.retried;
+    }
+
+    return { tenantsChecked: tenantIds.length, eventsRetried: totalRetried };
   }
 );

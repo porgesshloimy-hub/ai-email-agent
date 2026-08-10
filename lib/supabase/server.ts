@@ -2,6 +2,8 @@ import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { cookies } from "next/headers";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
+// Used in Server Components / Route Handlers. Respects the logged-in user's
+// session and RLS — use this for anything requested on behalf of a signed-in user.
 export async function createServerSupabase() {
   const cookieStore = await cookies();
 

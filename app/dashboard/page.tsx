@@ -25,6 +25,7 @@ export default async function DashboardPage() {
         <Link href="/dashboard/settings">Business & Gmail settings</Link>
         <Link href="/dashboard/agent">Agent instructions & permissions</Link>
         <Link href="/dashboard/approvals">Approvals</Link>
+        <Link href="/dashboard/billing">Usage & billing</Link>
       </nav>
     </main>
   );

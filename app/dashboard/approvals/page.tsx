@@ -2,7 +2,7 @@ import { createServerSupabase } from "@/lib/supabase/server";
 import { approveAndSend, rejectDraft } from "./actions";
 
 export default async function ApprovalsPage() {
-  const supabase = createServerSupabase();
+  const supabase = await createServerSupabase();
   const {
     data: { user },
   } = await supabase.auth.getUser();

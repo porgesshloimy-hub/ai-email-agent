@@ -10,7 +10,7 @@ const ACTIONS: { key: GmailAction; label: string }[] = [
 ];
 
 export default async function AgentPage() {
-  const supabase = createServerSupabase();
+const supabase = await createServerSupabase();
   const {
     data: { user },
   } = await supabase.auth.getUser();

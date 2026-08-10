@@ -17,7 +17,7 @@ export async function approveAndSend(formData: FormData) {
   } = await userSupabase.auth.getUser();
   if (!user) throw new Error("Not authenticated");
 
-  const supabase = createServiceSupabase();
+ const supabase = await createServerSupabase();
 
   const { data: action } = await supabase
     .from("email_actions")
@@ -46,7 +46,7 @@ export async function approveAndSend(formData: FormData) {
 export async function rejectDraft(formData: FormData) {
   const actionId = formData.get("actionId") as string;
 
-  const userSupabase = createServerSupabase();
+  const supabase = await createServerSupabase();
   const {
     data: { user },
   } = await userSupabase.auth.getUser();

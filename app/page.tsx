@@ -8,7 +8,7 @@ export default function LandingPage() {
         Connect Gmail, tell your agent about your business, and decide exactly what it's allowed to do on its own —
         and what needs your sign-off first.
       </p>
-      <Link href="/api/auth/google">
+      <Link href="/api/auth/gmail">
         <button style={{ padding: "10px 20px", fontSize: 16 }}>Get started</button>
       </Link>
     </main>

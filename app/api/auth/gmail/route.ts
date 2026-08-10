@@ -23,7 +23,7 @@ export async function GET(req: NextRequest) {
   } = await supabase.auth.getUser();
 
   if (!user) {
-    return NextResponse.redirect(new URL("/login", req.url));
+    return NextResponse.redirect(new URL("/api/auth/gmail", req.url));
   }
 
   const oauth2Client = new google.auth.OAuth2(

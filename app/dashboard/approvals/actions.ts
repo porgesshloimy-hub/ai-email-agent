@@ -11,13 +11,13 @@ import { createServerSupabase, createServiceSupabase } from "@/lib/supabase/serv
 export async function approveAndSend(formData: FormData) {
   const actionId = formData.get("actionId") as string;
 
-  const userSupabase = createServerSupabase();
+  const userSupabase = await createServerSupabase();
   const {
     data: { user },
   } = await userSupabase.auth.getUser();
   if (!user) throw new Error("Not authenticated");
 
- const supabase = await createServerSupabase();
+  const supabase = createServiceSupabase();
 
   const { data: action } = await supabase
     .from("email_actions")
@@ -46,7 +46,7 @@ export async function approveAndSend(formData: FormData) {
 export async function rejectDraft(formData: FormData) {
   const actionId = formData.get("actionId") as string;
 
-  const supabase = await createServerSupabase();
+  const userSupabase = await createServerSupabase();
   const {
     data: { user },
   } = await userSupabase.auth.getUser();

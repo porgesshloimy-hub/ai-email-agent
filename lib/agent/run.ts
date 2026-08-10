@@ -10,7 +10,7 @@ import {
   createDraft,
   sendDraft,
 } from "@/lib/gmail/client";
-import { notifyOwner } from "@/lib/notify";
+import { notifyApproval } from "@/lib/notify";
 import { recordUsage } from "@/lib/billing/meter";
 import { calculateOpenAICost } from "@/lib/billing/pricing";
 
@@ -29,55 +29,24 @@ interface IncomingEmail {
   bodyText: string;
 }
 
-interface ToolFlags {
-  sendAllowed: boolean;
-  draftAllowed: boolean;
-  calendarReadAllowed: boolean;
-  calendarWriteCapability:
-    | "write"
-    | "propose_only"
-    | "none";
-}
-
 /**
- * Main AI email-agent pipeline.
+ * Main email-agent pipeline.
  *
- * Flow:
- *
- * incoming email
- *   ↓
- * permissions
- *   ↓
- * business rules
- *   ↓
- * business knowledge
- *   ↓
- * OpenAI
- *   ↓
- * tools allowed by permission engine
- *   ↓
- * Gmail / Calendar
- *
- * IMPORTANT:
- *
- * The model never decides whether it is allowed to perform an action.
- * The permission engine decides which tools the model receives.
+ * Email arrives
+ * -> permissions
+ * -> business rules
+ * -> knowledge
+ * -> OpenAI
+ * -> allowed action
+ * -> approval queue when necessary
  */
 export async function processIncomingEmail(
   email: IncomingEmail
 ) {
   const supabase = createServiceSupabase();
 
-  /**
-   * ---------------------------------------------------------
-   * 1. Resolve permissions
-   * ---------------------------------------------------------
-   */
-
   const sendCapability =
-    await resolveSendCapability(
-      email.tenantId
-    );
+    await resolveSendCapability(email.tenantId);
 
   const calendarWriteCapability =
     await resolveCalendarWriteCapability(
@@ -85,22 +54,7 @@ export async function processIncomingEmail(
     );
 
   const calendarReadAllowed =
-    await canReadCalendar(
-      email.tenantId
-    );
-
-  const sendAllowed =
-    sendCapability === "send";
-
-  const draftAllowed =
-    sendCapability === "send" ||
-    sendCapability === "draft_only";
-
-  /**
-   * ---------------------------------------------------------
-   * 2. Load tenant agent configuration
-   * ---------------------------------------------------------
-   */
+    await canReadCalendar(email.tenantId);
 
   const { data: agentConfig } =
     await supabase
@@ -108,25 +62,13 @@ export async function processIncomingEmail(
       .select(
         "custom_instructions, rules"
       )
-      .eq(
-        "tenant_id",
-        email.tenantId
-      )
+      .eq("tenant_id", email.tenantId)
       .single();
 
   const rules =
     (agentConfig?.rules ?? []) as {
       description: string;
     }[];
-
-  /**
-   * ---------------------------------------------------------
-   * 3. Hard business-rule check
-   * ---------------------------------------------------------
-   *
-   * These rules can force approval even if general
-   * permission settings allow automatic sending.
-   */
 
   const ruleCheck =
     checkRulesForTopic(
@@ -137,23 +79,6 @@ export async function processIncomingEmail(
       )
     );
 
-  /**
-   * If a hard rule matched, remove send capability.
-   *
-   * The model will still be able to create a draft,
-   * assuming drafts are permitted.
-   */
-
-  const effectiveSendAllowed =
-    sendAllowed &&
-    !ruleCheck.requiresApproval;
-
-  /**
-   * ---------------------------------------------------------
-   * 4. Gather business knowledge
-   * ---------------------------------------------------------
-   */
-
   const relevantKnowledge =
     await searchKnowledge(
       email.tenantId,
@@ -161,854 +86,593 @@ export async function processIncomingEmail(
     );
 
   /**
-   * ---------------------------------------------------------
-   * 5. Build only the tools the permission system allows
-   * ---------------------------------------------------------
+   * If a rule requires approval, we deliberately
+   * do not expose send_reply to OpenAI.
    */
+  const effectiveSendAllowed =
+    sendCapability === "send" &&
+    !ruleCheck.requiresApproval;
 
   const tools =
     buildToolDefinitions({
-      sendAllowed:
-        effectiveSendAllowed,
-      draftAllowed,
+      sendAllowed: effectiveSendAllowed,
       calendarReadAllowed,
       calendarWriteCapability,
     });
 
-  /**
-   * ---------------------------------------------------------
-   * 6. Build initial OpenAI conversation
-   * ---------------------------------------------------------
-   */
+  const completion =
+    await openai.chat.completions.create({
+      model: OPENAI_MODEL,
 
-  const messages:
-    OpenAI.Chat.Completions.ChatCompletionMessageParam[] =
-    [
-      {
-        role: "system",
-        content: [
-          "You are the email assistant for this business.",
-          "",
-          agentConfig?.custom_instructions ??
+      messages: [
+        {
+          role: "system",
+          content: [
+            "You are the email assistant for this business.",
+
+            agentConfig?.custom_instructions ??
+              "",
+
+            "Rules you must follow:",
+
+            ...rules.map(
+              (rule) =>
+                `- ${rule.description}`
+            ),
+
+            "Relevant business knowledge:",
+
+            relevantKnowledge.join("\n"),
+
             "",
-          "",
-          "Rules you must follow:",
-          ...rules.map(
-            (rule) =>
-              `- ${rule.description}`
-          ),
-          "",
-          "Relevant business knowledge:",
-          relevantKnowledge.length
-            ? relevantKnowledge.join("\n")
-            : "No additional business knowledge was found.",
-          "",
-          "Important operating instructions:",
-          "- Follow the available tools exactly.",
-          "- Never claim that an action was completed unless the corresponding tool actually succeeded.",
-          "- If a tool is unavailable, do not attempt to perform that action another way.",
-          "- If a reply requires approval, create a draft rather than sending it.",
-          "- Be concise and professional when replying to customers.",
-        ].join("\n"),
-      },
-      {
-        role: "user",
-        content: [
-          `New email from: ${email.from}`,
-          `Subject: ${email.subject}`,
-          "",
-          email.bodyText,
-        ].join("\n"),
-      },
-    ];
+            "IMPORTANT:",
+            "Never invent business policies, prices, refunds, commitments, or facts.",
+            "If you are uncertain, create a draft instead of sending.",
+            "Keep replies professional, concise, and useful.",
+          ].join("\n"),
+        },
 
-  /**
-   * ---------------------------------------------------------
-   * 7. OpenAI tool loop
-   * ---------------------------------------------------------
-   *
-   * The previous implementation only processed the first
-   * tool call.
-   *
-   * This version allows the model to perform multiple actions
-   * while still keeping every action behind the permission
-   * layer.
-   *
-   * We intentionally disable parallel tool calls because
-   * these tools have real-world side effects.
-   */
+        {
+          role: "user",
+          content:
+            `New email from ${email.from}\n` +
+            `Subject: ${email.subject}\n\n` +
+            email.bodyText,
+        },
+      ],
 
-  const MAX_TOOL_ROUNDS = 5;
+      tools,
 
-  for (
-    let round = 0;
-    round < MAX_TOOL_ROUNDS;
-    round++
-  ) {
-    const completion =
-      await openai.chat.completions.create({
-        model: OPENAI_MODEL,
-        messages,
-        tools:
-          tools.length > 0
-            ? tools
-            : undefined,
-        tool_choice:
-          tools.length > 0
-            ? "auto"
-            : undefined,
-        parallel_tool_calls: false,
-      });
+      tool_choice: "auto",
+    });
 
-    /**
-     * Meter every OpenAI completion.
-     */
-    await meterOpenAIUsage(
-      email.tenantId,
-      email.threadId,
-      completion
-    );
-
-    const assistantMessage =
-      completion.choices[0]?.message;
-
-    if (!assistantMessage) {
-      return {
-        status: "completed",
-        reason: "no_assistant_message",
-      };
-    }
-
-    /**
-     * Add the assistant's response to the
-     * conversation before processing tools.
-     */
-    messages.push(assistantMessage);
-
-    const toolCalls =
-      assistantMessage.tool_calls ?? [];
-
-    /**
-     * No tools means the model has finished.
-     */
-    if (toolCalls.length === 0) {
-      return {
-        status: "completed",
-        rounds: round + 1,
-      };
-    }
-
-    /**
-     * Execute every tool call sequentially.
-     */
-    for (const toolCall of toolCalls) {
-      const result =
-        await executeToolCall({
-          toolCall,
-          email,
-          supabase,
-        });
-
-      /**
-       * Feed the tool result back to OpenAI.
-       *
-       * This allows the model to understand what actually
-       * happened and decide whether another permitted action
-       * is necessary.
-       */
-      messages.push({
-        role: "tool",
-        tool_call_id:
-          toolCall.id,
-        content:
-          JSON.stringify(result),
-      });
-    }
-  }
-
-  /**
-   * Safety stop.
-   *
-   * Prevents an unexpected model/tool loop from running
-   * indefinitely.
-   */
-
-  console.warn(
-    `AI tool loop reached maximum rounds for thread ${email.threadId}`
+  await meterOpenAIUsage(
+    email.tenantId,
+    email.threadId,
+    completion
   );
 
-  return {
-    status: "stopped",
-    reason: "max_tool_rounds_reached",
-  };
-}
+  const toolCall =
+    completion.choices[0].message.tool_calls?.[0];
 
-/**
- * -----------------------------------------------------------
- * Tool execution
- * -----------------------------------------------------------
- */
-
-async function executeToolCall({
-  toolCall,
-  email,
-  supabase,
-}: {
-  toolCall:
-    OpenAI.Chat.Completions.ChatCompletionMessageToolCall;
-  email: IncomingEmail;
-  supabase: ReturnType<
-    typeof createServiceSupabase
-  >;
-}) {
-  const toolName =
-    toolCall.function.name;
-
-  let args: Record<
-    string,
-    any
-  >;
-
-  try {
-    args = JSON.parse(
-      toolCall.function.arguments || "{}"
-    );
-  } catch {
+  /**
+   * The model decided that no action was necessary.
+   */
+  if (!toolCall) {
     return {
-      success: false,
-      error:
-        "The tool arguments were invalid JSON.",
+      action: "none",
+    };
+  }
+
+  const args = JSON.parse(
+    toolCall.function.arguments
+  );
+
+  /**
+   * --------------------------------------------------
+   * CREATE DRAFT
+   * --------------------------------------------------
+   */
+  if (
+    toolCall.function.name ===
+    "create_draft"
+  ) {
+    const draft =
+      await createDraft(
+        email.tenantId,
+        email.threadId,
+        email.from,
+        `Re: ${email.subject}`,
+        args.body
+      );
+
+    if (!draft.id) {
+      throw new Error(
+        "Gmail did not return a draft ID"
+      );
+    }
+
+    const { data: action, error } =
+      await supabase
+        .from("email_actions")
+        .insert({
+          tenant_id:
+            email.tenantId,
+
+          gmail_thread_id:
+            email.threadId,
+
+          gmail_message_id:
+            email.messageId,
+
+          action_type:
+            "draft_reply",
+
+          status:
+            "pending_approval",
+
+          gmail_draft_id:
+            draft.id,
+
+          draft_content:
+            args.body,
+
+          reasoning:
+            args.reasoning ?? null,
+        })
+        .select("id")
+        .single();
+
+    if (error || !action) {
+      throw new Error(
+        `Failed to create email action: ${
+          error?.message ??
+          "unknown error"
+        }`
+      );
+    }
+
+    /**
+     * Create the unified approval record.
+     */
+    const { data: approval, error: approvalError } =
+      await supabase
+        .from("approvals")
+        .insert({
+          tenant_id:
+            email.tenantId,
+
+          action_type:
+            "gmail.send",
+
+          action_id:
+            action.id,
+
+          status:
+            "pending",
+
+          description:
+            `Reply to ${email.from} regarding "${email.subject}"`,
+
+          expires_at:
+            new Date(
+              Date.now() +
+                24 * 60 * 60 * 1000
+            ).toISOString(),
+        })
+        .select("id")
+        .single();
+
+    if (
+      approvalError ||
+      !approval
+    ) {
+      throw new Error(
+        `Failed to create approval: ${
+          approvalError?.message ??
+          "unknown error"
+        }`
+      );
+    }
+
+    /**
+     * Notify the owner by SMS.
+     */
+    await notifyApproval(
+      email.tenantId,
+      approval.id,
+      `New email reply ready for approval.\n\nFrom: ${email.from}\nSubject: ${email.subject}`
+    );
+
+    return {
+      action: "pending_approval",
+      emailActionId: action.id,
+      approvalId: approval.id,
     };
   }
 
   /**
-   * ---------------------------------------------------------
-   * CREATE DRAFT
-   * ---------------------------------------------------------
+   * --------------------------------------------------
+   * SEND REPLY DIRECTLY
+   * --------------------------------------------------
+   *
+   * This path is only available when the permission
+   * engine explicitly allows sending.
    */
-
   if (
-    toolName === "create_draft"
+    toolCall.function.name ===
+    "send_reply"
   ) {
-    try {
-      const draft = await createDraft(
-  email.tenantId,
-  email.threadId,
-  email.from,
-  `Re: ${email.subject}`,
-  args.body,
-  email.messageId
-);
+    if (!effectiveSendAllowed) {
+      throw new Error(
+        "Security violation: send_reply was attempted without permission"
+      );
+    }
 
-      const {
-        error: insertError,
-      } = await supabase
-        .from("email_actions")
-        .insert({
-          tenant_id:
-            email.tenantId,
-          gmail_thread_id:
-            email.threadId,
-          gmail_message_id:
-            email.messageId,
-          action_type:
-            "draft_reply",
-          status:
-            "pending_approval",
-          gmail_draft_id:
-            draft.id,
-          draft_content:
-            args.body,
-          reasoning:
-            args.reasoning ??
-            null,
-        });
-
-      if (insertError) {
-        console.error(
-          "Failed to record draft action:",
-          insertError
-        );
-      }
-
-      await notifyOwner(
+    const draft =
+      await createDraft(
         email.tenantId,
-        `New draft ready to review: "${email.subject}"`
+        email.threadId,
+        email.from,
+        `Re: ${email.subject}`,
+        args.body
       );
 
-      return {
-        success: true,
-        action: "draft_created",
-        draftId: draft.id,
-        requiresApproval: true,
-        message:
-          "The reply was saved as a Gmail draft and queued for owner approval.",
-      };
-    } catch (error) {
-      console.error(
-        "Failed to create Gmail draft:",
-        error
+    if (!draft.id) {
+      throw new Error(
+        "Gmail did not return a draft ID"
       );
-
-      return {
-        success: false,
-        action: "draft_created",
-        error:
-          error instanceof Error
-            ? error.message
-            : String(error),
-      };
     }
+
+    await sendDraft(
+      email.tenantId,
+      draft.id
+    );
+
+    await supabase
+      .from("email_actions")
+      .insert({
+        tenant_id:
+          email.tenantId,
+
+        gmail_thread_id:
+          email.threadId,
+
+        gmail_message_id:
+          email.messageId,
+
+        action_type:
+          "draft_reply",
+
+        status:
+          "sent",
+
+        gmail_draft_id:
+          draft.id,
+
+        draft_content:
+          args.body,
+
+        reasoning:
+          args.reasoning ?? null,
+
+        resolved_at:
+          new Date().toISOString(),
+      });
+
+    return {
+      action: "sent",
+    };
   }
 
   /**
-   * ---------------------------------------------------------
-   * SEND REPLY
-   * ---------------------------------------------------------
+   * --------------------------------------------------
+   * CALENDAR EVENT
+   * --------------------------------------------------
    */
-
   if (
-    toolName === "send_reply"
-  ) {
-    try {
-      /**
-       * IMPORTANT:
-       *
-       * This is an additional server-side safety check.
-       * Even though the tool should only be exposed when
-       * permitted, we check the permission again here.
-       */
-
-      const sendCapability =
-        await resolveSendCapability(
-          email.tenantId
-        );
-
-      if (
-        sendCapability !== "send"
-      ) {
-        return {
-          success: false,
-          action: "send_reply",
-          error:
-            "Sending is not currently permitted for this tenant.",
-        };
-      }
-
-      /**
-       * Re-run hard topic rules.
-       *
-       * This protects against future changes where the
-       * tool might accidentally be exposed.
-       */
-
-      const {
-        data: agentConfig,
-      } = await supabase
-        .from("agent_configs")
-        .select("rules")
-        .eq(
-          "tenant_id",
-          email.tenantId
-        )
-        .single();
-
-      const rules =
-        (agentConfig?.rules ??
-          []) as {
-          description: string;
-        }[];
-
-      const ruleCheck =
-        checkRulesForTopic(
-          rules,
-          extractTopicTags(
-            email.subject,
-            email.bodyText
-          )
-        );
-
-      if (
-        ruleCheck.requiresApproval
-      ) {
-        /**
-         * Fall back to a draft instead of sending.
-         */
-
-        const draft = await createDraft(
-  email.tenantId,
-  email.threadId,
-  email.from,
-  `Re: ${email.subject}`,
-  args.body,
-  email.messageId
-);
-
-        await supabase
-          .from("email_actions")
-          .insert({
-            tenant_id:
-              email.tenantId,
-            gmail_thread_id:
-              email.threadId,
-            gmail_message_id:
-              email.messageId,
-            action_type:
-              "draft_reply",
-            status:
-              "pending_approval",
-            gmail_draft_id:
-              draft.id,
-            draft_content:
-              args.body,
-            reasoning:
-              args.reasoning ??
-              `Approval required by rule: ${ruleCheck.matchedRule ?? "business rule"}`,
-          });
-
-        await notifyOwner(
-          email.tenantId,
-          `Reply requires approval: "${email.subject}"`
-        );
-
-        return {
-          success: true,
-          action:
-            "draft_created_instead_of_send",
-          requiresApproval: true,
-          reason:
-            ruleCheck.matchedRule ??
-            "Business rule requires approval.",
-        };
-      }
-
-      /**
-       * Create the Gmail draft first.
-       *
-       * We intentionally use the same draft/send mechanism
-       * for autonomous sending.
-       */
-    const draft = await createDraft(
-  email.tenantId,
-  email.threadId,
-  email.from,
-  `Re: ${email.subject}`,
-  args.body,
-  email.messageId
-);
-
-      if (!draft.id) {
-        return {
-          success: false,
-          action: "send_reply",
-          error:
-            "Gmail did not return a draft ID.",
-        };
-      }
-
-      const sent =
-        await sendDraft(
-          email.tenantId,
-          draft.id
-        );
-
-      await supabase
-        .from("email_actions")
-        .insert({
-          tenant_id:
-            email.tenantId,
-          gmail_thread_id:
-            email.threadId,
-          gmail_message_id:
-            email.messageId,
-          action_type:
-            "draft_reply",
-          status: "sent",
-          gmail_draft_id:
-            draft.id,
-          draft_content:
-            args.body,
-          reasoning:
-            args.reasoning ??
-            null,
-        });
-
-      return {
-        success: true,
-        action: "reply_sent",
-        messageId: sent.id,
-        message:
-          "The reply was sent successfully.",
-      };
-    } catch (error) {
-      console.error(
-        "Failed to send Gmail reply:",
-        error
-      );
-
-      return {
-        success: false,
-        action: "send_reply",
-        error:
-          error instanceof Error
-            ? error.message
-            : String(error),
-      };
-    }
-  }
-
-  /**
-   * ---------------------------------------------------------
-   * CREATE CALENDAR EVENT
-   * ---------------------------------------------------------
-   */
-
-  if (
-    toolName ===
+    toolCall.function.name ===
     "create_calendar_event"
   ) {
-    try {
-      const capability =
-        await resolveCalendarWriteCapability(
-          email.tenantId
-        );
+    if (
+      calendarWriteCapability !==
+      "write"
+    ) {
+      throw new Error(
+        "Security violation: calendar write attempted without permission"
+      );
+    }
 
-      if (
-        capability !== "write"
-      ) {
-        return {
-          success: false,
-          action:
-            "create_calendar_event",
-          error:
-            "Calendar event creation is not currently permitted.",
-        };
-      }
-
-      const {
-        createEvent,
-      } = await import(
+    const { createEvent } =
+      await import(
         "@/lib/calendar/client"
       );
 
-      const event =
-        await createEvent(
-          email.tenantId,
-          {
-            summary:
-              args.summary,
-            description:
-              args.description,
-            startTime:
-              args.startTime,
-            endTime:
-              args.endTime,
-            attendeeEmails:
-              args.attendeeEmails,
-          }
-        );
-
-      await supabase
-        .from("calendar_actions")
-        .insert({
-          tenant_id:
-            email.tenantId,
-          action_type:
-            "create_event",
-          status: "sent",
-          proposed_summary:
+    const event =
+      await createEvent(
+        email.tenantId,
+        {
+          summary:
             args.summary,
-          proposed_start:
-            args.startTime,
-          proposed_end:
-            args.endTime,
-          google_event_id:
-            event.id,
-          reasoning:
-            args.reasoning ??
-            null,
-        });
 
-      return {
-        success: true,
-        action:
-          "calendar_event_created",
-        eventId: event.id,
-        message:
-          "The calendar event was created successfully.",
-      };
-    } catch (error) {
-      console.error(
-        "Failed to create calendar event:",
-        error
+          description:
+            args.description,
+
+          startTime:
+            args.startTime,
+
+          endTime:
+            args.endTime,
+
+          attendeeEmails:
+            args.attendeeEmails,
+        }
       );
 
-      return {
-        success: false,
-        action:
-          "create_calendar_event",
-        error:
-          error instanceof Error
-            ? error.message
-            : String(error),
-      };
-    }
+    await supabase
+      .from("calendar_actions")
+      .insert({
+        tenant_id:
+          email.tenantId,
+
+        action_type:
+          "create_event",
+
+        status:
+          "sent",
+
+        proposed_summary:
+          args.summary,
+
+        proposed_start:
+          args.startTime,
+
+        proposed_end:
+          args.endTime,
+
+        google_event_id:
+          event.id,
+
+        reasoning:
+          args.reasoning ?? null,
+      });
+
+    return {
+      action: "calendar_created",
+      googleEventId: event.id,
+    };
   }
 
   /**
-   * ---------------------------------------------------------
-   * PROPOSE CALENDAR EVENT
-   * ---------------------------------------------------------
+   * --------------------------------------------------
+   * CALENDAR PROPOSAL
+   * --------------------------------------------------
    */
-
   if (
-    toolName ===
+    toolCall.function.name ===
     "propose_calendar_event"
   ) {
-    try {
-      const capability =
-        await resolveCalendarWriteCapability(
-          email.tenantId
-        );
-
-      if (
-        capability === "none"
-      ) {
-        return {
-          success: false,
-          action:
-            "propose_calendar_event",
-          error:
-            "Calendar writes are disabled for this tenant.",
-        };
-      }
-
-      /**
-       * If the tenant has since changed permissions to
-       * full write access, create the event directly.
-       */
-      if (
-        capability === "write"
-      ) {
-        const {
-          createEvent,
-        } = await import(
-          "@/lib/calendar/client"
-        );
-
-        const event =
-          await createEvent(
-            email.tenantId,
-            {
-              summary:
-                args.summary,
-              description:
-                args.description,
-              startTime:
-                args.startTime,
-              endTime:
-                args.endTime,
-              attendeeEmails:
-                args.attendeeEmails,
-            }
-          );
-
-        await supabase
-          .from("calendar_actions")
-          .insert({
-            tenant_id:
-              email.tenantId,
-            action_type:
-              "create_event",
-            status: "sent",
-            proposed_summary:
-              args.summary,
-            proposed_start:
-              args.startTime,
-            proposed_end:
-              args.endTime,
-            google_event_id:
-              event.id,
-            reasoning:
-              args.reasoning ??
-              null,
-          });
-
-        return {
-          success: true,
-          action:
-            "calendar_event_created",
-          eventId: event.id,
-        };
-      }
-
-      /**
-       * Otherwise queue it for approval.
-       */
-      await supabase
-        .from("calendar_actions")
-        .insert({
-          tenant_id:
-            email.tenantId,
-          action_type:
-            "create_event",
-          status:
-            "pending_approval",
-          proposed_summary:
-            args.summary,
-          proposed_start:
-            args.startTime,
-          proposed_end:
-            args.endTime,
-          reasoning:
-            args.reasoning ??
-            null,
-        });
-
-      await notifyOwner(
-        email.tenantId,
-        `New calendar event proposed: "${args.summary}"`
+    if (
+      calendarWriteCapability !==
+      "propose_only"
+    ) {
+      throw new Error(
+        "Security violation: calendar proposal attempted incorrectly"
       );
-
-      return {
-        success: true,
-        action:
-          "calendar_event_proposed",
-        requiresApproval: true,
-        message:
-          "The calendar event was queued for owner approval.",
-      };
-    } catch (error) {
-      console.error(
-        "Failed to propose calendar event:",
-        error
-      );
-
-      return {
-        success: false,
-        action:
-          "propose_calendar_event",
-        error:
-          error instanceof Error
-            ? error.message
-            : String(error),
-      };
     }
+
+    const {
+      data: calendarAction,
+      error,
+    } = await supabase
+      .from("calendar_actions")
+      .insert({
+        tenant_id:
+          email.tenantId,
+
+        action_type:
+          "create_event",
+
+        status:
+          "pending_approval",
+
+        proposed_summary:
+          args.summary,
+
+        proposed_start:
+          args.startTime,
+
+        proposed_end:
+          args.endTime,
+
+        reasoning:
+          args.reasoning ?? null,
+      })
+      .select("id")
+      .single();
+
+    if (error || !calendarAction) {
+      throw new Error(
+        `Failed to create calendar action: ${
+          error?.message ??
+          "unknown error"
+        }`
+      );
+    }
+
+    const {
+      data: approval,
+      error: approvalError,
+    } = await supabase
+      .from("approvals")
+      .insert({
+        tenant_id:
+          email.tenantId,
+
+        action_type:
+          "calendar.create",
+
+        action_id:
+          calendarAction.id,
+
+        status:
+          "pending",
+
+        description:
+          `Create calendar event "${args.summary}"`,
+
+        expires_at:
+          new Date(
+            Date.now() +
+              24 * 60 * 60 * 1000
+          ).toISOString(),
+      })
+      .select("id")
+      .single();
+
+    if (
+      approvalError ||
+      !approval
+    ) {
+      throw new Error(
+        `Failed to create calendar approval: ${
+          approvalError?.message ??
+          "unknown error"
+        }`
+      );
+    }
+
+    await notifyApproval(
+      email.tenantId,
+      approval.id,
+      `Calendar event needs approval.\n\n${args.summary}\n${args.startTime}`
+    );
+
+    return {
+      action:
+        "calendar_pending_approval",
+      approvalId:
+        approval.id,
+    };
   }
 
-  /**
-   * Unknown tool.
-   *
-   * This should never happen because the model can only
-   * receive tools from buildToolDefinitions().
-   */
   return {
-    success: false,
-    error: `Unknown tool: ${toolName}`,
+    action: "unknown",
   };
 }
 
 /**
- * -----------------------------------------------------------
- * OpenAI tool definitions
- * -----------------------------------------------------------
+ * OpenAI tool definitions.
+ *
+ * The permission engine controls which dangerous
+ * tools exist. The model cannot call a tool that
+ * wasn't provided here.
  */
+interface ToolFlags {
+  sendAllowed: boolean;
+  calendarReadAllowed: boolean;
+  calendarWriteCapability:
+    | "write"
+    | "propose_only"
+    | "none";
+}
 
 function buildToolDefinitions(
   flags: ToolFlags
 ): OpenAI.Chat.Completions.ChatCompletionTool[] {
   const tools: OpenAI.Chat.Completions.ChatCompletionTool[] =
-    [];
+    [
+      {
+        type: "function",
 
-  /**
-   * Gmail draft.
-   *
-   * Available whenever the tenant has either draft or
-   * send capability.
-   */
-  if (flags.draftAllowed) {
+        function: {
+          name: "create_draft",
+
+          description:
+            "Create a Gmail draft reply for human approval. Use this when sending requires approval, when uncertain, or for sensitive topics such as refunds, complaints, pricing exceptions, legal matters, or cancellations.",
+
+          parameters: {
+            type: "object",
+
+            properties: {
+              body: {
+                type: "string",
+                description:
+                  "The complete reply body.",
+              },
+
+              reasoning: {
+                type: "string",
+                description:
+                  "Brief explanation of why this response is appropriate.",
+              },
+            },
+
+            required: ["body"],
+          },
+        },
+      },
+    ];
+
+  if (flags.sendAllowed) {
     tools.push({
       type: "function",
+
       function: {
-        name: "create_draft",
+        name: "send_reply",
+
         description:
-          "Create a Gmail draft reply for a human to review and send. Use this whenever a reply needs approval, is uncertain, or touches anything sensitive such as refunds, complaints, pricing exceptions, legal issues, or cancellations.",
+          "Send a reply immediately. Only use this for simple cases that are explicitly allowed by the business owner's permission settings.",
+
         parameters: {
           type: "object",
+
           properties: {
             body: {
               type: "string",
               description:
                 "The complete reply body.",
             },
+
             reasoning: {
               type: "string",
-              description:
-                "Brief explanation of why this reply was written this way.",
             },
           },
+
           required: ["body"],
         },
       },
     });
   }
 
-  /**
-   * Autonomous Gmail sending.
-   */
-  if (flags.sendAllowed) {
-    tools.push({
-      type: "function",
-      function: {
-        name: "send_reply",
-        description:
-          "Send a reply immediately without human review. Use only for straightforward requests that are clearly within the business's normal policies and do not conflict with any business rule.",
-        parameters: {
-          type: "object",
-          properties: {
-            body: {
-              type: "string",
-              description:
-                "The complete reply body to send.",
-            },
-            reasoning: {
-              type: "string",
-              description:
-                "Brief explanation of why the reply can safely be sent automatically.",
-            },
-          },
-          required: ["body"],
-        },
-      },
-    });
-  }
-
-  /**
-   * Calendar event parameters.
-   */
   const calendarEventParams = {
     type: "object" as const,
+
     properties: {
       summary: {
         type: "string",
         description:
-          "Short calendar event title.",
+          "Short event title.",
       },
+
       description: {
         type: "string",
         description:
           "Optional event description.",
       },
+
       startTime: {
         type: "string",
         description:
-          "ISO 8601 start datetime including timezone.",
+          "ISO 8601 start datetime.",
       },
+
       endTime: {
         type: "string",
         description:
-          "ISO 8601 end datetime including timezone.",
+          "ISO 8601 end datetime.",
       },
+
       attendeeEmails: {
         type: "array",
         items: {
@@ -1017,12 +681,12 @@ function buildToolDefinitions(
         description:
           "Optional attendee email addresses.",
       },
+
       reasoning: {
         type: "string",
-        description:
-          "Brief explanation of why this event should be created or proposed.",
       },
     },
+
     required: [
       "summary",
       "startTime",
@@ -1030,39 +694,40 @@ function buildToolDefinitions(
     ],
   };
 
-  /**
-   * Direct calendar creation.
-   */
   if (
     flags.calendarWriteCapability ===
     "write"
   ) {
     tools.push({
       type: "function",
+
       function: {
-        name: "create_calendar_event",
+        name:
+          "create_calendar_event",
+
         description:
-          "Create a calendar event directly. Use only when the business has explicitly allowed autonomous calendar writes.",
+          "Create a calendar event directly. Only use when calendar writing is explicitly allowed.",
+
         parameters:
           calendarEventParams,
       },
     });
   }
 
-  /**
-   * Calendar proposal.
-   */
   if (
     flags.calendarWriteCapability ===
     "propose_only"
   ) {
     tools.push({
       type: "function",
+
       function: {
         name:
           "propose_calendar_event",
+
         description:
-          "Propose a calendar event for the business owner to approve. Do not claim that the event was booked because this action only creates an approval request.",
+          "Propose a calendar event for owner approval. Do not create the Google Calendar event directly.",
+
         parameters:
           calendarEventParams,
       },
@@ -1071,12 +736,6 @@ function buildToolDefinitions(
 
   return tools;
 }
-
-/**
- * -----------------------------------------------------------
- * Topic extraction
- * -----------------------------------------------------------
- */
 
 function extractTopicTags(
   subject: string,
@@ -1092,6 +751,9 @@ function extractTopicTags(
     "cancellation",
     "legal",
     "chargeback",
+    "pricing",
+    "discount",
+    "contract",
   ];
 
   return candidates.filter(
@@ -1101,45 +763,29 @@ function extractTopicTags(
 }
 
 /**
- * -----------------------------------------------------------
- * Business knowledge
- * -----------------------------------------------------------
+ * Knowledge search.
  *
- * This remains a placeholder until your pgvector knowledge
- * search is wired up.
+ * For now this returns an empty array. The agent
+ * still works without it. We'll wire the actual
+ * pgvector knowledge retrieval separately.
  */
-
 async function searchKnowledge(
   tenantId: string,
   queryText: string
 ): Promise<string[]> {
-  // TODO:
-  // 1. Create an embedding for queryText.
-  // 2. Call Supabase RPC match_knowledge_chunks.
-  // 3. Scope results by tenantId.
-  // 4. Return the most relevant business knowledge.
-  //
-  // Keeping this empty is safe — it simply means the agent
-  // currently operates without retrieved business knowledge.
-
   void tenantId;
   void queryText;
 
   return [];
 }
 
-/**
- * -----------------------------------------------------------
- * OpenAI usage metering
- * -----------------------------------------------------------
- */
-
 async function meterOpenAIUsage(
   tenantId: string,
   threadId: string,
   completion: OpenAI.Chat.Completions.ChatCompletion
 ) {
-  const usage = completion.usage;
+  const usage =
+    completion.usage;
 
   if (!usage) {
     return;
@@ -1154,12 +800,18 @@ async function meterOpenAIUsage(
 
   await recordUsage({
     tenantId,
+
     service: "openai",
+
     description:
       `${OPENAI_MODEL} completion, thread ${threadId}`,
+
     quantity:
       usage.total_tokens,
+
     unit: "tokens",
-    rawCostUsd: rawCost,
+
+    rawCostUsd:
+      rawCost,
   });
 }

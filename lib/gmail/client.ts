@@ -11,7 +11,7 @@ async function getGmailClient(tenantId: string) {
 }
 
 /**
- * Read a Gmail thread.
+ * Read an entire Gmail thread.
  */
 export async function readThread(
   tenantId: string,
@@ -47,10 +47,16 @@ export async function readMessage(
 }
 
 /**
- * Get Gmail history changes after a specific historyId.
+ * Get new Gmail messages since a previous historyId.
  *
- * This is used by the Pub/Sub notification pipeline to discover
- * new messages without repeatedly scanning the entire inbox.
+ * Gmail's History API only tells us which message IDs changed.
+ * We then retrieve each complete message and extract:
+ *
+ * - messageId
+ * - threadId
+ * - from
+ * - subject
+ * - bodyText
  */
 export async function getHistoryChanges(
   tenantId: string,
@@ -58,32 +64,62 @@ export async function getHistoryChanges(
 ) {
   const gmail = await getGmailClient(tenantId);
 
-  const changes: Array<{
+  const messages: Array<{
     messageId: string;
     threadId: string;
+    from: string;
+    subject: string;
+    bodyText: string;
   }> = [];
 
   let pageToken: string | undefined;
+  let latestHistoryId = startHistoryId;
 
   do {
-    const response =
-      await gmail.users.history.list({
-        userId: "me",
-        startHistoryId,
-        historyTypes: ["messageAdded"],
-        pageToken,
-      });
+    const response = await gmail.users.history.list({
+      userId: "me",
+      startHistoryId,
+      historyTypes: ["messageAdded"],
+      pageToken,
+    });
+
+    if (response.data.historyId) {
+      latestHistoryId = response.data.historyId;
+    }
 
     for (const history of response.data.history ?? []) {
       for (const messageAdded of history.messagesAdded ?? []) {
-        const message = messageAdded.message;
+        const messageId = messageAdded.message?.id;
+        const threadId = messageAdded.message?.threadId;
 
-        if (message?.id && message.threadId) {
-          changes.push({
-            messageId: message.id,
-            threadId: message.threadId,
-          });
+        if (!messageId || !threadId) {
+          continue;
         }
+
+        const message = await readMessage(
+          tenantId,
+          messageId
+        );
+
+        const headers =
+          message.payload?.headers ?? [];
+
+        const from =
+          getHeaderValue(headers, "From") ?? "";
+
+        const subject =
+          getHeaderValue(headers, "Subject") ?? "";
+
+        const bodyText =
+          extractPlainTextBody(message.payload) ?? "";
+
+        messages.push({
+          messageId,
+          threadId,
+          from,
+          subject,
+          bodyText,
+        });
       }
     }
 
@@ -92,28 +128,26 @@ export async function getHistoryChanges(
   } while (pageToken);
 
   return {
-    historyId:
-      (
-        await gmail.users.history.list({
-          userId: "me",
-          startHistoryId,
-          maxResults: 1,
-        })
-      ).data.historyId ?? startHistoryId,
-    messages: changes,
+    historyId: latestHistoryId,
+    messages,
   };
 }
 
 /**
- * Start/renew Gmail push notifications.
+ * Start or renew Gmail push notifications.
  *
- * Gmail sends notifications to the Google Cloud Pub/Sub
- * topic configured for this project.
+ * GOOGLE_PUBSUB_TOPIC should contain the full Pub/Sub topic name,
+ * for example:
+ *
+ * projects/ai-email-agent-505111/topics/gmail-push
  */
-export async function watchGmail(tenantId: string) {
+export async function watchGmail(
+  tenantId: string
+) {
   const gmail = await getGmailClient(tenantId);
 
-  const topicName = process.env.GOOGLE_PUBSUB_TOPIC;
+  const topicName =
+    process.env.GOOGLE_PUBSUB_TOPIC;
 
   if (!topicName) {
     throw new Error(
@@ -137,8 +171,9 @@ export async function watchGmail(tenantId: string) {
  * Creates a Gmail draft that is properly threaded as a reply
  * to the original message.
  *
- * originalMessageId should be the Gmail message ID of the
- * incoming email whenever possible.
+ * originalMessageId is optional because some older callers may
+ * not provide it. When supplied, it is used to retrieve the
+ * exact original message's Message-ID and References headers.
  */
 export async function createDraft(
   tenantId: string,
@@ -190,12 +225,14 @@ export async function createDraft(
           ],
         });
 
-      const messages =
+      const threadMessages =
         thread.data.messages ?? [];
 
-      if (messages.length > 0) {
+      if (threadMessages.length > 0) {
         const latestMessage =
-          messages[messages.length - 1];
+          threadMessages[
+            threadMessages.length - 1
+          ];
 
         const headers =
           latestMessage.payload?.headers ?? [];
@@ -212,6 +249,13 @@ export async function createDraft(
       }
     }
   } catch (error) {
+    /**
+     * Don't prevent draft creation if retrieving the
+     * threading headers fails.
+     *
+     * Gmail's threadId still provides conversation-level
+     * threading.
+     */
     console.warn(
       "Could not retrieve Gmail threading headers:",
       error
@@ -241,7 +285,7 @@ export async function createDraft(
 }
 
 /**
- * Sends an existing Gmail draft.
+ * Send an existing Gmail draft.
  */
 export async function sendDraft(
   tenantId: string,
@@ -298,10 +342,119 @@ function getHeaderValue(
 }
 
 /**
- * Build a properly formatted RFC 2822 email.
+ * Extract readable text from a Gmail message payload.
  *
- * In-Reply-To and References tell Gmail that this is a
- * reply to the existing conversation.
+ * Handles:
+ * - text/plain
+ * - multipart messages
+ * - text/html as a fallback
+ */
+function extractPlainTextBody(
+  payload: any
+): string {
+  if (!payload) {
+    return "";
+  }
+
+  if (
+    payload.mimeType === "text/plain" &&
+    payload.body?.data
+  ) {
+    return Buffer.from(
+      payload.body.data,
+      "base64url"
+    ).toString("utf8");
+  }
+
+  if (payload.parts) {
+    for (const part of payload.parts) {
+      const text =
+        extractPlainTextBody(part);
+
+      if (text) {
+        return text;
+      }
+    }
+  }
+
+  if (
+    payload.mimeType === "text/html" &&
+    payload.body?.data
+  ) {
+    const html = Buffer.from(
+      payload.body.data,
+      "base64url"
+    ).toString("utf8");
+
+    return htmlToText(html);
+  }
+
+  return "";
+}
+
+/**
+ * Basic HTML → text conversion.
+ */
+function htmlToText(
+  html: string
+): string {
+  return html
+    .replace(
+      /<style[^>]*>[\s\S]*?<\/style>/gi,
+      ""
+    )
+    .replace(
+      /<script[^>]*>[\s\S]*?<\/script>/gi,
+      ""
+    )
+    .replace(
+      /<br\s*\/?>/gi,
+      "\n"
+    )
+    .replace(
+      /<\/p>/gi,
+      "\n"
+    )
+    .replace(
+      /<[^>]+>/g,
+      ""
+    )
+    .replace(
+      /&nbsp;/gi,
+      " "
+    )
+    .replace(
+      /&amp;/gi,
+      "&"
+    )
+    .replace(
+      /&lt;/gi,
+      "<"
+    )
+    .replace(
+      /&gt;/gi,
+      ">"
+    )
+    .replace(
+      /&#39;/gi,
+      "'"
+    )
+    .replace(
+      /&quot;/gi,
+      '"'
+    )
+    .replace(
+      /\n{3,}/g,
+      "\n\n"
+    )
+    .trim();
+}
+
+/**
+ * Build an RFC 2822 email.
+ *
+ * In-Reply-To and References ensure the reply is associated
+ * with the original email conversation.
  */
 function buildRawMessage({
   to,

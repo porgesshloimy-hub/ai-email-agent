@@ -23,8 +23,8 @@ export default async function SettingsPage() {
         {gmailConnection ? (
           <p>Connected as {gmailConnection.gmail_address}</p>
         ) : (
-          <a href="/api/auth/gmail">
-            <button style={{ padding: "8px 16px" }}>Connect Gmail</button>
+          <a href="/api/auth/google">
+            <button style={{ padding: "8px 16px" }}>Connect Google</button>
           </a>
         )}
       </section>

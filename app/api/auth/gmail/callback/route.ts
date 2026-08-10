@@ -76,6 +76,5 @@ export async function GET(req: NextRequest) {
       watch_expiry: new Date(Number(watchResponse.data.expiration)).toISOString(),
     })
     .eq("tenant_id", tenant.id);
-
   return NextResponse.redirect(new URL("/dashboard/settings?gmail_connected=1", req.url));
 }

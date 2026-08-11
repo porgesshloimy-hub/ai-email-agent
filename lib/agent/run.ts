@@ -773,10 +773,61 @@ async function searchKnowledge(
   tenantId: string,
   queryText: string
 ): Promise<string[]> {
-  void tenantId;
-  void queryText;
+  try {
+    const embeddingResponse = await openai.embeddings.create({
+      model: "text-embedding-3-small",
+      input: queryText,
+    });
 
-  return [];
+    const queryEmbedding = embeddingResponse.data[0]?.embedding;
+
+    if (!queryEmbedding) {
+      console.error("OpenAI returned no embedding");
+      return [];
+    }
+
+    const { data, error } = await supabaseMatchKnowledge(
+      tenantId,
+      queryEmbedding
+    );
+
+    if (error) {
+      console.error("Knowledge search failed:", error);
+      return [];
+    }
+
+    return (data ?? [])
+      .filter(
+        (chunk: {
+          content?: string | null;
+          similarity?: number | null;
+        }) =>
+          typeof chunk.content === "string" &&
+          chunk.content.trim().length > 0
+      )
+      .map(
+        (chunk: {
+          content: string;
+          similarity?: number | null;
+        }) => chunk.content
+      );
+  } catch (error) {
+    console.error("Knowledge search error:", error);
+    return [];
+  }
+}
+
+async function supabaseMatchKnowledge(
+  tenantId: string,
+  queryEmbedding: number[]
+) {
+  const supabase = createServiceSupabase();
+
+  return supabase.rpc("match_knowledge_chunks", {
+    query_embedding: queryEmbedding,
+    match_tenant_id: tenantId,
+    match_count: 5,
+  });
 }
 
 async function meterOpenAIUsage(

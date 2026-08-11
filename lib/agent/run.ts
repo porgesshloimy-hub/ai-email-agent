@@ -33,6 +33,7 @@ interface IncomingEmail {
  * Main email-agent pipeline.
  *
  * Email arrives
+ * -> duplicate check
  * -> permissions
  * -> business rules
  * -> knowledge
@@ -44,6 +45,56 @@ export async function processIncomingEmail(
   email: IncomingEmail
 ) {
   const supabase = createServiceSupabase();
+
+  /**
+   * IMPORTANT:
+   *
+   * Gmail/Inngest can deliver the same history notification
+   * more than once. We must make message processing idempotent.
+   *
+   * If we already created an email action for this exact
+   * Gmail message, do not run the AI again and do not create
+   * another draft.
+   */
+  const { data: existingAction, error: existingActionError } =
+    await supabase
+      .from("email_actions")
+      .select("id, action_type, status, gmail_draft_id")
+      .eq("tenant_id", email.tenantId)
+      .eq("gmail_message_id", email.messageId)
+      .limit(1)
+      .maybeSingle();
+
+  if (existingActionError) {
+    throw new Error(
+      `Failed to check for existing email action: ${existingActionError.message}`
+    );
+  }
+
+  if (existingAction) {
+    console.log("EMAIL ALREADY PROCESSED - SKIPPING:", {
+      tenantId: email.tenantId,
+      messageId: email.messageId,
+      threadId: email.threadId,
+      existingActionId: existingAction.id,
+      existingActionType: existingAction.action_type,
+      existingStatus: existingAction.status,
+      existingDraftId: existingAction.gmail_draft_id,
+    });
+
+    return {
+      action: "already_processed",
+      emailActionId: existingAction.id,
+    };
+  }
+
+  console.log("PROCESSING NEW EMAIL:", {
+    tenantId: email.tenantId,
+    messageId: email.messageId,
+    threadId: email.threadId,
+    from: email.from,
+    subject: email.subject,
+  });
 
   const sendCapability =
     await resolveSendCapability(email.tenantId);
@@ -70,26 +121,26 @@ export async function processIncomingEmail(
       description: string;
     }[];
 
- const topicTags = extractTopicTags(
-  email.subject,
-  email.bodyText
-);
-
-const ruleCheck =
-  checkRulesForTopic(
-    rules,
-    topicTags
+  const topicTags = extractTopicTags(
+    email.subject,
+    email.bodyText
   );
 
-  const relevantRules =
-  rules.filter((rule) => {
-    const description =
-      rule.description.toLowerCase();
-
-    return topicTags.some((tag) =>
-      description.includes(tag)
+  const ruleCheck =
+    checkRulesForTopic(
+      rules,
+      topicTags
     );
-  });
+
+  const relevantRules =
+    rules.filter((rule) => {
+      const description =
+        rule.description.toLowerCase();
+
+      return topicTags.some((tag) =>
+        description.includes(tag)
+      );
+    });
 
   const relevantKnowledge =
     await searchKnowledge(
@@ -107,62 +158,72 @@ const ruleCheck =
 
   const tools =
     buildToolDefinitions({
-      sendAllowed: effectiveSendAllowed,
+      sendAllowed:
+        effectiveSendAllowed,
       calendarReadAllowed,
       calendarWriteCapability,
     });
 
   let completion;
 
-try {
-  completion =
-    await openai.chat.completions.create({
-      model: OPENAI_MODEL,
+  try {
+    completion =
+      await openai.chat.completions.create({
+        model: OPENAI_MODEL,
 
-      messages: [
-        {
-          role: "system",
-          content: [
-            "You are the email assistant for this business.",
+        messages: [
+          {
+            role: "system",
+            content: [
+              "You are the email assistant for this business.",
 
-            agentConfig?.custom_instructions ??
+              agentConfig?.custom_instructions ??
+                "",
+
+              "Rules you must follow:",
+
+              ...relevantRules.map(
+                (rule) =>
+                  `- ${rule.description}`
+              ),
+
+              "Relevant business knowledge:",
+
+              relevantKnowledge.join("\n"),
+
               "",
 
-            "Rules you must follow:",
+              "IMPORTANT:",
 
-           ...relevantRules.map(
-  (rule) =>
-    `- ${rule.description}`
-),
+              "Never invent business policies, prices, refunds, commitments, or facts.",
 
-            "Relevant business knowledge:",
+              "If you are uncertain, create a draft instead of sending.",
 
-            relevantKnowledge.join("\n"),
+              "Keep replies professional, concise, and useful.",
+            ].join("\n"),
+          },
 
-            "",
-            "IMPORTANT:",
-            "Never invent business policies, prices, refunds, commitments, or facts.",
-            "If you are uncertain, create a draft instead of sending.",
-            "Keep replies professional, concise, and useful.",
-          ].join("\n"),
-        },
+          {
+            role: "user",
+            content:
+              `New email from ${email.from}\n` +
+              `Subject: ${email.subject}\n\n` +
+              email.bodyText,
+          },
+        ],
 
-        {
-          role: "user",
-          content:
-            `New email from ${email.from}\n` +
-            `Subject: ${email.subject}\n\n` +
-            email.bodyText,
-        },
-      ],
+        tools,
 
-          tools,
-      tool_choice: "auto",
-    });
-} catch (error) {
-  console.error("OPENAI ERROR:", error);
-  throw error;
-}
+        tool_choice: "auto",
+      });
+  } catch (error) {
+    console.error(
+      "OPENAI ERROR:",
+      error
+    );
+
+    throw error;
+  }
 
   await meterOpenAIUsage(
     email.tenantId,
@@ -201,7 +262,8 @@ try {
         email.threadId,
         email.from,
         `Re: ${email.subject}`,
-        args.body
+        args.body,
+        email.messageId
       );
 
     if (!draft.id) {
@@ -253,7 +315,10 @@ try {
     /**
      * Create the unified approval record.
      */
-    const { data: approval, error: approvalError } =
+    const {
+      data: approval,
+      error: approvalError,
+    } =
       await supabase
         .from("approvals")
         .insert({
@@ -302,10 +367,33 @@ try {
       `New email reply ready for approval.\n\nFrom: ${email.from}\nSubject: ${email.subject}`
     );
 
+    console.log(
+      "EMAIL DRAFT CREATED:",
+      {
+        tenantId:
+          email.tenantId,
+        messageId:
+          email.messageId,
+        threadId:
+          email.threadId,
+        draftId:
+          draft.id,
+        emailActionId:
+          action.id,
+        approvalId:
+          approval.id,
+      }
+    );
+
     return {
-      action: "pending_approval",
-      emailActionId: action.id,
-      approvalId: approval.id,
+      action:
+        "pending_approval",
+
+      emailActionId:
+        action.id,
+
+      approvalId:
+        approval.id,
     };
   }
 
@@ -333,7 +421,8 @@ try {
         email.threadId,
         email.from,
         `Re: ${email.subject}`,
-        args.body
+        args.body,
+        email.messageId
       );
 
     if (!draft.id) {
@@ -378,6 +467,20 @@ try {
           new Date().toISOString(),
       });
 
+    console.log(
+      "EMAIL SENT:",
+      {
+        tenantId:
+          email.tenantId,
+        messageId:
+          email.messageId,
+        threadId:
+          email.threadId,
+        draftId:
+          draft.id,
+      }
+    );
+
     return {
       action: "sent",
     };
@@ -401,7 +504,9 @@ try {
       );
     }
 
-    const { createEvent } =
+    const {
+      createEvent,
+    } =
       await import(
         "@/lib/calendar/client"
       );
@@ -456,8 +561,11 @@ try {
       });
 
     return {
-      action: "calendar_created",
-      googleEventId: event.id,
+      action:
+        "calendar_created",
+
+      googleEventId:
+        event.id,
     };
   }
 
@@ -482,34 +590,38 @@ try {
     const {
       data: calendarAction,
       error,
-    } = await supabase
-      .from("calendar_actions")
-      .insert({
-        tenant_id:
-          email.tenantId,
+    } =
+      await supabase
+        .from("calendar_actions")
+        .insert({
+          tenant_id:
+            email.tenantId,
 
-        action_type:
-          "create_event",
+          action_type:
+            "create_event",
 
-        status:
-          "pending_approval",
+          status:
+            "pending_approval",
 
-        proposed_summary:
-          args.summary,
+          proposed_summary:
+            args.summary,
 
-        proposed_start:
-          args.startTime,
+          proposed_start:
+            args.startTime,
 
-        proposed_end:
-          args.endTime,
+          proposed_end:
+            args.endTime,
 
-        reasoning:
-          args.reasoning ?? null,
-      })
-      .select("id")
-      .single();
+          reasoning:
+            args.reasoning ?? null,
+        })
+        .select("id")
+        .single();
 
-    if (error || !calendarAction) {
+    if (
+      error ||
+      !calendarAction
+    ) {
       throw new Error(
         `Failed to create calendar action: ${
           error?.message ??
@@ -521,32 +633,33 @@ try {
     const {
       data: approval,
       error: approvalError,
-    } = await supabase
-      .from("approvals")
-      .insert({
-        tenant_id:
-          email.tenantId,
+    } =
+      await supabase
+        .from("approvals")
+        .insert({
+          tenant_id:
+            email.tenantId,
 
-        action_type:
-          "calendar.create",
+          action_type:
+            "calendar.create",
 
-        action_id:
-          calendarAction.id,
+          action_id:
+            calendarAction.id,
 
-        status:
-          "pending",
+          status:
+            "pending",
 
-        description:
-          `Create calendar event "${args.summary}"`,
+          description:
+            `Create calendar event "${args.summary}"`,
 
-        expires_at:
-          new Date(
-            Date.now() +
-              24 * 60 * 60 * 1000
-          ).toISOString(),
-      })
-      .select("id")
-      .single();
+          expires_at:
+            new Date(
+              Date.now() +
+                24 * 60 * 60 * 1000
+            ).toISOString(),
+        })
+        .select("id")
+        .single();
 
     if (
       approvalError ||
@@ -569,6 +682,7 @@ try {
     return {
       action:
         "calendar_pending_approval",
+
       approvalId:
         approval.id,
     };
@@ -693,9 +807,11 @@ function buildToolDefinitions(
 
       attendeeEmails: {
         type: "array",
+
         items: {
           type: "string",
         },
+
         description:
           "Optional attendee email addresses.",
       },
@@ -795,53 +911,84 @@ async function searchKnowledge(
   }
 
   try {
-    const embeddingResponse = await openai.embeddings.create({
-      model: "text-embedding-3-small",
-      input: queryText,
-    });
+    const embeddingResponse =
+      await openai.embeddings.create({
+        model:
+          "text-embedding-3-small",
 
-    const queryEmbedding = embeddingResponse.data[0]?.embedding;
+        input: queryText,
+      });
+
+    const queryEmbedding =
+      embeddingResponse.data[0]
+        ?.embedding;
 
     if (!queryEmbedding) {
-      console.error("OpenAI returned no embedding");
+      console.error(
+        "OpenAI returned no embedding"
+      );
+
       return [];
     }
 
-    const supabase = createServiceSupabase();
+    const supabase =
+      createServiceSupabase();
 
-    const { data, error } = await supabase.rpc(
+    const {
+      data,
+      error,
+    } = await supabase.rpc(
       "match_knowledge_chunks",
       {
-        query_embedding: queryEmbedding,
-        match_tenant_id: tenantId,
+        query_embedding:
+          queryEmbedding,
+
+        match_tenant_id:
+          tenantId,
+
         match_count: 5,
       }
     );
 
     if (error) {
-      console.error("Knowledge search failed:", error);
+      console.error(
+        "Knowledge search failed:",
+        error
+      );
+
       return [];
     }
 
     return (data ?? [])
       .filter(
         (chunk: {
-          content?: string | null;
-          similarity?: number | null;
+          content?:
+            string | null;
+
+          similarity?:
+            number | null;
         }) =>
-          typeof chunk.content === "string" &&
-          chunk.content.trim().length > 0 &&
-          typeof chunk.similarity === "number" &&
+          typeof chunk.content ===
+            "string" &&
+          chunk.content.trim()
+            .length > 0 &&
+          typeof chunk.similarity ===
+            "number" &&
           chunk.similarity >= 0.65
       )
       .map(
         (chunk: {
           content: string;
           similarity: number;
-        }) => chunk.content
+        }) =>
+          chunk.content
       );
   } catch (error) {
-    console.error("Knowledge search error:", error);
+    console.error(
+      "Knowledge search error:",
+      error
+    );
+
     return [];
   }
 }
@@ -850,19 +997,28 @@ async function supabaseMatchKnowledge(
   tenantId: string,
   queryEmbedding: number[]
 ) {
-  const supabase = createServiceSupabase();
+  const supabase =
+    createServiceSupabase();
 
-  return supabase.rpc("match_knowledge_chunks", {
-    query_embedding: queryEmbedding,
-    match_tenant_id: tenantId,
-    match_count: 5,
-  });
+  return supabase.rpc(
+    "match_knowledge_chunks",
+    {
+      query_embedding:
+        queryEmbedding,
+
+      match_tenant_id:
+        tenantId,
+
+      match_count: 5,
+    }
+  );
 }
 
 async function meterOpenAIUsage(
   tenantId: string,
   threadId: string,
-  completion: OpenAI.Chat.Completions.ChatCompletion
+  completion:
+    OpenAI.Chat.Completions.ChatCompletion
 ) {
   const usage =
     completion.usage;

@@ -28,6 +28,11 @@ export const handleGmailHistoryChanged =
   inngest.createFunction(
     {
       id: "handle-gmail-history-changed",
+
+      concurrency: {
+        limit: 1,
+        key: "event.data.emailAddress",
+      },
     },
     {
       event: "gmail/history.changed",

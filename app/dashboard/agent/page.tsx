@@ -144,39 +144,78 @@ function PermissionBadge({
 function PermissionSelect({
   action,
   level,
+  onSaved,
+  onError,
 }: {
   action: string;
   level: PermissionLevel;
+  onSaved: (action: string, level: PermissionLevel) => void;
+  onError: (message: string) => void;
 }) {
-  return (
-    <form action={savePermission}>
-      <input type="hidden" name="action" value={action} />
+  const [saving, setSaving] = useState(false);
+  const [selectedLevel, setSelectedLevel] =
+    useState<PermissionLevel>(level);
 
-      <select
-        name="level"
-        defaultValue={level}
-        onChange={(event) => {
-          event.currentTarget.form?.requestSubmit();
-        }}
-        style={{
-          minWidth: 180,
-          padding: "9px 34px 9px 12px",
-          border: "1px solid #d4d4d8",
-          borderRadius: 8,
-          background: "#fff",
-          fontSize: 13,
-          fontWeight: 500,
-          color: "#18181b",
-          cursor: "pointer",
-        }}
-      >
-        <option value="denied">Never</option>
-        <option value="approval_required">
-          Approval required
-        </option>
-        <option value="allowed">Automatic</option>
-      </select>
-    </form>
+  useEffect(() => {
+    setSelectedLevel(level);
+  }, [level]);
+
+  async function handleChange(
+    event: React.ChangeEvent<HTMLSelectElement>
+  ) {
+    const newLevel = event.target.value as PermissionLevel;
+    const previousLevel = selectedLevel;
+
+    setSelectedLevel(newLevel);
+    setSaving(true);
+    onError("");
+
+    try {
+      const formData = new FormData();
+      formData.append("action", action);
+      formData.append("level", newLevel);
+
+      await savePermission(formData);
+
+      onSaved(action, newLevel);
+    } catch (error) {
+      setSelectedLevel(previousLevel);
+
+      onError(
+        error instanceof Error
+          ? error.message
+          : "Failed to save permission."
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <select
+      name="level"
+      value={selectedLevel}
+      onChange={handleChange}
+      disabled={saving}
+      style={{
+        minWidth: 180,
+        padding: "9px 34px 9px 12px",
+        border: "1px solid #d4d4d8",
+        borderRadius: 8,
+        background: saving ? "#f4f4f5" : "#fff",
+        fontSize: 13,
+        fontWeight: 500,
+        color: "#18181b",
+        cursor: saving ? "wait" : "pointer",
+        opacity: saving ? 0.7 : 1,
+      }}
+    >
+      <option value="denied">Never</option>
+      <option value="approval_required">
+        Approval required
+      </option>
+      <option value="allowed">Automatic</option>
+    </select>
   );
 }
 
@@ -301,6 +340,33 @@ export default function AgentPage() {
       permissions.find((permission) => permission.action === action)
         ?.level ?? "approval_required"
     );
+  }
+
+  function handlePermissionSaved(
+    action: string,
+    level: PermissionLevel
+  ) {
+    setPermissions((current) => {
+      const existing = current.find(
+        (permission) => permission.action === action
+      );
+
+      if (existing) {
+        return current.map((permission) =>
+          permission.action === action
+            ? { ...permission, level }
+            : permission
+        );
+      }
+
+      return [...current, { action, level }];
+    });
+
+    setMessage("Permission saved.");
+  }
+
+  function handlePermissionError(message: string) {
+    setMessage(message);
   }
 
   async function handleInstructionsSubmit(
@@ -495,7 +561,8 @@ export default function AgentPage() {
           maxWidth: 980,
           margin: "0 auto",
           padding: "48px 24px",
-          fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+          fontFamily:
+            "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
         }}
       >
         <div
@@ -537,7 +604,6 @@ export default function AgentPage() {
           padding: "48px 24px 80px",
         }}
       >
-        {/* Header */}
         <header style={{ marginBottom: 38 }}>
           <div
             style={{
@@ -746,6 +812,8 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
                   <PermissionSelect
                     action={action.key}
                     level={level}
+                    onSaved={handlePermissionSaved}
+                    onError={handlePermissionError}
                   />
                 </div>
               );
@@ -813,7 +881,7 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
                         : "1px solid #f0f0f1",
                   }}
                 >
-                  <div>
+                  <div style={{ minWidth: 0 }}>
                     <div
                       style={{
                         fontSize: 14,
@@ -842,6 +910,8 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
                   <PermissionSelect
                     action={action.key}
                     level={level}
+                    onSaved={handlePermissionSaved}
+                    onError={handlePermissionError}
                   />
                 </div>
               );

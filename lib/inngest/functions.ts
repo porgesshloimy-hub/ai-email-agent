@@ -91,6 +91,13 @@ export const handleGmailHistoryChanged =
       const startingHistoryId =
         connection.history_id ?? historyId;
 
+        console.log("GMAIL SYNC START", {
+  emailAddress,
+  notificationHistoryId: historyId,
+  storedHistoryId: connection.history_id,
+  startingHistoryId,
+});
+
       /**
        * Retrieve all messages added since the
        * last processed history ID.

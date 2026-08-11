@@ -27,6 +27,10 @@ export async function POST(req: NextRequest) {
 
   const event = await req.json();
 
+  console.error("===== FULL GOOGLE CHAT EVENT =====");
+console.error(JSON.stringify(event, null, 2));
+console.error("===== END GOOGLE CHAT EVENT =====");
+
   console.error("===== GOOGLE CHAT EVENT =====");
   console.error({
     type: event.type,

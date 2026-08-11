@@ -4,10 +4,21 @@ import { getGoogleAuthedClient } from "@/lib/google/authClient";
 async function getGmailClient(tenantId: string) {
   const auth = await getGoogleAuthedClient(tenantId);
 
-  return google.gmail({
+  const gmail = google.gmail({
     version: "v1",
     auth,
   });
+
+  const profile = await gmail.users.getProfile({
+    userId: "me",
+  });
+
+  console.log(
+    "GMAIL AUTHENTICATED AS:",
+    profile.data.emailAddress
+  );
+
+  return gmail;
 }
 
 /**

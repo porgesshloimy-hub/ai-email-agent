@@ -4,6 +4,8 @@ import {
   createServiceSupabase,
 } from "@/lib/supabase/server";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   try {
     // Identify the currently logged-in user.

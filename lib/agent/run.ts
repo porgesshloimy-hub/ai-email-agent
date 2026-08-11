@@ -765,14 +765,17 @@ function extractTopicTags(
 /**
  * Knowledge search.
  *
- * For now this returns an empty array. The agent
- * still works without it. We'll wire the actual
- * pgvector knowledge retrieval separately.
+ * Converts the incoming email into an embedding, then searches
+ * this tenant's knowledge base using pgvector.
  */
 async function searchKnowledge(
   tenantId: string,
   queryText: string
 ): Promise<string[]> {
+  if (!queryText.trim()) {
+    return [];
+  }
+
   try {
     const embeddingResponse = await openai.embeddings.create({
       model: "text-embedding-3-small",
@@ -786,9 +789,15 @@ async function searchKnowledge(
       return [];
     }
 
-    const { data, error } = await supabaseMatchKnowledge(
-      tenantId,
-      queryEmbedding
+    const supabase = createServiceSupabase();
+
+    const { data, error } = await supabase.rpc(
+      "match_knowledge_chunks",
+      {
+        query_embedding: queryEmbedding,
+        match_tenant_id: tenantId,
+        match_count: 5,
+      }
     );
 
     if (error) {
@@ -803,12 +812,14 @@ async function searchKnowledge(
           similarity?: number | null;
         }) =>
           typeof chunk.content === "string" &&
-          chunk.content.trim().length > 0
+          chunk.content.trim().length > 0 &&
+          typeof chunk.similarity === "number" &&
+          chunk.similarity >= 0.65
       )
       .map(
         (chunk: {
           content: string;
-          similarity?: number | null;
+          similarity: number;
         }) => chunk.content
       );
   } catch (error) {

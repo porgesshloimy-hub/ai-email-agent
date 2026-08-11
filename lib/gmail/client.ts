@@ -14,7 +14,10 @@ async function getGmailClient(tenantId: string) {
     userId: "me",
   });
 
-  console.log("GMAIL AUTHENTICATED AS:", profile.data.emailAddress);
+  console.log(
+    "GMAIL AUTHENTICATED AS:",
+    profile.data.emailAddress
+  );
 
   return gmail;
 }
@@ -66,15 +69,18 @@ export async function readMessage(
 
     return message.data;
   } catch (error: any) {
-    console.error("GMAIL READ MESSAGE FAILED:", {
-      tenantId,
-      messageId,
-      errorCode: error?.code,
-      errorMessage: error?.message,
-      status: error?.response?.status,
-      statusText: error?.response?.statusText,
-      responseData: error?.response?.data,
-    });
+    console.error(
+      "GMAIL READ MESSAGE FAILED:",
+      {
+        tenantId,
+        messageId,
+        errorCode: error?.code,
+        errorMessage: error?.message,
+        status: error?.response?.status,
+        statusText: error?.response?.statusText,
+        responseData: error?.response?.data,
+      }
+    );
 
     throw error;
   }
@@ -84,13 +90,15 @@ export async function readMessage(
  * Get new Gmail messages since a previous historyId.
  *
  * Gmail's History API only tells us which message IDs changed.
- * We then retrieve each complete message and extract:
+ * We retrieve each complete message and filter out:
  *
- * - messageId
- * - threadId
- * - from
- * - subject
- * - bodyText
+ * - Promotions
+ * - Automated emails
+ * - No-reply emails
+ * - Bulk email
+ * - Mailing lists
+ * - Auto-submitted email
+ * - Gmail Updates category
  */
 export async function getHistoryChanges(
   tenantId: string,
@@ -127,28 +135,28 @@ export async function getHistoryChanges(
       tenantId,
       startHistoryId,
       returnedHistoryId: response.data.historyId,
-      historyCount: response.data.history?.length ?? 0,
-      nextPageToken: response.data.nextPageToken,
+      historyCount:
+        response.data.history?.length ?? 0,
+      nextPageToken:
+        response.data.nextPageToken,
     });
 
     if (response.data.historyId) {
-      latestHistoryId = response.data.historyId;
+      latestHistoryId =
+        response.data.historyId;
     }
 
     for (const history of response.data.history ?? []) {
       for (const messageAdded of history.messagesAdded ?? []) {
-        const messageId = messageAdded.message?.id;
-        const threadId = messageAdded.message?.threadId;
+        const messageId =
+          messageAdded.message?.id;
 
-        console.log("GMAIL HISTORY MESSAGE FOUND:", {
-          tenantId,
-          messageId,
-          threadId,
-        });
+        const threadId =
+          messageAdded.message?.threadId;
 
         if (!messageId || !threadId) {
           console.log(
-            "GMAIL HISTORY MESSAGE SKIPPED: missing messageId or threadId",
+            "GMAIL HISTORY MESSAGE SKIPPED: missing IDs",
             {
               tenantId,
               messageId,
@@ -159,20 +167,30 @@ export async function getHistoryChanges(
           continue;
         }
 
-        console.log("GMAIL FETCHING NEW MESSAGE:", {
-          tenantId,
-          messageId,
-          threadId,
-        });
+        console.log(
+          "GMAIL HISTORY MESSAGE FOUND:",
+          {
+            tenantId,
+            messageId,
+            threadId,
+          }
+        );
 
         let message;
 
         try {
-          message = await readMessage(
-            tenantId,
-            messageId
-          );
+          message =
+            await readMessage(
+              tenantId,
+              messageId
+            );
         } catch (error: any) {
+          /**
+           * Gmail can report a message in history
+           * that has already been deleted.
+           *
+           * Do not fail the entire history run.
+           */
           if (error?.code === 404) {
             console.warn(
               "GMAIL MESSAGE NO LONGER EXISTS:",
@@ -203,24 +221,138 @@ export async function getHistoryChanges(
           message.payload?.headers ?? [];
 
         const from =
-          getHeaderValue(headers, "From") ?? "";
+          getHeaderValue(
+            headers,
+            "From"
+          ) ?? "";
 
         const subject =
-          getHeaderValue(headers, "Subject") ?? "";
+          getHeaderValue(
+            headers,
+            "Subject"
+          ) ?? "";
+
+        /**
+         * ----------------------------------------------------
+         * AUTOMATED EMAIL DETECTION
+         * ----------------------------------------------------
+         */
+
+        const autoSubmitted =
+          getHeaderValue(
+            headers,
+            "Auto-Submitted"
+          );
+
+        const precedence =
+          getHeaderValue(
+            headers,
+            "Precedence"
+          )?.toLowerCase();
+
+        const listUnsubscribe =
+          getHeaderValue(
+            headers,
+            "List-Unsubscribe"
+          );
+
+        const fromLower =
+          from.toLowerCase();
+
+        const isNoReply =
+          /(^|[\s<])(no-?reply|noreply|donotreply|do-not-reply)([@\s>]|$)/i.test(
+            fromLower
+          );
+
+        const isBulk =
+          precedence === "bulk";
+
+        const isList =
+          precedence === "list";
+
+        const isAutomated =
+          Boolean(autoSubmitted) ||
+          isBulk ||
+          isList ||
+          Boolean(listUnsubscribe) ||
+          isNoReply;
+
+        /**
+         * ----------------------------------------------------
+         * GMAIL CATEGORY FILTER
+         * ----------------------------------------------------
+         *
+         * Promotions and Updates are not treated as
+         * normal customer conversations.
+         */
+        const labelIds =
+          message.labelIds ?? [];
+
+        const isPromotions =
+          labelIds.includes(
+            "CATEGORY_PROMOTIONS"
+          );
+
+        const isUpdates =
+          labelIds.includes(
+            "CATEGORY_UPDATES"
+          );
+
+        if (
+          isAutomated ||
+          isPromotions ||
+          isUpdates
+        ) {
+          let reason = "automated";
+
+          if (isPromotions) {
+            reason = "promotions";
+          } else if (isUpdates) {
+            reason = "updates";
+          } else if (isNoReply) {
+            reason = "no-reply";
+          } else if (autoSubmitted) {
+            reason = "auto-submitted";
+          } else if (isBulk) {
+            reason = "bulk";
+          } else if (isList) {
+            reason = "mailing-list";
+          } else if (listUnsubscribe) {
+            reason = "list-unsubscribe";
+          }
+
+          console.log(
+            "GMAIL MESSAGE IGNORED:",
+            {
+              tenantId,
+              messageId,
+              threadId,
+              from,
+              subject,
+              reason,
+            }
+          );
+
+          continue;
+        }
 
         const bodyText =
           extractPlainTextBody(
             message.payload
           ) ?? "";
 
-        console.log("GMAIL MESSAGE EXTRACTED:", {
-          tenantId,
-          messageId,
-          threadId,
-          from,
-          subject,
-          bodyLength: bodyText.length,
-        });
+        console.log(
+          "GMAIL MESSAGE ACCEPTED:",
+          {
+            tenantId,
+            messageId,
+            threadId,
+            from,
+            subject,
+            bodyLength:
+              bodyText.length,
+          }
+        );
 
         messages.push({
           messageId,
@@ -237,12 +369,16 @@ export async function getHistoryChanges(
       undefined;
   } while (pageToken);
 
-  console.log("GMAIL HISTORY COMPLETE:", {
-    tenantId,
-    startHistoryId,
-    latestHistoryId,
-    messagesFound: messages.length,
-  });
+  console.log(
+    "GMAIL HISTORY COMPLETE:",
+    {
+      tenantId,
+      startHistoryId,
+      latestHistoryId,
+      messagesFound:
+        messages.length,
+    }
+  );
 
   return {
     historyId: latestHistoryId,
@@ -261,7 +397,10 @@ export async function getHistoryChanges(
 export async function watchGmail(
   tenantId: string
 ) {
-  const gmail = await getGmailClient(tenantId);
+  const gmail =
+    await getGmailClient(
+      tenantId
+    );
 
   const topicName =
     process.env.GOOGLE_PUBSUB_TOPIC;
@@ -272,10 +411,13 @@ export async function watchGmail(
     );
   }
 
-  console.log("GMAIL WATCH REQUEST:", {
-    tenantId,
-    topicName,
-  });
+  console.log(
+    "GMAIL WATCH REQUEST:",
+    {
+      tenantId,
+      topicName,
+    }
+  );
 
   const response =
     await gmail.users.watch({
@@ -283,15 +425,21 @@ export async function watchGmail(
       requestBody: {
         topicName,
         labelIds: ["INBOX"],
-        labelFilterAction: "include",
+        labelFilterAction:
+          "include",
       },
     });
 
-  console.log("GMAIL WATCH CREATED:", {
-    tenantId,
-    historyId: response.data.historyId,
-    expiration: response.data.expiration,
-  });
+  console.log(
+    "GMAIL WATCH CREATED:",
+    {
+      tenantId,
+      historyId:
+        response.data.historyId,
+      expiration:
+        response.data.expiration,
+    }
+  );
 
   return response.data;
 }
@@ -312,10 +460,18 @@ export async function createDraft(
   body: string,
   originalMessageId?: string
 ) {
-  const gmail = await getGmailClient(tenantId);
+  const gmail =
+    await getGmailClient(
+      tenantId
+    );
 
-  let messageIdHeader: string | undefined;
-  let referencesHeader: string | undefined;
+  let messageIdHeader:
+    | string
+    | undefined;
+
+  let referencesHeader:
+    | string
+    | undefined;
 
   try {
     if (originalMessageId) {
@@ -331,8 +487,8 @@ export async function createDraft(
         });
 
       const headers =
-        originalMessage.data.payload?.headers ??
-        [];
+        originalMessage.data.payload
+          ?.headers ?? [];
 
       messageIdHeader =
         getHeaderValue(
@@ -367,8 +523,8 @@ export async function createDraft(
           ];
 
         const headers =
-          latestMessage.payload?.headers ??
-          [];
+          latestMessage.payload
+            ?.headers ?? [];
 
         messageIdHeader =
           getHeaderValue(
@@ -384,26 +540,20 @@ export async function createDraft(
       }
     }
   } catch (error) {
-    /**
-     * Don't prevent draft creation if retrieving the
-     * threading headers fails.
-     *
-     * Gmail's threadId still provides conversation-level
-     * threading.
-     */
     console.warn(
       "Could not retrieve Gmail threading headers:",
       error
     );
   }
 
-  const raw = buildRawMessage({
-    to,
-    subject,
-    body,
-    messageIdHeader,
-    referencesHeader,
-  });
+  const raw =
+    buildRawMessage({
+      to,
+      subject,
+      body,
+      messageIdHeader,
+      referencesHeader,
+    });
 
   const draft =
     await gmail.users.drafts.create({
@@ -426,7 +576,10 @@ export async function sendDraft(
   tenantId: string,
   draftId: string
 ) {
-  const gmail = await getGmailClient(tenantId);
+  const gmail =
+    await getGmailClient(
+      tenantId
+    );
 
   const sent =
     await gmail.users.drafts.send({
@@ -446,7 +599,10 @@ export async function archiveThread(
   tenantId: string,
   threadId: string
 ) {
-  const gmail = await getGmailClient(tenantId);
+  const gmail =
+    await getGmailClient(
+      tenantId
+    );
 
   return gmail.users.threads.modify({
     userId: "me",
@@ -467,20 +623,23 @@ function getHeaderValue(
   }>,
   name: string
 ): string | undefined {
-  const header = headers.find(
-    (header) =>
-      header.name?.toLowerCase() ===
-      name.toLowerCase()
-  );
+  const header =
+    headers.find(
+      (header) =>
+        header.name?.toLowerCase() ===
+        name.toLowerCase()
+    );
 
-  return header?.value ?? undefined;
+  return (
+    header?.value ??
+    undefined
+  );
 }
 
 /**
  * Extract readable text from a Gmail message payload.
  *
  * Handles:
- *
  * - text/plain
  * - multipart messages
  * - text/html as a fallback
@@ -493,7 +652,8 @@ function extractPlainTextBody(
   }
 
   if (
-    payload.mimeType === "text/plain" &&
+    payload.mimeType ===
+      "text/plain" &&
     payload.body?.data
   ) {
     return Buffer.from(
@@ -505,7 +665,9 @@ function extractPlainTextBody(
   if (payload.parts) {
     for (const part of payload.parts) {
       const text =
-        extractPlainTextBody(part);
+        extractPlainTextBody(
+          part
+        );
 
       if (text) {
         return text;
@@ -514,13 +676,15 @@ function extractPlainTextBody(
   }
 
   if (
-    payload.mimeType === "text/html" &&
+    payload.mimeType ===
+      "text/html" &&
     payload.body?.data
   ) {
-    const html = Buffer.from(
-      payload.body.data,
-      "base64url"
-    ).toString("utf8");
+    const html =
+      Buffer.from(
+        payload.body.data,
+        "base64url"
+      ).toString("utf8");
 
     return htmlToText(html);
   }

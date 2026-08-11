@@ -14,7 +14,7 @@ import { notifyApproval } from "@/lib/notify";
 import { recordUsage } from "@/lib/billing/meter";
 import { calculateOpenAICost } from "@/lib/billing/pricing";
 
-const OPENAI_MODEL = "gpt-4o";
+const OPENAI_MODEL = "gpt-5-nano";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -70,14 +70,26 @@ export async function processIncomingEmail(
       description: string;
     }[];
 
-  const ruleCheck =
-    checkRulesForTopic(
-      rules,
-      extractTopicTags(
-        email.subject,
-        email.bodyText
-      )
+ const topicTags = extractTopicTags(
+  email.subject,
+  email.bodyText
+);
+
+const ruleCheck =
+  checkRulesForTopic(
+    rules,
+    topicTags
+  );
+
+  const relevantRules =
+  rules.filter((rule) => {
+    const description =
+      rule.description.toLowerCase();
+
+    return topicTags.some((tag) =>
+      description.includes(tag)
     );
+  });
 
   const relevantKnowledge =
     await searchKnowledge(
@@ -115,10 +127,10 @@ export async function processIncomingEmail(
 
             "Rules you must follow:",
 
-            ...rules.map(
-              (rule) =>
-                `- ${rule.description}`
-            ),
+           ...relevantRules.map(
+  (rule) =>
+    `- ${rule.description}`
+),
 
             "Relevant business knowledge:",
 

@@ -112,7 +112,10 @@ const ruleCheck =
       calendarWriteCapability,
     });
 
-  const completion =
+  let completion;
+
+try {
+  completion =
     await openai.chat.completions.create({
       model: OPENAI_MODEL,
 
@@ -153,10 +156,13 @@ const ruleCheck =
         },
       ],
 
-      tools,
-
+          tools,
       tool_choice: "auto",
     });
+} catch (error) {
+  console.error("OPENAI ERROR:", error);
+  throw error;
+}
 
   await meterOpenAIUsage(
     email.tenantId,

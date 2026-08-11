@@ -51,19 +51,33 @@ export async function readMessage(
     messageId,
   });
 
-  const message = await gmail.users.messages.get({
-    userId: "me",
-    id: messageId,
-    format: "full",
-  });
+  try {
+    const message = await gmail.users.messages.get({
+      userId: "me",
+      id: messageId,
+      format: "full",
+    });
 
-  console.log("GMAIL READ MESSAGE SUCCESS:", {
-    tenantId,
-    messageId,
-    threadId: message.data.threadId,
-  });
+    console.log("GMAIL READ MESSAGE SUCCESS:", {
+      tenantId,
+      messageId,
+      threadId: message.data.threadId,
+    });
 
-  return message.data;
+    return message.data;
+  } catch (error: any) {
+    console.error("GMAIL READ MESSAGE FAILED:", {
+      tenantId,
+      messageId,
+      errorCode: error?.code,
+      errorMessage: error?.message,
+      status: error?.response?.status,
+      statusText: error?.response?.statusText,
+      responseData: error?.response?.data,
+    });
+
+    throw error;
+  }
 }
 
 /**

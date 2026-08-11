@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
 
   if (!tenantId) {
     return NextResponse.json({
-      text: "I don't recognize this Google account yet. Connect it from your dashboard's Settings page under \"Google Chat\" first.",
+      text: `I don't recognize this Google account yet. Connect it from your dashboard's Settings page under "Google Chat" first.`,
     });
   }
 

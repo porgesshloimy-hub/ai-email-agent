@@ -11,33 +11,64 @@ import { reconcileUnreportedUsage } from "@/lib/billing/meter";
  * Fires on every Gmail push notification.
  *
  * Gmail sends:
+ *
  * {
  *   emailAddress,
  *   historyId
  * }
  *
  * We:
+ *
  * 1. Find the tenant that owns the Gmail account.
  * 2. Compare Gmail history against our stored history_id.
  * 3. Retrieve newly-added messages.
  * 4. Send each message through the AI agent.
- * 5. Save the newest historyId so we don't process the same
- *    messages again.
+ * 5. Save the newest historyId.
+ *
+ * IMPORTANT:
+ *
+ * Inngest concurrency is NOT our duplicate protection.
+ * The database idempotency constraint in processIncomingEmail()
+ * is the final protection against duplicate processing.
  */
 export const handleGmailHistoryChanged =
   inngest.createFunction(
     {
-      id: "handle-gmail-history-changed",
+      id:
+        "handle-gmail-history-changed",
 
+      /**
+       * Prevent the exact same Gmail notification from causing
+       * multiple function executions within Inngest's
+       * idempotency window.
+       */
+      idempotency:
+        "event.data.emailAddress + '-' + event.data.historyId",
+
+      /**
+       * Keep Gmail processing for a mailbox serialized as much
+       * as Inngest allows.
+       *
+       * This is useful for resource control, but is NOT relied
+       * upon for correctness.
+       */
       concurrency: {
         limit: 1,
-        key: "event.data.emailAddress",
+
+        key:
+          "event.data.emailAddress",
       },
     },
+
     {
-      event: "gmail/history.changed",
+      event:
+        "gmail/history.changed",
     },
-    async ({ event, step }) => {
+
+    async ({
+      event,
+      step,
+    }) => {
       const {
         emailAddress,
         historyId,
@@ -47,16 +78,23 @@ export const handleGmailHistoryChanged =
         createServiceSupabase();
 
       /**
-       * Find the Gmail connection belonging
-       * to this email address.
+       * --------------------------------------------------------
+       * FIND GMAIL CONNECTION
+       * --------------------------------------------------------
        */
+
       const connection =
         await step.run(
           "find-gmail-connection",
           async () => {
-            const { data, error } =
+            const {
+              data,
+              error,
+            } =
               await supabase
-                .from("gmail_connections")
+                .from(
+                  "gmail_connections"
+                )
                 .select(
                   "tenant_id, history_id"
                 )
@@ -87,26 +125,36 @@ export const handleGmailHistoryChanged =
         connection.tenant_id;
 
       /**
-       * Determine which history ID we should
-       * use as the starting point.
-       *
-       * On the very first notification, there
-       * may not yet be a stored history_id.
+       * --------------------------------------------------------
+       * HISTORY CURSOR
+       * --------------------------------------------------------
        */
-      const startingHistoryId =
-        connection.history_id ?? historyId;
 
-        console.log("GMAIL SYNC START", {
-  emailAddress,
-  notificationHistoryId: historyId,
-  storedHistoryId: connection.history_id,
-  startingHistoryId,
-});
+      const startingHistoryId =
+        connection.history_id ??
+        historyId;
+
+      console.log(
+        "GMAIL SYNC START",
+        {
+          emailAddress,
+
+          notificationHistoryId:
+            historyId,
+
+          storedHistoryId:
+            connection.history_id,
+
+          startingHistoryId,
+        }
+      );
 
       /**
-       * Retrieve all messages added since the
-       * last processed history ID.
+       * --------------------------------------------------------
+       * GET HISTORY CHANGES
+       * --------------------------------------------------------
        */
+
       const historyResult =
         await step.run(
           "diff-history",
@@ -121,46 +169,103 @@ export const handleGmailHistoryChanged =
       const newMessages =
         historyResult.messages;
 
+      console.log(
+        "GMAIL MESSAGES TO PROCESS:",
+        {
+          tenantId,
+
+          emailAddress,
+
+          notificationHistoryId:
+            historyId,
+
+          startingHistoryId,
+
+          latestHistoryId:
+            historyResult.historyId,
+
+          messageCount:
+            newMessages.length,
+
+          messageIds:
+            newMessages.map(
+              (message) =>
+                message.messageId
+            ),
+        }
+      );
+
       /**
-       * Process every newly received email
-       * through the AI agent.
+       * --------------------------------------------------------
+       * PROCESS MESSAGES
+       * --------------------------------------------------------
+       *
+       * processIncomingEmail() now contains a database-level
+       * idempotency guard.
        */
-      for (const message of newMessages) {
+
+      for (
+        const message of newMessages
+      ) {
         await step.run(
           `process-${message.messageId}`,
           async () => {
-            await processIncomingEmail({
-              tenantId,
-              threadId:
-                message.threadId,
-              messageId:
-                message.messageId,
-              from: message.from,
-              subject:
-                message.subject,
-              bodyText:
-                message.bodyText,
-            });
+            const result =
+              await processIncomingEmail({
+                tenantId,
+
+                threadId:
+                  message.threadId,
+
+                messageId:
+                  message.messageId,
+
+                from:
+                  message.from,
+
+                subject:
+                  message.subject,
+
+                bodyText:
+                  message.bodyText,
+              });
+
+            console.log(
+              "GMAIL MESSAGE PROCESS RESULT:",
+              {
+                tenantId,
+
+                messageId:
+                  message.messageId,
+
+                result,
+              }
+            );
+
+            return result;
           }
         );
       }
 
       /**
-       * IMPORTANT:
+       * --------------------------------------------------------
+       * UPDATE HISTORY CURSOR
+       * --------------------------------------------------------
        *
-       * Only update our stored history ID after
-       * all messages have successfully gone
-       * through the agent.
-       *
-       * This prevents us from losing messages if
-       * the AI processing fails halfway through.
+       * Only update the cursor after all messages have
+       * successfully passed through the agent.
        */
+
       await step.run(
         "update-history-id",
         async () => {
-          const { error } =
+          const {
+            error,
+          } =
             await supabase
-              .from("gmail_connections")
+              .from(
+                "gmail_connections"
+              )
               .update({
                 history_id:
                   historyResult.historyId,
@@ -175,39 +280,60 @@ export const handleGmailHistoryChanged =
               `Failed to update Gmail history ID: ${error.message}`
             );
           }
+
+          console.log(
+            "GMAIL HISTORY UPDATED:",
+            {
+              tenantId,
+
+              previousHistoryId:
+                startingHistoryId,
+
+              newHistoryId:
+                historyResult.historyId,
+            }
+          );
         }
       );
 
       return {
         processed:
           newMessages.length,
+
         historyId:
           historyResult.historyId,
       };
     }
   );
 
+
 /**
  * Gmail watch() expires roughly every 7 days.
  *
- * This runs every 12 hours and renews watches
- * that are approaching expiration.
+ * This runs every 12 hours and renews watches that are
+ * approaching expiration.
  */
 export const renewGmailWatches =
   inngest.createFunction(
     {
-      id: "renew-gmail-watches",
+      id:
+        "renew-gmail-watches",
     },
+
     {
-      cron: "0 */12 * * *",
+      cron:
+        "0 */12 * * *",
     },
-    async ({ step }) => {
+
+    async ({
+      step,
+    }) => {
       const supabase =
         createServiceSupabase();
 
       /**
-       * Find Gmail connections whose watch
-       * expires within the next 24 hours.
+       * Find Gmail connections whose watch expires
+       * within the next 24 hours.
        */
       const connections =
         await step.run(
@@ -216,12 +342,20 @@ export const renewGmailWatches =
             const expiration =
               new Date(
                 Date.now() +
-                  24 * 60 * 60 * 1000
+                  24 *
+                    60 *
+                    60 *
+                    1000
               ).toISOString();
 
-            const { data, error } =
+            const {
+              data,
+              error,
+            } =
               await supabase
-                .from("gmail_connections")
+                .from(
+                  "gmail_connections"
+                )
                 .select(
                   "tenant_id, watch_expiry"
                 )
@@ -247,10 +381,9 @@ export const renewGmailWatches =
 
       let renewed = 0;
 
-      /**
-       * Renew each Gmail watch.
-       */
-      for (const connection of connections) {
+      for (
+        const connection of connections
+      ) {
         await step.run(
           `renew-watch-${connection.tenant_id}`,
           async () => {
@@ -259,10 +392,6 @@ export const renewGmailWatches =
                 connection.tenant_id
               );
 
-            /**
-             * Gmail returns an expiration
-             * timestamp in milliseconds.
-             */
             const expiration =
               watch.expiration;
 
@@ -274,10 +403,14 @@ export const renewGmailWatches =
 
             const watchExpiry =
               new Date(
-                Number(expiration)
+                Number(
+                  expiration
+                )
               ).toISOString();
 
-            const { error } =
+            const {
+              error,
+            } =
               await supabase
                 .from(
                   "gmail_connections"
@@ -285,6 +418,7 @@ export const renewGmailWatches =
                 .update({
                   watch_expiry:
                     watchExpiry,
+
                   history_id:
                     watch.historyId ??
                     undefined,
@@ -308,41 +442,51 @@ export const renewGmailWatches =
       return {
         checked:
           connections.length,
+
         renewed,
       };
     }
   );
 
+
 /**
- * Retries usage events that failed to report
- * to Stripe.
+ * Retries usage events that failed to report to Stripe.
  *
  * Runs hourly as a safety net.
  */
 export const reconcileUsageReporting =
   inngest.createFunction(
     {
-      id: "reconcile-usage-reporting",
+      id:
+        "reconcile-usage-reporting",
     },
+
     {
-      cron: "0 * * * *",
+      cron:
+        "0 * * * *",
     },
-    async ({ step }) => {
+
+    async ({
+      step,
+    }) => {
       const supabase =
         createServiceSupabase();
 
-      /**
-       * Find tenants that have unreported
-       * usage events.
-       */
       const tenantIds =
         await step.run(
           "find-tenants-with-unreported-usage",
           async () => {
-            const { data, error } =
+            const {
+              data,
+              error,
+            } =
               await supabase
-                .from("usage_events")
-                .select("tenant_id")
+                .from(
+                  "usage_events"
+                )
+                .select(
+                  "tenant_id"
+                )
                 .eq(
                   "stripe_reported",
                   false
@@ -367,11 +511,9 @@ export const reconcileUsageReporting =
 
       let totalRetried = 0;
 
-      /**
-       * Retry each tenant's failed usage
-       * reporting.
-       */
-      for (const tenantId of tenantIds) {
+      for (
+        const tenantId of tenantIds
+      ) {
         const result =
           await step.run(
             `reconcile-${tenantId}`,
@@ -388,6 +530,7 @@ export const reconcileUsageReporting =
       return {
         tenantsChecked:
           tenantIds.length,
+
         eventsRetried:
           totalRetried,
       };

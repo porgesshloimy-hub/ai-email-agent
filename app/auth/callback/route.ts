@@ -40,11 +40,12 @@ export async function GET(request: Request) {
   }
 
   // Check whether this user already has a tenant.
-  const { data: existingTenant, error: tenantLookupError } = await supabase
-    .from("tenants")
-    .select("id")
-    .eq("owner_user_id", user.id)
-    .maybeSingle();
+  const { data: existingTenant, error: tenantLookupError } =
+    await supabase
+      .from("tenants")
+      .select("id")
+      .eq("owner_user_id", user.id)
+      .maybeSingle();
 
   if (tenantLookupError) {
     console.error(
@@ -59,18 +60,11 @@ export async function GET(request: Request) {
 
   // Create a tenant for brand-new users.
   if (!existingTenant) {
-    const googleEmail = user.email ?? null;
-
     const { error: tenantCreateError } = await supabase
       .from("tenants")
       .insert({
         owner_user_id: user.id,
-        business_name:
-          user.user_metadata?.full_name ||
-          user.user_metadata?.name ||
-          googleEmail ||
-          "My Business",
-        owner_google_email: googleEmail,
+        owner_google_email: user.email ?? null,
       });
 
     if (tenantCreateError) {
@@ -83,6 +77,11 @@ export async function GET(request: Request) {
         new URL("/?error=tenant_creation_failed", requestUrl.origin)
       );
     }
+
+    console.log(
+      "Created new tenant for user:",
+      user.id
+    );
   }
 
   return NextResponse.redirect(

@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 
-export async function GET(request: Request) {
-  const requestUrl = new URL(request.url);
-
-  const redirectUri =
-    `${requestUrl.origin}/api/auth/google/callback`;
-
+export async function GET() {
   const state = crypto.randomBytes(32).toString("hex");
+
+  // Always use the canonical production URL so the OAuth
+  // redirect URI does not change depending on which hostname
+  // the user happened to visit.
+  const redirectUri =
+    "https://www.primeautomatic.com/api/auth/google/callback";
 
   const scopes = [
     "openid",
@@ -25,12 +26,10 @@ export async function GET(request: Request) {
     "client_id",
     process.env.GOOGLE_CLIENT_ID!
   );
-
   googleUrl.searchParams.set(
     "redirect_uri",
     redirectUri
   );
-
   googleUrl.searchParams.set("response_type", "code");
   googleUrl.searchParams.set("scope", scopes);
   googleUrl.searchParams.set("access_type", "offline");
@@ -39,9 +38,11 @@ export async function GET(request: Request) {
 
   const response = NextResponse.redirect(googleUrl);
 
+  // Store the OAuth state in a secure cookie so the callback
+  // can verify that this is the same OAuth flow we started.
   response.cookies.set("google_oauth_state", state, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: true,
     sameSite: "lax",
     maxAge: 10 * 60,
     path: "/",

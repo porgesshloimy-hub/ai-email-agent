@@ -12,13 +12,11 @@ export default async function BillingPage() {
 
   if (!user) {
     return (
-      <main className="min-h-screen bg-slate-50 px-6 py-12">
-        <div className="mx-auto max-w-5xl">
-          <div className="rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
-            <h1 className="text-xl font-semibold text-slate-900">
-              Usage & billing
-            </h1>
-            <p className="mt-2 text-sm text-slate-500">
+      <main style={styles.page}>
+        <div style={styles.container}>
+          <div style={styles.card}>
+            <h1 style={styles.title}>Usage & billing</h1>
+            <p style={styles.muted}>
               Please sign in to view your billing information.
             </p>
           </div>
@@ -73,215 +71,235 @@ export default async function BillingPage() {
     year: "numeric",
   });
 
+  const hasUsage = Object.keys(totals.byService).length > 0;
+
   return (
-    <main className="min-h-screen bg-slate-50">
-      <div className="mx-auto max-w-5xl px-6 py-10 lg:px-8">
+    <main style={styles.page}>
+      <div style={styles.container}>
         {/* Header */}
-        <div className="mb-8">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <p className="text-sm font-medium text-slate-500">
-                Account
-              </p>
+        <header style={styles.header}>
+          <div>
+            <div style={styles.eyebrow}>ACCOUNT</div>
 
-              <h1 className="mt-1 text-3xl font-bold tracking-tight text-slate-900">
-                Usage & billing
-              </h1>
+            <h1 style={styles.title}>Usage & billing</h1>
 
-              <p className="mt-2 text-sm text-slate-500">
-                View your AI usage and current month charges.
-              </p>
-            </div>
-
-            <div className="text-sm text-slate-500">
-              {monthName}
-            </div>
+            <p style={styles.subtitle}>
+              View your current usage and charges.
+            </p>
           </div>
-        </div>
+
+          <div style={styles.monthBadge}>{monthName}</div>
+        </header>
 
         {/* Billing status */}
-        <div className="mb-6 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-          <div className="flex items-center justify-between gap-4 px-6 py-5">
-            <div className="flex items-center gap-4">
+        <section style={styles.statusCard}>
+          <div style={styles.statusLeft}>
+            <div
+              style={{
+                ...styles.statusIcon,
+                backgroundColor: tenant?.stripe_customer_id
+                  ? "#ecfdf5"
+                  : "#fffbeb",
+              }}
+            >
               <div
-                className={`flex h-10 w-10 items-center justify-center rounded-full ${
-                  tenant?.stripe_customer_id
-                    ? "bg-emerald-50"
-                    : "bg-amber-50"
-                }`}
-              >
-                <span
-                  className={`h-2.5 w-2.5 rounded-full ${
-                    tenant?.stripe_customer_id
-                      ? "bg-emerald-500"
-                      : "bg-amber-500"
-                  }`}
-                />
-              </div>
-
-              <div>
-                <p className="text-sm font-semibold text-slate-900">
-                  Billing status
-                </p>
-
-                <p className="mt-0.5 text-sm text-slate-500">
-                  {tenant?.stripe_customer_id
-                    ? "Your account is connected to billing."
-                    : "Billing is not connected yet."}
-                </p>
-              </div>
+                style={{
+                  ...styles.statusDot,
+                  backgroundColor: tenant?.stripe_customer_id
+                    ? "#10b981"
+                    : "#f59e0b",
+                }}
+              />
             </div>
 
-            <div
-              className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                tenant?.stripe_customer_id
-                  ? "bg-emerald-50 text-emerald-700"
-                  : "bg-amber-50 text-amber-700"
-              }`}
-            >
-              {tenant?.stripe_customer_id
-                ? "Active"
-                : "Not connected"}
+            <div>
+              <div style={styles.statusTitle}>Billing status</div>
+
+              <div style={styles.statusDescription}>
+                {tenant?.stripe_customer_id
+                  ? "Your account is connected and ready for billing."
+                  : "Billing is not connected yet."}
+              </div>
             </div>
           </div>
 
-          {!tenant?.stripe_customer_id && (
-            <div className="border-t border-amber-100 bg-amber-50/60 px-6 py-4">
-              <p className="text-sm leading-6 text-amber-800">
-                Usage is currently being tracked. Charges will begin once
-                billing is connected.
-              </p>
-            </div>
-          )}
-        </div>
-
-        {/* Current usage */}
-        <section className="mb-6">
-          <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-            <div className="border-b border-slate-100 px-6 py-5">
-              <p className="text-sm font-medium text-slate-500">
-                Current month
-              </p>
-
-              <div className="mt-2 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:gap-3">
-                <h2 className="text-4xl font-bold tracking-tight text-slate-900">
-                  {formatCurrency(totals.billed)}
-                </h2>
-
-                <span className="text-sm text-slate-500">
-                  total usage
-                </span>
-              </div>
-            </div>
-
-            {/* Usage breakdown */}
-            <div className="divide-y divide-slate-100">
-              <UsageRow
-                name="AI processing"
-                description="Email analysis and response generation"
-                amount={aiProcessing}
-                featured
-              />
-
-              {otherServices.map(([service, amount]) => (
-                <UsageRow
-                  key={service}
-                  name={formatServiceName(service)}
-                  amount={amount}
-                />
-              ))}
-
-              {Object.keys(totals.byService).length === 0 && (
-                <div className="px-6 py-10 text-center">
-                  <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-slate-100">
-                    <svg
-                      width="20"
-                      height="20"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.8"
-                      className="text-slate-400"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        d="M12 6v6l4 2"
-                      />
-                      <circle cx="12" cy="12" r="9" />
-                    </svg>
-                  </div>
-
-                  <p className="mt-4 text-sm font-medium text-slate-700">
-                    No usage recorded yet
-                  </p>
-
-                  <p className="mt-1 text-sm text-slate-500">
-                    Your usage for this month will appear here.
-                  </p>
-                </div>
-              )}
-            </div>
-
-            {/* Total */}
-            {Object.keys(totals.byService).length > 0 && (
-              <div className="border-t border-slate-200 bg-slate-50/70 px-6 py-5">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-semibold text-slate-700">
-                    Total
-                  </span>
-
-                  <span className="text-lg font-bold text-slate-900">
-                    {formatCurrency(totals.billed)}
-                  </span>
-                </div>
-              </div>
-            )}
+          <div
+            style={{
+              ...styles.statusBadge,
+              color: tenant?.stripe_customer_id
+                ? "#047857"
+                : "#b45309",
+              backgroundColor: tenant?.stripe_customer_id
+                ? "#ecfdf5"
+                : "#fffbeb",
+            }}
+          >
+            {tenant?.stripe_customer_id ? "Active" : "Not connected"}
           </div>
         </section>
 
-        {/* Pricing explanation */}
-        <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="flex gap-4">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100">
+        {/* Main usage card */}
+        <section style={styles.card}>
+          <div style={styles.cardHeader}>
+            <div>
+              <div style={styles.cardEyebrow}>CURRENT MONTH</div>
+
+              <div style={styles.totalRow}>
+                <h2 style={styles.total}>
+                  {formatCurrency(totals.billed)}
+                </h2>
+
+                <span style={styles.totalLabel}>total usage</span>
+              </div>
+            </div>
+
+            <div style={styles.calendarIcon}>
               <svg
-                width="19"
-                height="19"
+                width="22"
+                height="22"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="1.8"
               >
-                <circle cx="12" cy="12" r="9" />
-                <path
-                  strokeLinecap="round"
-                  d="M12 10v6"
+                <rect
+                  x="3"
+                  y="4"
+                  width="18"
+                  height="17"
+                  rx="3"
                 />
-                <path
-                  strokeLinecap="round"
-                  d="M12 7.5h.01"
-                />
+                <path d="M16 2v4M8 2v4M3 10h18" />
               </svg>
             </div>
+          </div>
 
-            <div>
-              <h3 className="text-sm font-semibold text-slate-900">
-                Usage-based billing
-              </h3>
+          {/* Usage breakdown */}
+          <div style={styles.breakdown}>
+            <UsageRow
+              name="AI processing"
+              description="Email analysis and response generation"
+              amount={aiProcessing}
+              featured
+            />
 
-              <p className="mt-1 text-sm leading-6 text-slate-500">
-                Your charges are based on the services used by your
-                account. AI processing is calculated based on the amount
-                of processing required for your emails, so your cost
-                scales naturally with your usage.
-              </p>
+            {otherServices.map(([service, amount]) => (
+              <UsageRow
+                key={service}
+                name={formatServiceName(service)}
+                amount={amount}
+              />
+            ))}
+
+            {!hasUsage && (
+              <div style={styles.emptyState}>
+                <div style={styles.emptyIcon}>
+                  <svg
+                    width="22"
+                    height="22"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                  >
+                    <circle cx="12" cy="12" r="9" />
+                    <path
+                      strokeLinecap="round"
+                      d="M12 7v5l3 2"
+                    />
+                  </svg>
+                </div>
+
+                <div style={styles.emptyTitle}>
+                  No usage recorded yet
+                </div>
+
+                <div style={styles.emptyText}>
+                  Your usage for this month will appear here.
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Total */}
+          {hasUsage && (
+            <div style={styles.totalFooter}>
+              <span style={styles.totalFooterLabel}>Total</span>
+
+              <span style={styles.totalFooterAmount}>
+                {formatCurrency(totals.billed)}
+              </span>
             </div>
+          )}
+        </section>
+
+        {/* How billing works */}
+        <section style={styles.infoCard}>
+          <div style={styles.infoIcon}>
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+            >
+              <circle cx="12" cy="12" r="9" />
+              <path
+                strokeLinecap="round"
+                d="M12 10v6"
+              />
+              <path
+                strokeLinecap="round"
+                d="M12 7.5h.01"
+              />
+            </svg>
+          </div>
+
+          <div>
+            <h3 style={styles.infoTitle}>
+              Usage-based billing
+            </h3>
+
+            <p style={styles.infoText}>
+              Your charges are based on the services used by
+              your account. AI processing scales with the amount
+              of work required to handle your emails, so you only
+              pay for the usage you generate.
+            </p>
           </div>
         </section>
+
+        {!tenant?.stripe_customer_id && (
+          <div style={styles.notice}>
+            <div style={styles.noticeIcon}>!</div>
+
+            <div>
+              <div style={styles.noticeTitle}>
+                Billing isn't connected yet
+              </div>
+
+              <div style={styles.noticeText}>
+                Your usage is being tracked. Charges will begin
+                once billing is connected.
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div style={styles.footer}>
+          Usage is calculated automatically and updated as your
+          account processes emails.
+        </div>
       </div>
     </main>
   );
 }
+
+
+/* ============================================================
+   Usage Row
+   ============================================================ */
 
 function UsageRow({
   name,
@@ -295,12 +313,16 @@ function UsageRow({
   featured?: boolean;
 }) {
   return (
-    <div className="flex items-center justify-between gap-6 px-6 py-5">
-      <div className="flex min-w-0 items-center gap-4">
+    <div style={styles.usageRow}>
+      <div style={styles.usageLeft}>
         <div
-          className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${
-            featured ? "bg-slate-900" : "bg-slate-100"
-          }`}
+          style={{
+            ...styles.serviceIcon,
+            backgroundColor: featured
+              ? "#0f172a"
+              : "#f1f5f9",
+            color: featured ? "#ffffff" : "#64748b",
+          }}
         >
           {featured ? (
             <svg
@@ -310,12 +332,11 @@ function UsageRow({
               fill="none"
               stroke="currentColor"
               strokeWidth="1.8"
-              className="text-white"
             >
               <path
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                d="M12 3l2.7 5.46L21 9.38l-4.5 4.38L17.56 20 12 17.08 6.44 20l1.06-6.24L3 9.38l6.3-.92L12 3z"
+                d="M12 3l2.7 5.46L21 9.38l-4.5 4.38L17.56 20 12 17.08 6.44 20l1.06-6.24L3 9.38 9.3 8.46 12 3z"
               />
             </svg>
           ) : (
@@ -326,7 +347,6 @@ function UsageRow({
               fill="none"
               stroke="currentColor"
               strokeWidth="1.8"
-              className="text-slate-500"
             >
               <circle cx="12" cy="12" r="8.5" />
               <path
@@ -337,27 +357,28 @@ function UsageRow({
           )}
         </div>
 
-        <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-slate-900">
-            {name}
-          </p>
+        <div>
+          <div style={styles.serviceName}>{name}</div>
 
           {description && (
-            <p className="mt-0.5 text-sm text-slate-500">
+            <div style={styles.serviceDescription}>
               {description}
-            </p>
+            </div>
           )}
         </div>
       </div>
 
-      <div className="shrink-0 text-right">
-        <p className="text-sm font-semibold text-slate-900">
-          {formatCurrency(amount)}
-        </p>
+      <div style={styles.serviceAmount}>
+        {formatCurrency(amount)}
       </div>
     </div>
   );
 }
+
+
+/* ============================================================
+   Currency Formatting
+   ============================================================ */
 
 function formatCurrency(amount: number): string {
   if (!Number.isFinite(amount) || amount <= 0) {
@@ -365,10 +386,14 @@ function formatCurrency(amount: number): string {
   }
 
   /*
-   * Very small usage amounts can otherwise all appear as $0.00.
-   * Show enough precision to make small AI-processing charges
-   * meaningful while keeping normal charges clean.
+   * AI usage can be less than one cent.
+   * Show additional precision for very small amounts so
+   * the customer can actually see their usage.
    */
+  if (amount < 0.001) {
+    return `$${amount.toFixed(5)}`;
+  }
+
   if (amount < 0.01) {
     return `$${amount.toFixed(4)}`;
   }
@@ -385,6 +410,11 @@ function formatCurrency(amount: number): string {
   }).format(amount);
 }
 
+
+/* ============================================================
+   Service Names
+   ============================================================ */
+
 function formatServiceName(service: string): string {
   const names: Record<string, string> = {
     openai: "AI processing",
@@ -395,3 +425,367 @@ function formatServiceName(service: string): string {
 
   return names[service] ?? service;
 }
+
+
+/* ============================================================
+   Styles
+   ============================================================ */
+
+const styles: Record<string, React.CSSProperties> = {
+  page: {
+    minHeight: "100vh",
+    background: "#f8fafc",
+    color: "#0f172a",
+    fontFamily:
+      'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    padding: "48px 24px 64px",
+  },
+
+  container: {
+    width: "100%",
+    maxWidth: "900px",
+    margin: "0 auto",
+  },
+
+  header: {
+    display: "flex",
+    alignItems: "flex-end",
+    justifyContent: "space-between",
+    gap: "24px",
+    marginBottom: "28px",
+  },
+
+  eyebrow: {
+    fontSize: "11px",
+    fontWeight: 700,
+    letterSpacing: "0.12em",
+    color: "#64748b",
+    marginBottom: "8px",
+  },
+
+  title: {
+    margin: 0,
+    fontSize: "32px",
+    lineHeight: 1.15,
+    fontWeight: 750,
+    letterSpacing: "-0.025em",
+    color: "#0f172a",
+  },
+
+  subtitle: {
+    margin: "9px 0 0",
+    fontSize: "15px",
+    lineHeight: 1.5,
+    color: "#64748b",
+  },
+
+  monthBadge: {
+    flexShrink: 0,
+    padding: "9px 14px",
+    borderRadius: "10px",
+    border: "1px solid #e2e8f0",
+    background: "#ffffff",
+    color: "#475569",
+    fontSize: "13px",
+    fontWeight: 600,
+    boxShadow: "0 1px 2px rgba(15, 23, 42, 0.04)",
+  },
+
+  card: {
+    background: "#ffffff",
+    border: "1px solid #e2e8f0",
+    borderRadius: "18px",
+    boxShadow: "0 4px 16px rgba(15, 23, 42, 0.04)",
+    overflow: "hidden",
+    marginBottom: "18px",
+  },
+
+  statusCard: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "20px",
+    padding: "18px 20px",
+    marginBottom: "18px",
+    background: "#ffffff",
+    border: "1px solid #e2e8f0",
+    borderRadius: "16px",
+    boxShadow: "0 2px 8px rgba(15, 23, 42, 0.03)",
+  },
+
+  statusLeft: {
+    display: "flex",
+    alignItems: "center",
+    gap: "14px",
+  },
+
+  statusIcon: {
+    width: "42px",
+    height: "42px",
+    borderRadius: "12px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  statusDot: {
+    width: "9px",
+    height: "9px",
+    borderRadius: "50%",
+  },
+
+  statusTitle: {
+    fontSize: "14px",
+    fontWeight: 700,
+    color: "#0f172a",
+  },
+
+  statusDescription: {
+    marginTop: "3px",
+    fontSize: "13px",
+    color: "#64748b",
+  },
+
+  statusBadge: {
+    flexShrink: 0,
+    padding: "6px 10px",
+    borderRadius: "999px",
+    fontSize: "12px",
+    fontWeight: 700,
+  },
+
+  cardHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "25px 26px 23px",
+    borderBottom: "1px solid #f1f5f9",
+  },
+
+  cardEyebrow: {
+    fontSize: "11px",
+    fontWeight: 700,
+    letterSpacing: "0.1em",
+    color: "#94a3b8",
+    marginBottom: "8px",
+  },
+
+  totalRow: {
+    display: "flex",
+    alignItems: "baseline",
+    gap: "10px",
+  },
+
+  total: {
+    margin: 0,
+    fontSize: "42px",
+    lineHeight: 1,
+    fontWeight: 750,
+    letterSpacing: "-0.04em",
+    color: "#0f172a",
+  },
+
+  totalLabel: {
+    fontSize: "13px",
+    color: "#94a3b8",
+    fontWeight: 500,
+  },
+
+  calendarIcon: {
+    width: "44px",
+    height: "44px",
+    borderRadius: "12px",
+    background: "#f8fafc",
+    color: "#64748b",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  breakdown: {
+    width: "100%",
+  },
+
+  usageRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "20px",
+    padding: "20px 26px",
+    borderBottom: "1px solid #f1f5f9",
+  },
+
+  usageLeft: {
+    display: "flex",
+    alignItems: "center",
+    gap: "14px",
+    minWidth: 0,
+  },
+
+  serviceIcon: {
+    flexShrink: 0,
+    width: "40px",
+    height: "40px",
+    borderRadius: "11px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  serviceName: {
+    fontSize: "14px",
+    fontWeight: 650,
+    color: "#0f172a",
+  },
+
+  serviceDescription: {
+    marginTop: "3px",
+    fontSize: "13px",
+    color: "#64748b",
+  },
+
+  serviceAmount: {
+    flexShrink: 0,
+    fontSize: "14px",
+    fontWeight: 700,
+    color: "#0f172a",
+  },
+
+  totalFooter: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "19px 26px",
+    background: "#f8fafc",
+  },
+
+  totalFooterLabel: {
+    fontSize: "14px",
+    fontWeight: 700,
+    color: "#475569",
+  },
+
+  totalFooterAmount: {
+    fontSize: "18px",
+    fontWeight: 750,
+    color: "#0f172a",
+  },
+
+  emptyState: {
+    padding: "50px 24px",
+    textAlign: "center",
+  },
+
+  emptyIcon: {
+    width: "48px",
+    height: "48px",
+    margin: "0 auto",
+    borderRadius: "14px",
+    background: "#f1f5f9",
+    color: "#94a3b8",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  emptyTitle: {
+    marginTop: "15px",
+    fontSize: "14px",
+    fontWeight: 650,
+    color: "#475569",
+  },
+
+  emptyText: {
+    marginTop: "4px",
+    fontSize: "13px",
+    color: "#94a3b8",
+  },
+
+  infoCard: {
+    display: "flex",
+    gap: "15px",
+    padding: "22px 24px",
+    background: "#ffffff",
+    border: "1px solid #e2e8f0",
+    borderRadius: "16px",
+    boxShadow: "0 2px 8px rgba(15, 23, 42, 0.03)",
+    marginBottom: "18px",
+  },
+
+  infoIcon: {
+    flexShrink: 0,
+    width: "40px",
+    height: "40px",
+    borderRadius: "11px",
+    background: "#f1f5f9",
+    color: "#64748b",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  infoTitle: {
+    margin: "1px 0 0",
+    fontSize: "14px",
+    fontWeight: 700,
+    color: "#0f172a",
+  },
+
+  infoText: {
+    margin: "5px 0 0",
+    fontSize: "13px",
+    lineHeight: 1.65,
+    color: "#64748b",
+  },
+
+  notice: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: "12px",
+    padding: "15px 17px",
+    background: "#fffbeb",
+    border: "1px solid #fde68a",
+    borderRadius: "14px",
+    marginBottom: "18px",
+  },
+
+  noticeIcon: {
+    width: "22px",
+    height: "22px",
+    flexShrink: 0,
+    borderRadius: "50%",
+    background: "#f59e0b",
+    color: "#ffffff",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: "12px",
+    fontWeight: 800,
+  },
+
+  noticeTitle: {
+    fontSize: "13px",
+    fontWeight: 700,
+    color: "#92400e",
+  },
+
+  noticeText: {
+    marginTop: "3px",
+    fontSize: "13px",
+    lineHeight: 1.5,
+    color: "#a16207",
+  },
+
+  muted: {
+    marginTop: "8px",
+    fontSize: "14px",
+    color: "#64748b",
+  },
+
+  footer: {
+    textAlign: "center",
+    paddingTop: "8px",
+    fontSize: "12px",
+    color: "#94a3b8",
+  },
+};

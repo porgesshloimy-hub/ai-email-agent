@@ -30,7 +30,7 @@ const OPENAI_MODEL = "gpt-5-nano";
  * because it shadowed the other inside a dead code path. 8 is what was
  * actually in effect in production, so that's what's kept here.
  */
-const MAX_AGENT_STEPS = 8;
+const MAX_AGENT_STEPS = 15;
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -368,9 +368,9 @@ export async function processIncomingEmail(
 
           "Never take actions that the current permissions do not authorize.",
 
-          "When an action is authorized, perform it if necessary.",
-
-          "When an action requires approval, create an approval request.",
+"When an action is authorized, perform it if necessary. Calendar invitations and Gmail replies are separate actions: creating a calendar event with an attendee sends the calendar invitation through Google Calendar, while send_reply/create_draft creates a separate Gmail message.",
+       
+"When an action requires approval, create an approval request.",
 
           "You may use multiple tools in sequence when necessary.",
 
@@ -916,6 +916,7 @@ export async function processIncomingEmail(
                   startTime: args.startTime,
                   endTime: args.endTime,
                   attendeeEmails: args.attendeeEmails,
+createGoogleMeet: true,
                 }
               );
 
@@ -940,16 +941,33 @@ export async function processIncomingEmail(
                 })
                 .eq("id", emailActionId);
 
-              const toolResult = {
-                success: true,
-                action: "calendar_created",
-                googleEventId: event.id,
-                summary: args.summary,
-                startTime: args.startTime,
-                endTime: args.endTime,
-                message:
-                  "The calendar event was successfully created. If the customer needs to be notified, use send_reply with a concise confirmation.",
-              };
+             const toolResult = {
+  success: true,
+  action: "calendar_created",
+  googleEventId: event.id,
+  summary: args.summary,
+  startTime: args.startTime,
+  endTime: args.endTime,
+
+  attendeeEmails: args.attendeeEmails ?? [],
+
+  invitation: {
+    requested: true,
+    method: "google_calendar",
+    sendUpdates: "all",
+  },
+
+  googleMeetUrl:
+    event.hangoutLink ??
+    event.conferenceData?.entryPoints?.find(
+      (entryPoint) =>
+        entryPoint.entryPointType === "video"
+    )?.uri ??
+    null,
+
+  message:
+    "The calendar event was successfully created with the customer as an attendee. Google Calendar was instructed to send the calendar invitation email to the attendee. This calendar invitation is separate from any Gmail reply to the customer. If a separate confirmation email is appropriate, use send_reply or create_draft according to the available permissions.",
+};
 
               console.log("AGENT TOOL RESULT:", {
                 toolName,
@@ -1450,8 +1468,7 @@ function buildToolDefinitions(
           "create_calendar_event",
 
         description:
-          "Create a calendar event directly. Only use when calendar writing is explicitly allowed. After the event is successfully created, reassess whether the customer should receive a confirmation. If sending is authorized, you may then use send_reply to confirm the booking.",
-
+"Create a calendar event directly. Only use when calendar writing is explicitly allowed. Include the customer's email in attendeeEmails when the customer should receive a calendar invitation. The Calendar API will send the calendar invitation automatically using sendUpdates=all. A calendar invitation is separate from a Gmail confirmation reply. After creating the event, reassess whether a separate customer-facing Gmail reply is also appropriate. If one is needed, use send_reply or create_draft according to the available permissions.",
         parameters:
           calendarEventParams,
       },

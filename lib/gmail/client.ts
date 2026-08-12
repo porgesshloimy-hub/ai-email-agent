@@ -90,21 +90,46 @@ export async function readMessage(
  * Get new Gmail messages since a previous historyId.
  *
  * Gmail's History API only tells us which message IDs changed.
- * We retrieve each complete message and filter out:
+ * We retrieve each complete message and then strictly filter
+ * for genuine incoming inbox messages.
  *
+ * We intentionally IGNORE:
+ *
+ * - Drafts
+ * - Sent messages
+ * - Messages not in the Inbox
+ * - Messages sent from the user's own Gmail account
  * - Promotions
+ * - Updates
  * - Automated emails
  * - No-reply emails
  * - Bulk email
  * - Mailing lists
  * - Auto-submitted email
- * - Gmail Updates category
  */
 export async function getHistoryChanges(
   tenantId: string,
   startHistoryId: string
 ) {
   const gmail = await getGmailClient(tenantId);
+
+  /**
+   * Determine which Gmail account this OAuth token belongs to.
+   *
+   * This gives us another layer of protection against the
+   * agent processing emails sent by the account owner.
+   */
+  const profile = await gmail.users.getProfile({
+    userId: "me",
+  });
+
+  const ownEmail =
+    profile.data.emailAddress?.toLowerCase() ?? "";
+
+  console.log("GMAIL HISTORY ACCOUNT:", {
+    tenantId,
+    ownEmail,
+  });
 
   const messages: Array<{
     messageId: string;
@@ -232,6 +257,126 @@ export async function getHistoryChanges(
             "Subject"
           ) ?? "";
 
+        const fromLower =
+          from.toLowerCase();
+
+        /**
+         * ----------------------------------------------------
+         * GMAIL LABEL FILTERING
+         * ----------------------------------------------------
+         */
+
+        const labelIds =
+          message.labelIds ?? [];
+
+        const isDraft =
+          labelIds.includes("DRAFT");
+
+        const isSent =
+          labelIds.includes("SENT");
+
+        const isInbox =
+          labelIds.includes("INBOX");
+
+        /**
+         * IMPORTANT:
+         *
+         * Never process drafts.
+         *
+         * This prevents the agent from seeing a draft that
+         * it just created and treating that draft as a new
+         * customer email.
+         */
+        if (isDraft) {
+          console.log(
+            "GMAIL MESSAGE IGNORED:",
+            {
+              tenantId,
+              messageId,
+              threadId,
+              from,
+              subject,
+              reason: "draft",
+            }
+          );
+
+          continue;
+        }
+
+        /**
+         * Never process sent messages.
+         *
+         * This prevents the agent from responding to emails
+         * that the account owner personally sent to somebody.
+         */
+        if (isSent) {
+          console.log(
+            "GMAIL MESSAGE IGNORED:",
+            {
+              tenantId,
+              messageId,
+              threadId,
+              from,
+              subject,
+              reason: "sent",
+            }
+          );
+
+          continue;
+        }
+
+        /**
+         * Only process messages that are actually in the Inbox.
+         *
+         * This prevents messages from other Gmail folders or
+         * other history events from entering the customer-email
+         * processing pipeline.
+         */
+        if (!isInbox) {
+          console.log(
+            "GMAIL MESSAGE IGNORED:",
+            {
+              tenantId,
+              messageId,
+              threadId,
+              from,
+              subject,
+              labels: labelIds,
+              reason: "not-inbox",
+            }
+          );
+
+          continue;
+        }
+
+        /**
+         * Extra protection against processing emails sent by
+         * the authenticated account.
+         *
+         * This is intentionally separate from the SENT check.
+         * If Gmail ever exposes an unusual message state,
+         * we still don't want the agent treating the owner
+         * as a customer.
+         */
+        if (
+          ownEmail &&
+          fromLower.includes(ownEmail)
+        ) {
+          console.log(
+            "GMAIL MESSAGE IGNORED:",
+            {
+              tenantId,
+              messageId,
+              threadId,
+              from,
+              subject,
+              reason: "own-account",
+            }
+          );
+
+          continue;
+        }
+
         /**
          * ----------------------------------------------------
          * AUTOMATED EMAIL DETECTION
@@ -256,9 +401,6 @@ export async function getHistoryChanges(
             "List-Unsubscribe"
           );
 
-        const fromLower =
-          from.toLowerCase();
-
         const isNoReply =
           /(^|[\s<])(no-?reply|noreply|donotreply|do-not-reply)([@\s>]|$)/i.test(
             fromLower
@@ -282,11 +424,9 @@ export async function getHistoryChanges(
          * GMAIL CATEGORY FILTER
          * ----------------------------------------------------
          *
-         * Promotions and Updates are not treated as
-         * normal customer conversations.
+         * Promotions and Updates are not treated as normal
+         * customer conversations.
          */
-        const labelIds =
-          message.labelIds ?? [];
 
         const isPromotions =
           labelIds.includes(
@@ -303,22 +443,32 @@ export async function getHistoryChanges(
           isPromotions ||
           isUpdates
         ) {
-          let reason = "automated";
+          let reason =
+            "automated";
 
           if (isPromotions) {
-            reason = "promotions";
+            reason =
+              "promotions";
           } else if (isUpdates) {
-            reason = "updates";
+            reason =
+              "updates";
           } else if (isNoReply) {
-            reason = "no-reply";
+            reason =
+              "no-reply";
           } else if (autoSubmitted) {
-            reason = "auto-submitted";
+            reason =
+              "auto-submitted";
           } else if (isBulk) {
-            reason = "bulk";
+            reason =
+              "bulk";
           } else if (isList) {
-            reason = "mailing-list";
-          } else if (listUnsubscribe) {
-            reason = "list-unsubscribe";
+            reason =
+              "mailing-list";
+          } else if (
+            listUnsubscribe
+          ) {
+            reason =
+              "list-unsubscribe";
           }
 
           console.log(
@@ -335,6 +485,12 @@ export async function getHistoryChanges(
 
           continue;
         }
+
+        /**
+         * ----------------------------------------------------
+         * EXTRACT MESSAGE BODY
+         * ----------------------------------------------------
+         */
 
         const bodyText =
           extractPlainTextBody(
@@ -381,7 +537,8 @@ export async function getHistoryChanges(
   );
 
   return {
-    historyId: latestHistoryId,
+    historyId:
+      latestHistoryId,
     messages,
   };
 }
@@ -516,7 +673,9 @@ export async function createDraft(
       const threadMessages =
         thread.data.messages ?? [];
 
-      if (threadMessages.length > 0) {
+      if (
+        threadMessages.length > 0
+      ) {
         const latestMessage =
           threadMessages[
             threadMessages.length - 1
@@ -608,7 +767,9 @@ export async function archiveThread(
     userId: "me",
     id: threadId,
     requestBody: {
-      removeLabelIds: ["INBOX"],
+      removeLabelIds: [
+        "INBOX",
+      ],
     },
   });
 }
@@ -640,6 +801,7 @@ function getHeaderValue(
  * Extract readable text from a Gmail message payload.
  *
  * Handles:
+ *
  * - text/plain
  * - multipart messages
  * - text/html as a fallback

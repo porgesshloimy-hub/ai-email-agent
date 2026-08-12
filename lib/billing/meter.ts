@@ -1,7 +1,11 @@
 import { createServiceSupabase } from "@/lib/supabase/server";
 import { stripe } from "@/lib/billing/stripe";
 
-type UsageService = "openai" | "twilio_sms" | "storage" | "other";
+type UsageService =
+  | "openai"
+  | "twilio_sms"
+  | "storage"
+  | "other";
 
 interface RecordUsageInput {
   tenantId: string;
@@ -13,24 +17,56 @@ interface RecordUsageInput {
 }
 
 /**
- * The single entry point for logging any billable unit of work. Every
- * metered service in the app (OpenAI calls, SMS sends, storage) should
- * funnel through this function rather than writing to usage_events
- * directly, so the markup formula only lives in one place.
+ * Customer usage pricing.
+ *
+ * The customer-facing billed amount is the actual underlying
+ * service cost plus 5%.
+ *
+ * The 5% is incorporated directly into the billed price and is
+ * not presented to the customer as a separate fee or markup.
  */
-export async function recordUsage(input: RecordUsageInput): Promise<void> {
+const BILLING_RATE_MULTIPLIER = 1.05;
+
+/**
+ * Single entry point for recording billable usage.
+ *
+ * Every metered service in the app should go through this function
+ * rather than writing directly to usage_events.
+ */
+export async function recordUsage(
+  input: RecordUsageInput
+): Promise<void> {
   const supabase = createServiceSupabase();
 
-  const { data: tenant } = await supabase
+  const { data: tenant, error: tenantError } = await supabase
     .from("tenants")
-    .select("usage_markup_percent, stripe_customer_id, stripe_subscription_item_id")
+    .select(
+      "stripe_customer_id, stripe_subscription_item_id"
+    )
     .eq("id", input.tenantId)
     .single();
 
-  const markupPercent = tenant?.usage_markup_percent ?? 3.0;
-  const billedCostUsd = applyMarkup(input.rawCostUsd, markupPercent);
+  if (tenantError) {
+    console.error(
+      "Failed to load tenant for usage recording:",
+      tenantError
+    );
+  }
 
-  const { data: event } = await supabase
+  /**
+   * Calculate the customer-facing price.
+   *
+   * rawCostUsd = actual underlying service cost
+   * billedCostUsd = customer price
+   *
+   * Example:
+   *
+   * $0.005 raw cost
+   * → $0.00525 billed cost
+   */
+  const billedCostUsd = applyMarkup(input.rawCostUsd);
+
+  const { data: event, error: usageError } = await supabase
     .from("usage_events")
     .insert({
       tenant_id: input.tenantId,
@@ -44,50 +80,68 @@ export async function recordUsage(input: RecordUsageInput): Promise<void> {
     .select()
     .single();
 
-  // Report to Stripe immediately if the tenant has billing set up. If not
-  // (e.g. still on a trial, hasn't added a payment method yet), the usage
-  // is still recorded locally — reconcileUnreportedUsage() can catch it up
-  // later, or it stays informational-only until they do.
+  if (usageError) {
+    console.error(
+      "Failed to record usage event:",
+      usageError
+    );
+
+    throw new Error("Failed to record usage");
+  }
+
+  /**
+   * Report the customer-facing amount to Stripe.
+   *
+   * If Stripe isn't connected yet, the usage remains recorded
+   * locally and can be reconciled later.
+   */
   if (tenant?.stripe_customer_id && event) {
-    await reportUsageToStripe(tenant.stripe_customer_id, billedCostUsd, event.id);
+    await reportUsageToStripe(
+      tenant.stripe_customer_id,
+      billedCostUsd,
+      event.id
+    );
   }
 }
 
 /**
- * Formula lives here, in exactly one place: raw cost + a percentage markup
- * (e.g. 3% to cover payment processing fees). Extend this if you want
- * tiered markups, a flat per-event fee on top of the percentage, etc. —
- * but keep it a pure function so it's easy to test against known inputs.
+ * Converts the underlying service cost into the customer price.
+ *
+ * The 5% is built into the final price rather than displayed
+ * as a separate line item or fee.
  */
-export function applyMarkup(rawCostUsd: number, markupPercent: number): number {
-  return rawCostUsd * (1 + markupPercent / 100);
+export function applyMarkup(
+  rawCostUsd: number
+): number {
+  return rawCostUsd * BILLING_RATE_MULTIPLIER;
 }
 
 /**
- * Stripe's Billing Meters API (their current usage-based billing model,
- * replacing the older subscription-item usage_records approach) bills in
- * whole integer units against a Price you configure as "$0.01 per unit" —
- * so a $0.037 charge gets reported as 4 units (rounded) via a meter event.
- * This keeps one meter usable for every service (OpenAI, SMS, storage)
- * instead of needing a separate meter per resource type, since everything
- * is normalized to cents before reporting.
+ * Report usage to Stripe's Billing Meters API.
  *
- * Meter events are scoped by Stripe customer id, not by subscription item —
- * Stripe automatically matches the event to whichever of the customer's
- * active subscription items uses that meter. You still need a subscription
- * with a metered Price attached to the "usage_cost_cents" meter for billing
- * to actually happen; the meter event alone just records usage.
+ * Stripe receives the customer-facing amount in cents.
  *
- * Verify the exact method name/shape against the `stripe` package version
- * you install — this is a newer part of Stripe's API and has had naming
- * changes across SDK versions (some versions expose this as
- * stripe.billing.meterEvents.create, others as a top-level
- * stripe.v2.billing.meterEvents.create). Check your installed version's
- * TypeScript types before deploying.
+ * Example:
+ *
+ * $0.037 billed cost
+ * → 4 cents reported to Stripe
  */
-async function reportUsageToStripe(stripeCustomerId: string, billedCostUsd: number, eventId: string) {
+async function reportUsageToStripe(
+  stripeCustomerId: string,
+  billedCostUsd: number,
+  eventId: string
+) {
   const cents = Math.round(billedCostUsd * 100);
-  if (cents <= 0) return; // nothing to report for near-zero-cost events
+
+  /**
+   * Extremely small usage events may round to zero cents.
+   *
+   * We still keep the event in our database so the usage history
+   * remains accurate. It simply isn't sent individually to Stripe.
+   */
+  if (cents <= 0) {
+    return;
+  }
 
   const supabase = createServiceSupabase();
 
@@ -98,25 +152,38 @@ async function reportUsageToStripe(stripeCustomerId: string, billedCostUsd: numb
         stripe_customer_id: stripeCustomerId,
         value: String(cents),
       },
-      identifier: eventId, // idempotency key — prevents double-billing on retries
+      identifier: eventId,
     });
 
-    await supabase.from("usage_events").update({ stripe_reported: true }).eq("id", eventId);
+    await supabase
+      .from("usage_events")
+      .update({
+        stripe_reported: true,
+      })
+      .eq("id", eventId);
   } catch (err) {
-    // Don't throw — a Stripe reporting failure shouldn't break the agent
-    // action that triggered it. Leave stripe_reported = false so
-    // reconcileUnreportedUsage() can retry it later.
-    console.error(`Failed to report usage event ${eventId} to Stripe:`, err);
+    /**
+     * Stripe reporting failures should not break the agent action.
+     *
+     * The usage event remains marked as unreported so the
+     * reconciliation job can retry it later.
+     */
+    console.error(
+      `Failed to report usage event ${eventId} to Stripe:`,
+      err
+    );
   }
 }
 
 /**
- * Catch-up job: finds any usage_events that were never successfully
- * reported (Stripe outage, missing subscription at the time, etc.) and
- * retries them. Run this on a schedule via Inngest — see
- * lib/inngest/functions.ts.
+ * Catch-up job for usage events that were not successfully
+ * reported to Stripe.
+ *
+ * This can be called by your scheduled Inngest job.
  */
-export async function reconcileUnreportedUsage(tenantId: string): Promise<{ retried: number }> {
+export async function reconcileUnreportedUsage(
+  tenantId: string
+): Promise<{ retried: number }> {
   const supabase = createServiceSupabase();
 
   const { data: tenant } = await supabase
@@ -125,17 +192,42 @@ export async function reconcileUnreportedUsage(tenantId: string): Promise<{ retr
     .eq("id", tenantId)
     .single();
 
-  if (!tenant?.stripe_customer_id) return { retried: 0 };
+  if (!tenant?.stripe_customer_id) {
+    return {
+      retried: 0,
+    };
+  }
 
-  const { data: unreported } = await supabase
+  const { data: unreported, error } = await supabase
     .from("usage_events")
     .select("id, billed_cost_usd")
     .eq("tenant_id", tenantId)
     .eq("stripe_reported", false);
 
-  for (const event of unreported ?? []) {
-    await reportUsageToStripe(tenant.stripe_customer_id, event.billed_cost_usd, event.id);
+  if (error) {
+    console.error(
+      "Failed to load unreported usage events:",
+      error
+    );
+
+    return {
+      retried: 0,
+    };
   }
 
-  return { retried: unreported?.length ?? 0 };
+  let retried = 0;
+
+  for (const event of unreported ?? []) {
+    await reportUsageToStripe(
+      tenant.stripe_customer_id,
+      Number(event.billed_cost_usd),
+      event.id
+    );
+
+    retried++;
+  }
+
+  return {
+    retried,
+  };
 }

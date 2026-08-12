@@ -3,6 +3,8 @@ import {
   createServiceSupabase,
 } from "@/lib/supabase/server";
 
+import MonthSelector from "./MonthSelector";
+
 interface BillingMonth {
   key: string;
   label: string;
@@ -651,77 +653,6 @@ export default async function BillingPage({
   );
 }
 
-
-/* ============================================================
-   Month Selector
-   ============================================================ */
-
-function MonthSelector({
-  selectedMonth,
-  months,
-}: {
-  selectedMonth: string;
-  months: BillingMonth[];
-}) {
-  return (
-    <form method="GET">
-      <label style={styles.monthSelector}>
-        <svg
-          width="16"
-          height="16"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-        >
-          <rect
-            x="3"
-            y="4"
-            width="18"
-            height="17"
-            rx="3"
-          />
-
-          <path d="M16 2v4M8 2v4M3 10h18" />
-        </svg>
-
-        <select
-          name="month"
-          defaultValue={selectedMonth}
-          style={styles.monthSelect}
-          aria-label="Select billing month"
-          onChange={(event) => {
-            event.currentTarget.form?.submit();
-          }}
-        >
-          {months.map((month) => (
-            <option
-              key={month.key}
-              value={month.key}
-            >
-              {month.label}
-            </option>
-          ))}
-        </select>
-
-        <svg
-          width="14"
-          height="14"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            d="m6 9 6 6 6-6"
-          />
-        </svg>
-      </label>
-    </form>
-  );
-}
 
 
 /* ============================================================

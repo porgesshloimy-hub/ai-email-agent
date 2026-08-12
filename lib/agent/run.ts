@@ -349,6 +349,8 @@ const relevantKnowledge = await searchKnowledge(
 
 "Answer the customer's actual question directly whenever possible.",
 
+"Make sure most of the info you provide is helpful and includes the most information possible.",
+
 "Do not ask the customer for additional information merely because an exact answer is unavailable.",
 
 "If the available business knowledge provides enough information to give a useful general answer, give that answer instead of requesting more details.",

@@ -251,11 +251,16 @@ export async function processIncomingEmail(
      * --------------------------------------------------------
      */
 
-    const relevantKnowledge =
-      await searchKnowledge(
-        email.tenantId,
-        email.bodyText
-      );
+    const knowledgeQuery = [
+  `Customer email subject: ${email.subject}`,
+  `Customer email: ${email.bodyText}`,
+  "Find all business information relevant to answering this customer.",
+].join("\n\n");
+
+const relevantKnowledge = await searchKnowledge(
+  email.tenantId,
+  knowledgeQuery
+);
 
     /**
      * --------------------------------------------------------
@@ -330,7 +335,7 @@ export async function processIncomingEmail(
 
 "Do not make decisions on behalf of the business unless the business rules explicitly authorize that decision.",
 
-"If the email requires information that is not available in the business knowledge or rules, create a draft for human approval.",
+"If the email requires information that is not available in the business knowledge or rules, do not invent the missing information. If the customer can still be given a useful answer without it, answer using the available information. If the missing information is genuinely necessary to answer the question, ask only for the minimum necessary information or create a draft for human approval when appropriate.",
 
 "If you are unsure whether an action is authorized, create a draft instead of sending.",
 
@@ -341,6 +346,28 @@ export async function processIncomingEmail(
 "Only send an immediate reply when the email received is clearly connected to the company business model, the sender is probably expecting a reply, and the response is clearly supported by the available business information and the configured permissions.",
 
 "Keep replies professional, concise, natural, and personalized to the specific email.",
+
+"Answer the customer's actual question directly whenever possible.",
+
+"Do not ask the customer for additional information merely because an exact answer is unavailable.",
+
+"If the available business knowledge provides enough information to give a useful general answer, give that answer instead of requesting more details.",
+
+"Only ask the customer for additional information when that information is genuinely necessary to answer their question or complete the requested action.",
+
+"When a precise quote or calculation requires information that the customer has not provided, explain what can be determined from the available information first, and ask only for the minimum information actually needed.",
+
+"Do not turn a simple customer question into a lengthy intake questionnaire.",
+
+"Do not ask for information that is optional, cosmetic, or unrelated to the customer's immediate question.",
+
+"If several pieces of information could affect a final quote, do not automatically ask for all of them. First determine whether the business knowledge provides a starting price, price range, or other useful information that can be given immediately. If multiple pricing options exist, summarize the relevant options clearly rather than asking the customer to choose between them before providing any useful information.",
+
+"Do not ask for specific details, such as shipping destination, quantity, or other details unless those details are genuinely required to answer the customer's question AND the available business knowledge does not provide a reasonable answer without them.",
+
+"Prefer answering with the information already available over asking follow-up questions.",
+
+"If the customer asks about a product, service, size, availability, or general pricing, provide the relevant information from the business knowledge before asking any follow-up question.",
 
 "EMAIL WRITING RULES:",
 

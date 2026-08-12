@@ -10,14 +10,28 @@ async function getGmailClient(tenantId: string) {
   });
 
   // Diagnostic: confirm which Google account the OAuth token belongs to.
-  const profile = await gmail.users.getProfile({
-    userId: "me",
-  });
+  try {
+    const profile = await gmail.users.getProfile({
+      userId: "me",
+    });
 
-  console.log(
-    "GMAIL AUTHENTICATED AS:",
-    profile.data.emailAddress
-  );
+    console.log("GMAIL AUTHENTICATED AS:", {
+      tenantId,
+      emailAddress: profile.data.emailAddress,
+      messagesTotal: profile.data.messagesTotal,
+      threadsTotal: profile.data.threadsTotal,
+      historyId: profile.data.historyId,
+    });
+  } catch (error: any) {
+    console.error("GMAIL PROFILE CHECK FAILED:", {
+      tenantId,
+      errorCode: error?.code,
+      errorMessage: error?.message,
+      status: error?.response?.status,
+    });
+
+    throw error;
+  }
 
   return gmail;
 }
@@ -31,13 +45,37 @@ export async function readThread(
 ) {
   const gmail = await getGmailClient(tenantId);
 
-  const thread = await gmail.users.threads.get({
-    userId: "me",
-    id: threadId,
-    format: "full",
+  console.log("GMAIL READ THREAD:", {
+    tenantId,
+    threadId,
   });
 
-  return thread.data;
+  try {
+    const thread = await gmail.users.threads.get({
+      userId: "me",
+      id: threadId,
+      format: "full",
+    });
+
+    console.log("GMAIL READ THREAD SUCCESS:", {
+      tenantId,
+      threadId,
+      messageCount: thread.data.messages?.length ?? 0,
+    });
+
+    return thread.data;
+  } catch (error: any) {
+    console.error("GMAIL READ THREAD FAILED:", {
+      tenantId,
+      threadId,
+      errorCode: error?.code,
+      errorMessage: error?.message,
+      status: error?.response?.status,
+      responseData: error?.response?.data,
+    });
+
+    throw error;
+  }
 }
 
 /**
@@ -65,22 +103,21 @@ export async function readMessage(
       tenantId,
       messageId,
       threadId: message.data.threadId,
+      labelIds: message.data.labelIds,
+      internalDate: message.data.internalDate,
     });
 
     return message.data;
   } catch (error: any) {
-    console.error(
-      "GMAIL READ MESSAGE FAILED:",
-      {
-        tenantId,
-        messageId,
-        errorCode: error?.code,
-        errorMessage: error?.message,
-        status: error?.response?.status,
-        statusText: error?.response?.statusText,
-        responseData: error?.response?.data,
-      }
-    );
+    console.error("GMAIL READ MESSAGE FAILED:", {
+      tenantId,
+      messageId,
+      errorCode: error?.code,
+      errorMessage: error?.message,
+      status: error?.response?.status,
+      statusText: error?.response?.statusText,
+      responseData: error?.response?.data,
+    });
 
     throw error;
   }
@@ -89,47 +126,30 @@ export async function readMessage(
 /**
  * Get new Gmail messages since a previous historyId.
  *
- * Gmail's History API only tells us which message IDs changed.
- * We retrieve each complete message and then strictly filter
- * for genuine incoming inbox messages.
+ * Gmail's History API tells us which messages changed.
  *
- * We intentionally IGNORE:
+ * IMPORTANT:
+ * A message returned by history.list() may no longer exist by the
+ * time we try to retrieve it. This is normal Gmail behavior.
  *
- * - Drafts
- * - Sent messages
- * - Messages not in the Inbox
- * - Messages sent from the user's own Gmail account
- * - Promotions
- * - Updates
- * - Automated emails
- * - No-reply emails
- * - Bulk email
- * - Mailing lists
- * - Auto-submitted email
+ * We therefore:
+ * - Ignore deleted/stale message IDs
+ * - Ignore sent messages
+ * - Ignore drafts
+ * - Ignore automated emails
+ * - Ignore Promotions
+ * - Ignore Updates
+ * - Ignore mailing lists
+ * - Ignore no-reply addresses
+ *
+ * This function should return only genuine incoming customer-style
+ * messages for the agent to process.
  */
 export async function getHistoryChanges(
   tenantId: string,
   startHistoryId: string
 ) {
   const gmail = await getGmailClient(tenantId);
-
-  /**
-   * Determine which Gmail account this OAuth token belongs to.
-   *
-   * This gives us another layer of protection against the
-   * agent processing emails sent by the account owner.
-   */
-  const profile = await gmail.users.getProfile({
-    userId: "me",
-  });
-
-  const ownEmail =
-    profile.data.emailAddress?.toLowerCase() ?? "";
-
-  console.log("GMAIL HISTORY ACCOUNT:", {
-    tenantId,
-    ownEmail,
-  });
 
   const messages: Array<{
     messageId: string;
@@ -142,6 +162,18 @@ export async function getHistoryChanges(
   let pageToken: string | undefined;
   let latestHistoryId = startHistoryId;
 
+  let historyRecordsSeen = 0;
+  let messageIdsSeen = 0;
+  let messagesReadSuccessfully = 0;
+  let staleMessages = 0;
+  let ignoredMessages = 0;
+  let acceptedMessages = 0;
+
+  console.log("GMAIL HISTORY START:", {
+    tenantId,
+    startHistoryId,
+  });
+
   do {
     console.log("GMAIL HISTORY REQUEST:", {
       tenantId,
@@ -149,39 +181,53 @@ export async function getHistoryChanges(
       pageToken,
     });
 
-    const response = await gmail.users.history.list({
-      userId: "me",
-      startHistoryId,
-      historyTypes: ["messageAdded"],
-      pageToken,
-    });
+    let response;
+
+    try {
+      response = await gmail.users.history.list({
+        userId: "me",
+        startHistoryId,
+        historyTypes: ["messageAdded"],
+        pageToken,
+      });
+    } catch (error: any) {
+      console.error("GMAIL HISTORY REQUEST FAILED:", {
+        tenantId,
+        startHistoryId,
+        pageToken,
+        errorCode: error?.code,
+        errorMessage: error?.message,
+        status: error?.response?.status,
+        responseData: error?.response?.data,
+      });
+
+      throw error;
+    }
 
     console.log("GMAIL HISTORY RESULT:", {
       tenantId,
       startHistoryId,
       returnedHistoryId: response.data.historyId,
-      historyCount:
-        response.data.history?.length ?? 0,
-      nextPageToken:
-        response.data.nextPageToken,
+      historyCount: response.data.history?.length ?? 0,
+      nextPageToken: response.data.nextPageToken,
     });
 
     if (response.data.historyId) {
-      latestHistoryId =
-        response.data.historyId;
+      latestHistoryId = response.data.historyId;
     }
 
     for (const history of response.data.history ?? []) {
-      for (const messageAdded of history.messagesAdded ?? []) {
-        const messageId =
-          messageAdded.message?.id;
+      historyRecordsSeen++;
 
-        const threadId =
-          messageAdded.message?.threadId;
+      for (const messageAdded of history.messagesAdded ?? []) {
+        messageIdsSeen++;
+
+        const messageId = messageAdded.message?.id;
+        const threadId = messageAdded.message?.threadId;
 
         if (!messageId || !threadId) {
-          console.log(
-            "GMAIL HISTORY MESSAGE SKIPPED: missing IDs",
+          console.warn(
+            "GMAIL HISTORY MESSAGE SKIPPED: MISSING IDS",
             {
               tenantId,
               messageId,
@@ -192,37 +238,40 @@ export async function getHistoryChanges(
           continue;
         }
 
-        console.log(
-          "GMAIL HISTORY MESSAGE FOUND:",
-          {
-            tenantId,
-            messageId,
-            threadId,
-          }
-        );
+        console.log("GMAIL HISTORY MESSAGE FOUND:", {
+          tenantId,
+          messageId,
+          threadId,
+        });
 
         let message;
 
         try {
-          message =
-            await readMessage(
-              tenantId,
-              messageId
-            );
+          message = await readMessage(
+            tenantId,
+            messageId
+          );
+
+          messagesReadSuccessfully++;
         } catch (error: any) {
           /**
-           * Gmail can report a message in history
-           * that has already been deleted.
+           * Gmail can report a message in history that has already
+           * been deleted, moved, or otherwise become unavailable.
            *
-           * Do not fail the entire history run.
+           * A 404 here is NOT an application failure.
+           *
+           * Skip it and continue processing the remaining history.
            */
           if (error?.code === 404) {
+            staleMessages++;
+
             console.warn(
-              "GMAIL MESSAGE NO LONGER EXISTS:",
+              "GMAIL MESSAGE STALE OR DELETED — SKIPPING:",
               {
                 tenantId,
                 messageId,
                 threadId,
+                startHistoryId,
               }
             );
 
@@ -235,7 +284,9 @@ export async function getHistoryChanges(
               tenantId,
               messageId,
               threadId,
-              error,
+              errorCode: error?.code,
+              errorMessage: error?.message,
+              status: error?.response?.status,
             }
           );
 
@@ -251,137 +302,35 @@ export async function getHistoryChanges(
             "From"
           ) ?? "";
 
+        const to =
+          getHeaderValue(
+            headers,
+            "To"
+          ) ?? "";
+
+        const cc =
+          getHeaderValue(
+            headers,
+            "Cc"
+          ) ?? "";
+
         const subject =
           getHeaderValue(
             headers,
             "Subject"
           ) ?? "";
 
-        const fromLower =
-          from.toLowerCase();
-
-        /**
-         * ----------------------------------------------------
-         * GMAIL LABEL FILTERING
-         * ----------------------------------------------------
-         */
-
-        const labelIds =
-          message.labelIds ?? [];
-
-        const isDraft =
-          labelIds.includes("DRAFT");
-
-        const isSent =
-          labelIds.includes("SENT");
-
-        const isInbox =
-          labelIds.includes("INBOX");
-
-        /**
-         * IMPORTANT:
-         *
-         * Never process drafts.
-         *
-         * This prevents the agent from seeing a draft that
-         * it just created and treating that draft as a new
-         * customer email.
-         */
-        if (isDraft) {
-          console.log(
-            "GMAIL MESSAGE IGNORED:",
-            {
-              tenantId,
-              messageId,
-              threadId,
-              from,
-              subject,
-              reason: "draft",
-            }
+        const messageIdHeader =
+          getHeaderValue(
+            headers,
+            "Message-ID"
           );
 
-          continue;
-        }
-
-        /**
-         * Never process sent messages.
-         *
-         * This prevents the agent from responding to emails
-         * that the account owner personally sent to somebody.
-         */
-        if (isSent) {
-          console.log(
-            "GMAIL MESSAGE IGNORED:",
-            {
-              tenantId,
-              messageId,
-              threadId,
-              from,
-              subject,
-              reason: "sent",
-            }
+        const inReplyTo =
+          getHeaderValue(
+            headers,
+            "In-Reply-To"
           );
-
-          continue;
-        }
-
-        /**
-         * Only process messages that are actually in the Inbox.
-         *
-         * This prevents messages from other Gmail folders or
-         * other history events from entering the customer-email
-         * processing pipeline.
-         */
-        if (!isInbox) {
-          console.log(
-            "GMAIL MESSAGE IGNORED:",
-            {
-              tenantId,
-              messageId,
-              threadId,
-              from,
-              subject,
-              labels: labelIds,
-              reason: "not-inbox",
-            }
-          );
-
-          continue;
-        }
-
-        /**
-         * Extra protection against processing emails sent by
-         * the authenticated account.
-         *
-         * This is intentionally separate from the SENT check.
-         * If Gmail ever exposes an unusual message state,
-         * we still don't want the agent treating the owner
-         * as a customer.
-         */
-        if (
-          ownEmail &&
-          fromLower.includes(ownEmail)
-        ) {
-          console.log(
-            "GMAIL MESSAGE IGNORED:",
-            {
-              tenantId,
-              messageId,
-              threadId,
-              from,
-              subject,
-              reason: "own-account",
-            }
-          );
-
-          continue;
-        }
-
-        /**
-         * ----------------------------------------------------
-         * AUTOMATED EMAIL DETECTION
-         * ----------------------------------------------------
-         */
 
         const autoSubmitted =
           getHeaderValue(
@@ -400,6 +349,67 @@ export async function getHistoryChanges(
             headers,
             "List-Unsubscribe"
           );
+
+        const deliveredTo =
+          getHeaderValue(
+            headers,
+            "Delivered-To"
+          );
+
+        const fromLower =
+          from.toLowerCase();
+
+        const labelIds =
+          message.labelIds ?? [];
+
+        /**
+         * --------------------------------------------------------
+         * IMPORTANT: SENT / DRAFT PROTECTION
+         * --------------------------------------------------------
+         *
+         * We only want incoming customer emails.
+         *
+         * Gmail labels messages sent by the authenticated user
+         * with SENT.
+         *
+         * Draft messages have the DRAFT label.
+         *
+         * This prevents the agent from seeing its own outgoing
+         * messages/drafts as customer messages.
+         */
+        const isSent =
+          labelIds.includes("SENT");
+
+        const isDraft =
+          labelIds.includes("DRAFT");
+
+        if (isSent || isDraft) {
+          ignoredMessages++;
+
+          console.log(
+            "GMAIL MESSAGE IGNORED: SELF-GENERATED / DRAFT",
+            {
+              tenantId,
+              messageId,
+              threadId,
+              from,
+              to,
+              subject,
+              labelIds,
+              reason: isDraft
+                ? "draft"
+                : "sent",
+            }
+          );
+
+          continue;
+        }
+
+        /**
+         * --------------------------------------------------------
+         * AUTOMATED EMAIL DETECTION
+         * --------------------------------------------------------
+         */
 
         const isNoReply =
           /(^|[\s<])(no-?reply|noreply|donotreply|do-not-reply)([@\s>]|$)/i.test(
@@ -420,12 +430,9 @@ export async function getHistoryChanges(
           isNoReply;
 
         /**
-         * ----------------------------------------------------
+         * --------------------------------------------------------
          * GMAIL CATEGORY FILTER
-         * ----------------------------------------------------
-         *
-         * Promotions and Updates are not treated as normal
-         * customer conversations.
+         * --------------------------------------------------------
          */
 
         const isPromotions =
@@ -443,43 +450,41 @@ export async function getHistoryChanges(
           isPromotions ||
           isUpdates
         ) {
-          let reason =
-            "automated";
+          ignoredMessages++;
+
+          let reason = "automated";
 
           if (isPromotions) {
-            reason =
-              "promotions";
+            reason = "promotions";
           } else if (isUpdates) {
-            reason =
-              "updates";
+            reason = "updates";
           } else if (isNoReply) {
-            reason =
-              "no-reply";
+            reason = "no-reply";
           } else if (autoSubmitted) {
-            reason =
-              "auto-submitted";
+            reason = "auto-submitted";
           } else if (isBulk) {
-            reason =
-              "bulk";
+            reason = "bulk";
           } else if (isList) {
-            reason =
-              "mailing-list";
-          } else if (
-            listUnsubscribe
-          ) {
-            reason =
-              "list-unsubscribe";
+            reason = "mailing-list";
+          } else if (listUnsubscribe) {
+            reason = "list-unsubscribe";
           }
 
           console.log(
-            "GMAIL MESSAGE IGNORED:",
+            "GMAIL MESSAGE IGNORED: AUTOMATED",
             {
               tenantId,
               messageId,
               threadId,
               from,
+              to,
               subject,
               reason,
+              autoSubmitted,
+              precedence,
+              hasListUnsubscribe:
+                Boolean(listUnsubscribe),
+              labelIds,
             }
           );
 
@@ -487,9 +492,9 @@ export async function getHistoryChanges(
         }
 
         /**
-         * ----------------------------------------------------
-         * EXTRACT MESSAGE BODY
-         * ----------------------------------------------------
+         * --------------------------------------------------------
+         * BODY EXTRACTION
+         * --------------------------------------------------------
          */
 
         const bodyText =
@@ -497,16 +502,29 @@ export async function getHistoryChanges(
             message.payload
           ) ?? "";
 
+        /**
+         * --------------------------------------------------------
+         * FINAL ACCEPTANCE
+         * --------------------------------------------------------
+         */
+
+        acceptedMessages++;
+
         console.log(
-          "GMAIL MESSAGE ACCEPTED:",
+          "GMAIL MESSAGE ACCEPTED FOR AGENT:",
           {
             tenantId,
             messageId,
             threadId,
             from,
+            to,
+            cc,
             subject,
-            bodyLength:
-              bodyText.length,
+            deliveredTo,
+            messageIdHeader,
+            inReplyTo,
+            labelIds,
+            bodyLength: bodyText.length,
           }
         );
 
@@ -531,14 +549,27 @@ export async function getHistoryChanges(
       tenantId,
       startHistoryId,
       latestHistoryId,
+
+      historyRecordsSeen,
+      messageIdsSeen,
+      messagesReadSuccessfully,
+
+      staleMessages,
+      ignoredMessages,
+      acceptedMessages,
+
       messagesFound:
         messages.length,
+
+      messageIds:
+        messages.map(
+          (message) => message.messageId
+        ),
     }
   );
 
   return {
-    historyId:
-      latestHistoryId,
+    historyId: latestHistoryId,
     messages,
   };
 }
@@ -576,29 +607,46 @@ export async function watchGmail(
     }
   );
 
-  const response =
-    await gmail.users.watch({
-      userId: "me",
-      requestBody: {
+  try {
+    const response =
+      await gmail.users.watch({
+        userId: "me",
+        requestBody: {
+          topicName,
+          labelIds: ["INBOX"],
+          labelFilterAction:
+            "include",
+        },
+      });
+
+    console.log(
+      "GMAIL WATCH CREATED:",
+      {
+        tenantId,
+        historyId:
+          response.data.historyId,
+        expiration:
+          response.data.expiration,
+      }
+    );
+
+    return response.data;
+  } catch (error: any) {
+    console.error(
+      "GMAIL WATCH FAILED:",
+      {
+        tenantId,
         topicName,
-        labelIds: ["INBOX"],
-        labelFilterAction:
-          "include",
-      },
-    });
+        errorCode: error?.code,
+        errorMessage: error?.message,
+        status: error?.response?.status,
+        responseData:
+          error?.response?.data,
+      }
+    );
 
-  console.log(
-    "GMAIL WATCH CREATED:",
-    {
-      tenantId,
-      historyId:
-        response.data.historyId,
-      expiration:
-        response.data.expiration,
-    }
-  );
-
-  return response.data;
+    throw error;
+  }
 }
 
 /**
@@ -606,8 +654,7 @@ export async function watchGmail(
  * to the original message.
  *
  * originalMessageId is optional because some older callers may
- * not provide it. When supplied, it is used to retrieve the
- * exact original message's Message-ID and References headers.
+ * not provide it.
  */
 export async function createDraft(
   tenantId: string,
@@ -621,6 +668,18 @@ export async function createDraft(
     await getGmailClient(
       tenantId
     );
+
+  console.log(
+    "GMAIL CREATE DRAFT:",
+    {
+      tenantId,
+      threadId,
+      to,
+      subject,
+      originalMessageId,
+      bodyLength: body.length,
+    }
+  );
 
   let messageIdHeader:
     | string
@@ -673,9 +732,7 @@ export async function createDraft(
       const threadMessages =
         thread.data.messages ?? [];
 
-      if (
-        threadMessages.length > 0
-      ) {
+      if (threadMessages.length > 0) {
         const latestMessage =
           threadMessages[
             threadMessages.length - 1
@@ -698,10 +755,23 @@ export async function createDraft(
           );
       }
     }
-  } catch (error) {
+  } catch (error: any) {
+    /**
+     * If the original message disappeared between the time
+     * the agent read it and the time the draft was created,
+     * we can still attempt to create the draft using the
+     * Gmail threadId.
+     */
     console.warn(
-      "Could not retrieve Gmail threading headers:",
-      error
+      "GMAIL THREADING HEADERS UNAVAILABLE:",
+      {
+        tenantId,
+        threadId,
+        originalMessageId,
+        errorCode: error?.code,
+        errorMessage: error?.message,
+        status: error?.response?.status,
+      }
     );
   }
 
@@ -714,18 +784,50 @@ export async function createDraft(
       referencesHeader,
     });
 
-  const draft =
-    await gmail.users.drafts.create({
-      userId: "me",
-      requestBody: {
-        message: {
-          threadId,
-          raw,
+  try {
+    const draft =
+      await gmail.users.drafts.create({
+        userId: "me",
+        requestBody: {
+          message: {
+            threadId,
+            raw,
+          },
         },
-      },
-    });
+      });
 
-  return draft.data;
+    console.log(
+      "GMAIL DRAFT CREATED:",
+      {
+        tenantId,
+        threadId,
+        draftId:
+          draft.data.id,
+        messageId:
+          draft.data.message?.id,
+      }
+    );
+
+    return draft.data;
+  } catch (error: any) {
+    console.error(
+      "GMAIL CREATE DRAFT FAILED:",
+      {
+        tenantId,
+        threadId,
+        to,
+        subject,
+        originalMessageId,
+        errorCode: error?.code,
+        errorMessage: error?.message,
+        status: error?.response?.status,
+        responseData:
+          error?.response?.data,
+      }
+    );
+
+    throw error;
+  }
 }
 
 /**
@@ -740,15 +842,52 @@ export async function sendDraft(
       tenantId
     );
 
-  const sent =
-    await gmail.users.drafts.send({
-      userId: "me",
-      requestBody: {
-        id: draftId,
-      },
-    });
+  console.log(
+    "GMAIL SEND DRAFT:",
+    {
+      tenantId,
+      draftId,
+    }
+  );
 
-  return sent.data;
+  try {
+    const sent =
+      await gmail.users.drafts.send({
+        userId: "me",
+        requestBody: {
+          id: draftId,
+        },
+      });
+
+    console.log(
+      "GMAIL DRAFT SENT:",
+      {
+        tenantId,
+        draftId,
+        messageId:
+          sent.data.id,
+        threadId:
+          sent.data.threadId,
+      }
+    );
+
+    return sent.data;
+  } catch (error: any) {
+    console.error(
+      "GMAIL SEND DRAFT FAILED:",
+      {
+        tenantId,
+        draftId,
+        errorCode: error?.code,
+        errorMessage: error?.message,
+        status: error?.response?.status,
+        responseData:
+          error?.response?.data,
+      }
+    );
+
+    throw error;
+  }
 }
 
 /**
@@ -763,15 +902,51 @@ export async function archiveThread(
       tenantId
     );
 
-  return gmail.users.threads.modify({
-    userId: "me",
-    id: threadId,
-    requestBody: {
-      removeLabelIds: [
-        "INBOX",
-      ],
-    },
-  });
+  console.log(
+    "GMAIL ARCHIVE THREAD:",
+    {
+      tenantId,
+      threadId,
+    }
+  );
+
+  try {
+    const result =
+      await gmail.users.threads.modify({
+        userId: "me",
+        id: threadId,
+        requestBody: {
+          removeLabelIds: [
+            "INBOX",
+          ],
+        },
+      });
+
+    console.log(
+      "GMAIL THREAD ARCHIVED:",
+      {
+        tenantId,
+        threadId,
+      }
+    );
+
+    return result;
+  } catch (error: any) {
+    console.error(
+      "GMAIL ARCHIVE THREAD FAILED:",
+      {
+        tenantId,
+        threadId,
+        errorCode: error?.code,
+        errorMessage: error?.message,
+        status: error?.response?.status,
+        responseData:
+          error?.response?.data,
+      }
+    );
+
+    throw error;
+  }
 }
 
 /**
@@ -801,7 +976,6 @@ function getHeaderValue(
  * Extract readable text from a Gmail message payload.
  *
  * Handles:
- *
  * - text/plain
  * - multipart messages
  * - text/html as a fallback

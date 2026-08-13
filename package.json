@@ -2,9 +2,6 @@
   "name": "ai-email-agent",
   "version": "0.1.0",
   "private": true,
-  "engines": {
-    "node": "20.x"
-  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -20,15 +17,17 @@
     "mammoth": "^1.12.1",
     "next": "14.2.5",
     "openai": "^4.55.0",
-    "pdf-parse": "^2.4.5",
+    "pdf-parse": "^1.1.1",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "stripe": "^16.6.0",
     "twilio": "^5.2.2",
+    "unpdf": "^1.8.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^20.14.15",
+    "@types/pdf-parse": "^1.1.5",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "typescript": "^5.5.4"

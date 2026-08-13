@@ -5,7 +5,7 @@ import {
 } from "@/lib/supabase/server";
 import OpenAI from "openai";
 import mammoth from "mammoth";
-import { PDFParse } from "pdf-parse";
+import pdfParse from "pdf-parse";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -63,10 +63,12 @@ async function extractText(file: File): Promise<string> {
   const buffer = Buffer.from(await file.arrayBuffer());
   const name = file.name.toLowerCase();
 
+  // TXT
   if (name.endsWith(".txt")) {
     return buffer.toString("utf8");
   }
 
+  // DOCX
   if (name.endsWith(".docx")) {
     const result = await mammoth.extractRawText({
       buffer,
@@ -75,22 +77,19 @@ async function extractText(file: File): Promise<string> {
     return result.value;
   }
 
+  // PDF
   if (name.endsWith(".pdf")) {
-    let parser: PDFParse | null = null;
-
     try {
       console.log(
         `[knowledge] Starting PDF extraction: ${file.name}, ${file.size} bytes`
       );
 
-      parser = new PDFParse({
-        data: buffer,
-      });
-
-      const result = await parser.getText();
+      const result = await pdfParse(buffer);
 
       console.log(
-        `[knowledge] PDF extraction completed: ${file.name}, ${result.text?.length ?? 0} characters`
+        `[knowledge] PDF extraction completed: ${file.name}, ${
+          result.text?.length ?? 0
+        } characters`
       );
 
       return result.text ?? "";
@@ -102,17 +101,6 @@ async function extractText(file: File): Promise<string> {
           ? `PDF extraction failed: ${error.message}`
           : "PDF extraction failed."
       );
-    } finally {
-      if (parser) {
-        try {
-          await parser.destroy();
-        } catch (destroyError) {
-          console.error(
-            "[knowledge] Failed to destroy PDF parser:",
-            destroyError
-          );
-        }
-      }
     }
   }
 
@@ -205,7 +193,6 @@ export async function POST(request: Request) {
     /*
      * Create the document row first.
      *
-     * IMPORTANT:
      * knowledge_documents does NOT have created_at.
      */
     const { data: document, error: documentError } =

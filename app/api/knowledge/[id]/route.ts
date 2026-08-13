@@ -14,17 +14,12 @@ type RouteContext = {
 
 /**
  * GET /api/knowledge/[id]
- *
- * Returns the details and stored content of a knowledge document.
  */
 export async function GET(
   request: Request,
   context: RouteContext
 ) {
   try {
-    /*
-     * Get the authenticated user.
-     */
     const supabase = await createServerSupabase();
 
     const {
@@ -33,45 +28,23 @@ export async function GET(
     } = await supabase.auth.getUser();
 
     if (userError || !user) {
-      console.error(
-        "Knowledge GET: user authentication failed:",
-        userError
-      );
-
       return NextResponse.json(
-        {
-          error: "Not authenticated",
-        },
+        { error: "Not authenticated" },
         { status: 401 }
       );
     }
 
     /*
-     * IMPORTANT:
-     * In current Next.js versions, route params are async.
+     * Next.js route params are async.
      */
     const { id: documentId } = await context.params;
 
     if (!documentId) {
-      console.error(
-        "Knowledge GET: missing document ID"
-      );
-
       return NextResponse.json(
-        {
-          error: "Knowledge document ID is required",
-        },
+        { error: "Knowledge document ID is required" },
         { status: 400 }
       );
     }
-
-    console.log(
-      "Knowledge GET:",
-      {
-        userId: user.id,
-        documentId,
-      }
-    );
 
     /*
      * Find the authenticated user's tenant.
@@ -86,34 +59,24 @@ export async function GET(
     if (tenantError || !tenant) {
       console.error(
         "Knowledge GET: tenant not found:",
-        {
-          userId: user.id,
-          tenantError,
-        }
+        tenantError
       );
 
       return NextResponse.json(
-        {
-          error: "Tenant not found",
-        },
+        { error: "Tenant not found" },
         { status: 404 }
       );
     }
 
-    console.log(
-      "Knowledge GET: resolved tenant:",
-      tenant.id
-    );
-
-    /*
-     * Use the service client for the tenant-scoped
-     * document/chunk lookup.
-     *
-     * We explicitly filter by tenant_id so a user
-     * cannot access another tenant's knowledge.
-     */
     const serviceSupabase = createServiceSupabase();
 
+    /*
+     * IMPORTANT:
+     *
+     * knowledge_documents does NOT have created_at.
+     *
+     * Only select columns that actually exist.
+     */
     const {
       data: document,
       error: documentError,
@@ -125,8 +88,7 @@ export async function GET(
           tenant_id,
           file_name,
           storage_path,
-          uploaded_at,
-          created_at
+          uploaded_at
         `
       )
       .eq("id", documentId)
@@ -167,9 +129,7 @@ export async function GET(
     }
 
     /*
-     * Fetch the chunks belonging to this document.
-     *
-     * Do NOT return embeddings to the browser.
+     * Load the stored knowledge chunks.
      */
     const {
       data: chunks,
@@ -203,31 +163,15 @@ export async function GET(
         content: chunk.content ?? "",
       }));
 
-    /*
-     * Combine chunks into readable content.
-     */
     const content = normalizedChunks
       .map((chunk) => chunk.content)
       .join("\n\n");
 
-    console.log(
-      "Knowledge GET: success:",
-      {
-        documentId,
-        tenantId: tenant.id,
-        chunkCount: normalizedChunks.length,
-      }
-    );
-
     /*
-     * IMPORTANT:
-     *
-     * The page expects:
+     * This structure matches the page.tsx we built:
      *
      * data.document
      * data.chunks
-     *
-     * So return chunks at the top level.
      */
     return NextResponse.json({
       success: true,
@@ -236,10 +180,7 @@ export async function GET(
         id: document.id,
         file_name: document.file_name,
         storage_path: document.storage_path,
-        uploaded_at:
-          document.uploaded_at ??
-          document.created_at ??
-          null,
+        uploaded_at: document.uploaded_at ?? null,
         chunk_count: normalizedChunks.length,
       },
 

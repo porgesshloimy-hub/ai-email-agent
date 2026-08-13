@@ -36,6 +36,10 @@ type Permission = {
   level: PermissionLevel;
 };
 
+type Rule = {
+  description: string;
+};
+
 const EMAIL_ACTIONS = [
   {
     key: "gmail.read",
@@ -179,7 +183,9 @@ function PermissionSelect({
   async function handleChange(
     event: React.ChangeEvent<HTMLSelectElement>
   ) {
-    const newLevel = event.target.value as PermissionLevel;
+    const newLevel =
+      event.target.value as PermissionLevel;
+
     const previousLevel = selectedLevel;
 
     setSelectedLevel(newLevel);
@@ -286,23 +292,67 @@ function SectionHeader({
   );
 }
 
+function Modal({
+  children,
+  onClose,
+}: {
+  children: React.ReactNode;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 1000,
+        background: "rgba(0,0,0,0.45)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 20,
+      }}
+    >
+      <div
+        onClick={(event) => event.stopPropagation()}
+        style={{
+          width: "100%",
+          maxWidth: 760,
+          maxHeight: "85vh",
+          background: "#fff",
+          borderRadius: 16,
+          boxShadow: "0 20px 60px rgba(0,0,0,0.2)",
+          overflow: "hidden",
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
 export default function AgentPage() {
   const [instructions, setInstructions] = useState("");
-  const [rules, setRules] = useState<
-    { description: string }[]
-  >([]);
-  const [permissions, setPermissions] = useState<Permission[]>(
-    []
-  );
+
+  const [rules, setRules] = useState<Rule[]>([]);
+
+  const [permissions, setPermissions] =
+    useState<Permission[]>([]);
 
   const [loading, setLoading] = useState(true);
 
   const [newRule, setNewRule] = useState("");
   const [savingRule, setSavingRule] = useState(false);
 
+  const [selectedRule, setSelectedRule] =
+    useState<Rule | null>(null);
+
   const [documents, setDocuments] = useState<
     KnowledgeDocument[]
   >([]);
+
   const [knowledgeLoading, setKnowledgeLoading] =
     useState(true);
 
@@ -349,6 +399,11 @@ export default function AgentPage() {
         setPermissions(data.permissions ?? []);
       } catch (error) {
         console.error(error);
+        setMessage(
+          error instanceof Error
+            ? error.message
+            : "Failed to load agent settings."
+        );
       } finally {
         setLoading(false);
       }
@@ -374,6 +429,12 @@ export default function AgentPage() {
       setDocuments(data.documents ?? []);
     } catch (error) {
       console.error(error);
+
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Failed to load knowledge."
+      );
     } finally {
       setKnowledgeLoading(false);
     }
@@ -383,12 +444,32 @@ export default function AgentPage() {
     loadKnowledge();
   }, []);
 
-  function getPermission(action: string): PermissionLevel {
-    return (
-      permissions.find(
-        (permission) => permission.action === action
-      )?.level ?? "approval_required"
+  /*
+   * These are the requested defaults for permissions
+   * that don't yet have a row in the database.
+   *
+   * Existing saved permissions always take priority.
+   */
+  function getPermission(
+    action: string
+  ): PermissionLevel {
+    const existing = permissions.find(
+      (permission) => permission.action === action
     );
+
+    if (existing) {
+      return existing.level;
+    }
+
+    if (
+      action === "gmail.read" ||
+      action === "gmail.draft" ||
+      action === "calendar.read"
+    ) {
+      return "allowed";
+    }
+
+    return "approval_required";
   }
 
   function handlePermissionSaved(
@@ -408,7 +489,13 @@ export default function AgentPage() {
         );
       }
 
-      return [...current, { action, level }];
+      return [
+        ...current,
+        {
+          action,
+          level,
+        },
+      ];
     });
 
     setMessage("Permission saved.");
@@ -423,10 +510,13 @@ export default function AgentPage() {
   ) {
     event.preventDefault();
 
-    const formData = new FormData(event.currentTarget);
+    const formData = new FormData(
+      event.currentTarget
+    );
 
     try {
       await saveInstructions(formData);
+
       setMessage("Instructions saved.");
     } catch (error) {
       setMessage(
@@ -446,16 +536,20 @@ export default function AgentPage() {
       const description = newRule.trim();
 
       const formData = new FormData();
+
       formData.append("description", description);
 
       await addRule(formData);
 
       setRules((current) => [
         ...current,
-        { description },
+        {
+          description,
+        },
       ]);
 
       setNewRule("");
+
       setMessage("Rule added.");
     } catch (error) {
       setMessage(
@@ -481,6 +575,14 @@ export default function AgentPage() {
           (_, ruleIndex) => ruleIndex !== index
         )
       );
+
+      if (
+        selectedRule &&
+        rules[index]?.description ===
+          selectedRule.description
+      ) {
+        setSelectedRule(null);
+      }
 
       setMessage("Rule removed.");
     } catch (error) {
@@ -617,10 +719,6 @@ export default function AgentPage() {
         );
       }
 
-      /*
-       * If the deleted item is currently open,
-       * close its dialog.
-       */
       if (selectedKnowledge?.id === id) {
         setSelectedKnowledge(null);
         setKnowledgeDetails(null);
@@ -645,6 +743,12 @@ export default function AgentPage() {
   async function handleViewKnowledge(
     document: KnowledgeDocument
   ) {
+    /*
+     * Set the selected document BEFORE making the request.
+     *
+     * This guarantees that the dialog opens immediately
+     * and shows its loading state while the API request runs.
+     */
     setSelectedKnowledge(document);
     setKnowledgeDetails(null);
     setKnowledgeDetailError("");
@@ -659,11 +763,6 @@ export default function AgentPage() {
         }
       );
 
-      /*
-       * Don't assume every response is JSON.
-       * This makes debugging much easier if a route
-       * unexpectedly returns a Next.js HTML error page.
-       */
       const contentType =
         response.headers.get("content-type") || "";
 
@@ -672,7 +771,7 @@ export default function AgentPage() {
       if (contentType.includes("application/json")) {
         data = await response.json();
       } else {
-        const text = await response.text();
+        await response.text();
 
         throw new Error(
           `Knowledge detail request returned an unexpected response (${response.status}).`
@@ -707,13 +806,14 @@ export default function AgentPage() {
   }
 
   function closeKnowledgeDialog() {
-    if (knowledgeDetailLoading) {
-      return;
-    }
-
     setSelectedKnowledge(null);
     setKnowledgeDetails(null);
     setKnowledgeDetailError("");
+    setKnowledgeDetailLoading(false);
+  }
+
+  function closeRuleDialog() {
+    setSelectedRule(null);
   }
 
   if (loading) {
@@ -1148,6 +1248,8 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
                       display: "flex",
                       gap: 10,
                       alignItems: "flex-start",
+                      minWidth: 0,
+                      flex: 1,
                     }}
                   >
                     <span
@@ -1165,28 +1267,58 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
                       style={{
                         fontSize: 14,
                         lineHeight: 1.5,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
                       }}
                     >
                       {rule.description}
                     </span>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleDeleteRule(index)
-                    }
+                  <div
                     style={{
-                      border: 0,
-                      background: "transparent",
-                      color: "#a1a1aa",
-                      fontSize: 13,
-                      cursor: "pointer",
-                      padding: "5px 7px",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 5,
+                      flexShrink: 0,
                     }}
                   >
-                    Remove
-                  </button>
+                    {/* Explicit View button */}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSelectedRule(rule)
+                      }
+                      style={{
+                        border: 0,
+                        background: "transparent",
+                        color: "#18181b",
+                        fontSize: 12,
+                        fontWeight: 600,
+                        cursor: "pointer",
+                        padding: "6px 8px",
+                      }}
+                    >
+                      View
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleDeleteRule(index)
+                      }
+                      style={{
+                        border: 0,
+                        background: "transparent",
+                        color: "#a1a1aa",
+                        fontSize: 12,
+                        cursor: "pointer",
+                        padding: "6px 8px",
+                      }}
+                    >
+                      Remove
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -1247,7 +1379,7 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
                     : "pointer",
               }}
             >
-              Add rule
+              {savingRule ? "Adding..." : "Add rule"}
             </button>
           </div>
         </section>
@@ -1491,24 +1623,12 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
                       padding: "13px 15px",
                       border: "1px solid #e4e4e7",
                       borderRadius: 10,
-                      transition:
-                        "background 0.15s ease",
                     }}
                   >
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleViewKnowledge(document)
-                      }
+                    <div
                       style={{
-                        border: 0,
-                        background: "transparent",
-                        padding: 0,
-                        margin: 0,
-                        textAlign: "left",
-                        cursor: "pointer",
-                        flex: 1,
                         minWidth: 0,
+                        flex: 1,
                       }}
                     >
                       <div
@@ -1539,26 +1659,54 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
                           document.uploaded_at
                         ).toLocaleDateString()}
                       </div>
-                    </button>
+                    </div>
 
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleDeleteKnowledge(
-                          document.id
-                        )
-                      }
+                    <div
                       style={{
-                        border: 0,
-                        background: "transparent",
-                        color: "#71717a",
-                        fontSize: 12,
-                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 5,
                         flexShrink: 0,
                       }}
                     >
-                      Delete
-                    </button>
+                      {/* Explicit View button */}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleViewKnowledge(document)
+                        }
+                        style={{
+                          border: 0,
+                          background: "transparent",
+                          color: "#18181b",
+                          fontSize: 12,
+                          fontWeight: 600,
+                          cursor: "pointer",
+                          padding: "6px 8px",
+                        }}
+                      >
+                        View
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleDeleteKnowledge(
+                            document.id
+                          )
+                        }
+                        style={{
+                          border: 0,
+                          background: "transparent",
+                          color: "#71717a",
+                          fontSize: 12,
+                          cursor: "pointer",
+                          padding: "6px 8px",
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -1582,365 +1730,474 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
         </div>
       </div>
 
-      {/* Knowledge detail dialog */}
+      {/* RULE DETAIL DIALOG */}
+      {selectedRule && (
+        <Modal onClose={closeRuleDialog}>
+          <div
+            style={{
+              padding: "20px 22px",
+              borderBottom: "1px solid #e4e4e7",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 15,
+            }}
+          >
+            <div>
+              <div
+                style={{
+                  fontSize: 11,
+                  fontWeight: 700,
+                  letterSpacing: "0.08em",
+                  textTransform: "uppercase",
+                  color: "#71717a",
+                  marginBottom: 5,
+                }}
+              >
+                Agent rule
+              </div>
+
+              <h2
+                style={{
+                  margin: 0,
+                  fontSize: 20,
+                  letterSpacing: "-0.02em",
+                }}
+              >
+                Rule details
+              </h2>
+            </div>
+
+            <button
+              type="button"
+              onClick={closeRuleDialog}
+              aria-label="Close"
+              style={{
+                border: 0,
+                background: "#f4f4f5",
+                width: 34,
+                height: 34,
+                borderRadius: 8,
+                cursor: "pointer",
+                fontSize: 18,
+                color: "#52525b",
+              }}
+            >
+              ×
+            </button>
+          </div>
+
+          <div
+            style={{
+              padding: 22,
+              overflowY: "auto",
+            }}
+          >
+            <div
+              style={{
+                fontSize: 11,
+                color: "#a1a1aa",
+                textTransform: "uppercase",
+                fontWeight: 700,
+                letterSpacing: "0.06em",
+                marginBottom: 9,
+              }}
+            >
+              Rule
+            </div>
+
+            <div
+              style={{
+                padding: 18,
+                border: "1px solid #e4e4e7",
+                borderRadius: 10,
+                background: "#fafafa",
+                fontSize: 15,
+                lineHeight: 1.7,
+                color: "#27272a",
+                whiteSpace: "pre-wrap",
+              }}
+            >
+              {selectedRule.description}
+            </div>
+          </div>
+
+          <div
+            style={{
+              padding: "14px 22px",
+              borderTop: "1px solid #e4e4e7",
+              display: "flex",
+              justifyContent: "flex-end",
+            }}
+          >
+            <button
+              type="button"
+              onClick={closeRuleDialog}
+              style={{
+                border: 0,
+                borderRadius: 9,
+                padding: "10px 16px",
+                background: "#18181b",
+                color: "#fff",
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              Close
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {/* KNOWLEDGE DETAIL DIALOG */}
       {selectedKnowledge && (
-        <div
-          onClick={() => {
+        <Modal
+          onClose={() => {
             if (!knowledgeDetailLoading) {
               closeKnowledgeDialog();
             }
           }}
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 1000,
-            background: "rgba(0,0,0,0.45)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 20,
-          }}
         >
+          {/* Dialog header */}
           <div
-            onClick={(event) =>
-              event.stopPropagation()
-            }
             style={{
-              width: "100%",
-              maxWidth: 760,
-              maxHeight: "85vh",
-              background: "#fff",
-              borderRadius: 16,
-              boxShadow:
-                "0 20px 60px rgba(0,0,0,0.2)",
-              overflow: "hidden",
+              padding: "20px 22px",
+              borderBottom: "1px solid #e4e4e7",
               display: "flex",
-              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 15,
             }}
           >
-            {/* Dialog header */}
-            <div
-              style={{
-                padding: "20px 22px",
-                borderBottom: "1px solid #e4e4e7",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 15,
-              }}
-            >
-              <div style={{ minWidth: 0 }}>
-                <div
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 700,
-                    letterSpacing: "0.08em",
-                    textTransform: "uppercase",
-                    color: "#71717a",
-                    marginBottom: 5,
-                  }}
-                >
-                  Business knowledge
-                </div>
-
-                <h2
-                  style={{
-                    margin: 0,
-                    fontSize: 20,
-                    letterSpacing: "-0.02em",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {selectedKnowledge.file_name}
-                </h2>
+            <div style={{ minWidth: 0 }}>
+              <div
+                style={{
+                  fontSize: 11,
+                  fontWeight: 700,
+                  letterSpacing: "0.08em",
+                  textTransform: "uppercase",
+                  color: "#71717a",
+                  marginBottom: 5,
+                }}
+              >
+                Business knowledge
               </div>
 
-              <button
-                type="button"
-                onClick={closeKnowledgeDialog}
-                disabled={knowledgeDetailLoading}
-                aria-label="Close"
+              <h2
                 style={{
-                  border: 0,
-                  background: "#f4f4f5",
-                  width: 34,
-                  height: 34,
-                  borderRadius: 8,
-                  cursor: knowledgeDetailLoading
-                    ? "default"
-                    : "pointer",
-                  fontSize: 18,
-                  color: "#52525b",
-                  flexShrink: 0,
-                  opacity: knowledgeDetailLoading
-                    ? 0.5
-                    : 1,
+                  margin: 0,
+                  fontSize: 20,
+                  letterSpacing: "-0.02em",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
                 }}
               >
-                ×
-              </button>
+                {selectedKnowledge.file_name}
+              </h2>
             </div>
 
-            {/* Dialog content */}
-            <div
+            <button
+              type="button"
+              onClick={closeKnowledgeDialog}
+              disabled={knowledgeDetailLoading}
+              aria-label="Close"
               style={{
-                padding: 22,
-                overflowY: "auto",
+                border: 0,
+                background: "#f4f4f5",
+                width: 34,
+                height: 34,
+                borderRadius: 8,
+                cursor: knowledgeDetailLoading
+                  ? "default"
+                  : "pointer",
+                fontSize: 18,
+                color: "#52525b",
+                flexShrink: 0,
+                opacity: knowledgeDetailLoading
+                  ? 0.5
+                  : 1,
               }}
             >
-              {knowledgeDetailLoading ? (
+              ×
+            </button>
+          </div>
+
+          {/* Dialog content */}
+          <div
+            style={{
+              padding: 22,
+              overflowY: "auto",
+            }}
+          >
+            {knowledgeDetailLoading ? (
+              <div
+                style={{
+                  padding: "55px 20px",
+                  textAlign: "center",
+                  color: "#71717a",
+                  fontSize: 14,
+                }}
+              >
                 <div
                   style={{
-                    padding: "55px 20px",
-                    textAlign: "center",
-                    color: "#71717a",
-                    fontSize: 14,
+                    width: 28,
+                    height: 28,
+                    border: "3px solid #e4e4e7",
+                    borderTop:
+                      "3px solid #18181b",
+                    borderRadius: "50%",
+                    margin: "0 auto 14px",
+                    animation:
+                      "knowledge-spin 0.8s linear infinite",
+                  }}
+                />
+
+                Loading knowledge...
+              </div>
+            ) : knowledgeDetailError ? (
+              <div
+                style={{
+                  padding: 16,
+                  borderRadius: 10,
+                  background: "#fef2f2",
+                  border: "1px solid #fecaca",
+                  color: "#b91c1c",
+                  fontSize: 14,
+                  lineHeight: 1.5,
+                }}
+              >
+                <strong>
+                  Could not load this knowledge.
+                </strong>
+
+                <div style={{ marginTop: 5 }}>
+                  {knowledgeDetailError}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleViewKnowledge(
+                      selectedKnowledge
+                    )
+                  }
+                  style={{
+                    marginTop: 14,
+                    border: 0,
+                    borderRadius: 8,
+                    padding: "9px 13px",
+                    background: "#18181b",
+                    color: "#fff",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: "pointer",
                   }}
                 >
-                  <div
-                    style={{
-                      width: 28,
-                      height: 28,
-                      border: "3px solid #e4e4e7",
-                      borderTop:
-                        "3px solid #18181b",
-                      borderRadius: "50%",
-                      margin: "0 auto 14px",
-                      animation:
-                        "knowledge-spin 0.8s linear infinite",
-                    }}
-                  />
-
-                  Loading knowledge...
-                </div>
-              ) : knowledgeDetailError ? (
+                  Try again
+                </button>
+              </div>
+            ) : knowledgeDetails ? (
+              <>
+                {/* Metadata */}
                 <div
                   style={{
-                    padding: 16,
+                    display: "flex",
+                    gap: 24,
+                    marginBottom: 20,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <div>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "#a1a1aa",
+                        textTransform: "uppercase",
+                        fontWeight: 700,
+                        letterSpacing: "0.06em",
+                      }}
+                    >
+                      File
+                    </div>
+
+                    <div
+                      style={{
+                        fontSize: 13,
+                        marginTop: 4,
+                      }}
+                    >
+                      {
+                        knowledgeDetails.document
+                          .file_name
+                      }
+                    </div>
+                  </div>
+
+                  <div>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "#a1a1aa",
+                        textTransform: "uppercase",
+                        fontWeight: 700,
+                        letterSpacing: "0.06em",
+                      }}
+                    >
+                      Added
+                    </div>
+
+                    <div
+                      style={{
+                        fontSize: 13,
+                        marginTop: 4,
+                      }}
+                    >
+                      {new Date(
+                        knowledgeDetails.document.uploaded_at
+                      ).toLocaleString()}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "#a1a1aa",
+                        textTransform: "uppercase",
+                        fontWeight: 700,
+                        letterSpacing: "0.06em",
+                      }}
+                    >
+                      Chunks
+                    </div>
+
+                    <div
+                      style={{
+                        fontSize: 13,
+                        marginTop: 4,
+                      }}
+                    >
+                      {
+                        knowledgeDetails.chunks
+                          .length
+                      }
+                    </div>
+                  </div>
+                </div>
+
+                {/* Stored content */}
+                <div
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 700,
+                    color: "#52525b",
+                    marginBottom: 10,
+                  }}
+                >
+                  Stored knowledge
+                </div>
+
+                <div
+                  style={{
+                    border: "1px solid #e4e4e7",
                     borderRadius: 10,
-                    background: "#fef2f2",
-                    border: "1px solid #fecaca",
-                    color: "#b91c1c",
-                    fontSize: 14,
-                    lineHeight: 1.5,
+                    overflow: "hidden",
                   }}
                 >
-                  <strong>
-                    Could not load this knowledge.
-                  </strong>
-
-                  <div style={{ marginTop: 5 }}>
-                    {knowledgeDetailError}
-                  </div>
-                </div>
-              ) : knowledgeDetails ? (
-                <>
-                  {/* Metadata */}
-                  <div
-                    style={{
-                      display: "flex",
-                      gap: 24,
-                      marginBottom: 20,
-                      flexWrap: "wrap",
-                    }}
-                  >
-                    <div>
-                      <div
-                        style={{
-                          fontSize: 11,
-                          color: "#a1a1aa",
-                          textTransform: "uppercase",
-                          fontWeight: 700,
-                          letterSpacing:
-                            "0.06em",
-                        }}
-                      >
-                        File
-                      </div>
-
-                      <div
-                        style={{
-                          fontSize: 13,
-                          marginTop: 4,
-                        }}
-                      >
-                        {
-                          knowledgeDetails.document
-                            .file_name
-                        }
-                      </div>
+                  {knowledgeDetails.chunks.length ===
+                  0 ? (
+                    <div
+                      style={{
+                        padding: 20,
+                        color: "#71717a",
+                        fontSize: 13,
+                      }}
+                    >
+                      No readable text was stored for
+                      this knowledge item.
                     </div>
-
-                    <div>
-                      <div
-                        style={{
-                          fontSize: 11,
-                          color: "#a1a1aa",
-                          textTransform: "uppercase",
-                          fontWeight: 700,
-                          letterSpacing:
-                            "0.06em",
-                        }}
-                      >
-                        Added
-                      </div>
-
-                      <div
-                        style={{
-                          fontSize: 13,
-                          marginTop: 4,
-                        }}
-                      >
-                        {new Date(
-                          knowledgeDetails.document.uploaded_at
-                        ).toLocaleString()}
-                      </div>
-                    </div>
-
-                    <div>
-                      <div
-                        style={{
-                          fontSize: 11,
-                          color: "#a1a1aa",
-                          textTransform: "uppercase",
-                          fontWeight: 700,
-                          letterSpacing:
-                            "0.06em",
-                        }}
-                      >
-                        Chunks
-                      </div>
-
-                      <div
-                        style={{
-                          fontSize: 13,
-                          marginTop: 4,
-                        }}
-                      >
-                        {
-                          knowledgeDetails.chunks
-                            .length
-                        }
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Stored content */}
-                  <div
-                    style={{
-                      fontSize: 13,
-                      fontWeight: 700,
-                      color: "#52525b",
-                      marginBottom: 10,
-                    }}
-                  >
-                    Stored knowledge
-                  </div>
-
-                  <div
-                    style={{
-                      border: "1px solid #e4e4e7",
-                      borderRadius: 10,
-                      overflow: "hidden",
-                    }}
-                  >
-                    {knowledgeDetails.chunks
-                      .length === 0 ? (
-                      <div
-                        style={{
-                          padding: 20,
-                          color: "#71717a",
-                          fontSize: 13,
-                        }}
-                      >
-                        No readable text was stored
-                        for this knowledge item.
-                      </div>
-                    ) : (
-                      knowledgeDetails.chunks.map(
-                        (chunk, index) => (
+                  ) : (
+                    knowledgeDetails.chunks.map(
+                      (chunk, index) => (
+                        <div
+                          key={chunk.id}
+                          style={{
+                            padding: "16px 18px",
+                            borderTop:
+                              index === 0
+                                ? "none"
+                                : "1px solid #f0f0f1",
+                          }}
+                        >
                           <div
-                            key={chunk.id}
                             style={{
-                              padding:
-                                "16px 18px",
-                              borderTop:
-                                index === 0
-                                  ? "none"
-                                  : "1px solid #f0f0f1",
+                              fontSize: 11,
+                              fontWeight: 700,
+                              color: "#a1a1aa",
+                              marginBottom: 8,
                             }}
                           >
-                            <div
-                              style={{
-                                fontSize: 11,
-                                fontWeight: 700,
-                                color: "#a1a1aa",
-                                marginBottom: 8,
-                              }}
-                            >
-                              CHUNK {index + 1}
-                            </div>
-
-                            <div
-                              style={{
-                                fontSize: 14,
-                                lineHeight: 1.65,
-                                whiteSpace:
-                                  "pre-wrap",
-                                color: "#27272a",
-                              }}
-                            >
-                              {chunk.content}
-                            </div>
+                            CHUNK {index + 1}
                           </div>
-                        )
-                      )
-                    )}
-                  </div>
-                </>
-              ) : null}
-            </div>
 
-            {/* Dialog footer */}
-            <div
+                          <div
+                            style={{
+                              fontSize: 14,
+                              lineHeight: 1.65,
+                              whiteSpace: "pre-wrap",
+                              color: "#27272a",
+                            }}
+                          >
+                            {chunk.content}
+                          </div>
+                        </div>
+                      )
+                    )
+                  )}
+                </div>
+              </>
+            ) : null}
+          </div>
+
+          {/* Dialog footer */}
+          <div
+            style={{
+              padding: "14px 22px",
+              borderTop: "1px solid #e4e4e7",
+              display: "flex",
+              justifyContent: "flex-end",
+            }}
+          >
+            <button
+              type="button"
+              onClick={closeKnowledgeDialog}
+              disabled={knowledgeDetailLoading}
               style={{
-                padding: "14px 22px",
-                borderTop: "1px solid #e4e4e7",
-                display: "flex",
-                justifyContent: "flex-end",
+                border: 0,
+                borderRadius: 9,
+                padding: "10px 16px",
+                background:
+                  knowledgeDetailLoading
+                    ? "#e4e4e7"
+                    : "#18181b",
+                color:
+                  knowledgeDetailLoading
+                    ? "#a1a1aa"
+                    : "#fff",
+                fontSize: 13,
+                fontWeight: 600,
+                cursor:
+                  knowledgeDetailLoading
+                    ? "default"
+                    : "pointer",
               }}
             >
-              <button
-                type="button"
-                onClick={closeKnowledgeDialog}
-                disabled={knowledgeDetailLoading}
-                style={{
-                  border: 0,
-                  borderRadius: 9,
-                  padding: "10px 16px",
-                  background:
-                    knowledgeDetailLoading
-                      ? "#e4e4e7"
-                      : "#18181b",
-                  color:
-                    knowledgeDetailLoading
-                      ? "#a1a1aa"
-                      : "#fff",
-                  fontSize: 13,
-                  fontWeight: 600,
-                  cursor:
-                    knowledgeDetailLoading
-                      ? "default"
-                      : "pointer",
-                }}
-              >
-                Close
-              </button>
-            </div>
+              Close
+            </button>
           </div>
-        </div>
+        </Modal>
       )}
 
       <style jsx global>{`

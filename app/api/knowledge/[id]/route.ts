@@ -6,22 +6,25 @@ import {
 
 export const dynamic = "force-dynamic";
 
-interface RouteContext {
+type RouteContext = {
   params: Promise<{
     id: string;
   }>;
-}
+};
 
 /**
  * GET /api/knowledge/[id]
  *
- * Returns the details and content of a knowledge document.
+ * Returns the details and stored content of a knowledge document.
  */
 export async function GET(
-  _request: Request,
+  request: Request,
   context: RouteContext
 ) {
   try {
+    /*
+     * Get the authenticated user.
+     */
     const supabase = await createServerSupabase();
 
     const {
@@ -30,11 +33,45 @@ export async function GET(
     } = await supabase.auth.getUser();
 
     if (userError || !user) {
+      console.error(
+        "Knowledge GET: user authentication failed:",
+        userError
+      );
+
       return NextResponse.json(
-        { error: "Not authenticated" },
+        {
+          error: "Not authenticated",
+        },
         { status: 401 }
       );
     }
+
+    /*
+     * IMPORTANT:
+     * In current Next.js versions, route params are async.
+     */
+    const { id: documentId } = await context.params;
+
+    if (!documentId) {
+      console.error(
+        "Knowledge GET: missing document ID"
+      );
+
+      return NextResponse.json(
+        {
+          error: "Knowledge document ID is required",
+        },
+        { status: 400 }
+      );
+    }
+
+    console.log(
+      "Knowledge GET:",
+      {
+        userId: user.id,
+        documentId,
+      }
+    );
 
     /*
      * Find the authenticated user's tenant.
@@ -47,64 +84,92 @@ export async function GET(
         .single();
 
     if (tenantError || !tenant) {
+      console.error(
+        "Knowledge GET: tenant not found:",
+        {
+          userId: user.id,
+          tenantError,
+        }
+      );
+
       return NextResponse.json(
-        { error: "Tenant not found" },
+        {
+          error: "Tenant not found",
+        },
         { status: 404 }
       );
     }
 
-    /*
-     * Next.js route-handler params are asynchronous.
-     */
-    const { id: documentId } = await context.params;
-
-    if (!documentId) {
-      return NextResponse.json(
-        { error: "Knowledge document ID is required" },
-        { status: 400 }
-      );
-    }
-
-    const serviceSupabase = createServiceSupabase();
+    console.log(
+      "Knowledge GET: resolved tenant:",
+      tenant.id
+    );
 
     /*
-     * Fetch the document.
+     * Use the service client for the tenant-scoped
+     * document/chunk lookup.
      *
-     * The tenant_id check is important so one user
+     * We explicitly filter by tenant_id so a user
      * cannot access another tenant's knowledge.
      */
+    const serviceSupabase = createServiceSupabase();
+
     const {
       data: document,
       error: documentError,
     } = await serviceSupabase
       .from("knowledge_documents")
       .select(
-        "id, tenant_id, file_name, storage_path, uploaded_at, created_at"
+        `
+          id,
+          tenant_id,
+          file_name,
+          storage_path,
+          uploaded_at,
+          created_at
+        `
       )
       .eq("id", documentId)
       .eq("tenant_id", tenant.id)
-      .single();
+      .maybeSingle();
 
-    if (documentError || !document) {
+    if (documentError) {
       console.error(
-        "Knowledge document not found:",
+        "Knowledge GET: document query failed:",
+        documentError
+      );
+
+      return NextResponse.json(
+        {
+          error: "Failed to load knowledge document",
+          details: documentError.message,
+        },
+        { status: 500 }
+      );
+    }
+
+    if (!document) {
+      console.error(
+        "Knowledge GET: document not found:",
         {
           documentId,
           tenantId: tenant.id,
-          error: documentError,
         }
       );
 
       return NextResponse.json(
-        { error: "Knowledge document not found" },
+        {
+          error: "Knowledge document not found",
+          documentId,
+        },
         { status: 404 }
       );
     }
 
     /*
-     * Fetch all chunks belonging to this document.
+     * Fetch the chunks belonging to this document.
      *
-     * We deliberately do NOT return embeddings.
+     * Do NOT return embeddings to the browser.
      */
     const {
       data: chunks,
@@ -118,27 +183,52 @@ export async function GET(
 
     if (chunksError) {
       console.error(
-        "Failed to load knowledge chunks:",
-        {
-          documentId,
-          tenantId: tenant.id,
-          error: chunksError,
-        }
+        "Knowledge GET: chunk query failed:",
+        chunksError
       );
 
       return NextResponse.json(
-        { error: "Failed to load knowledge content" },
+        {
+          error: "Failed to load knowledge content",
+          details: chunksError.message,
+        },
         { status: 500 }
       );
     }
 
+    const normalizedChunks =
+      (chunks ?? []).map((chunk, index) => ({
+        id: chunk.id,
+        index: index + 1,
+        content: chunk.content ?? "",
+      }));
+
     /*
-     * Combine the chunks into readable content.
+     * Combine chunks into readable content.
      */
-    const content = (chunks ?? [])
+    const content = normalizedChunks
       .map((chunk) => chunk.content)
       .join("\n\n");
 
+    console.log(
+      "Knowledge GET: success:",
+      {
+        documentId,
+        tenantId: tenant.id,
+        chunkCount: normalizedChunks.length,
+      }
+    );
+
+    /*
+     * IMPORTANT:
+     *
+     * The page expects:
+     *
+     * data.document
+     * data.chunks
+     *
+     * So return chunks at the top level.
+     */
     return NextResponse.json({
       success: true,
 
@@ -146,27 +236,20 @@ export async function GET(
         id: document.id,
         file_name: document.file_name,
         storage_path: document.storage_path,
-
         uploaded_at:
           document.uploaded_at ??
           document.created_at ??
           null,
-
-        chunk_count: chunks?.length ?? 0,
-
-        content,
-
-        chunks:
-          chunks?.map((chunk, index) => ({
-            id: chunk.id,
-            index: index + 1,
-            content: chunk.content,
-          })) ?? [],
+        chunk_count: normalizedChunks.length,
       },
+
+      chunks: normalizedChunks,
+
+      content,
     });
   } catch (error) {
     console.error(
-      "Knowledge details error:",
+      "Knowledge GET unexpected error:",
       error
     );
 
@@ -189,10 +272,13 @@ export async function GET(
  * and its original Storage file if applicable.
  */
 export async function DELETE(
-  _request: Request,
+  request: Request,
   context: RouteContext
 ) {
   try {
+    /*
+     * Authenticate the user.
+     */
     const supabase = await createServerSupabase();
 
     const {
@@ -202,13 +288,29 @@ export async function DELETE(
 
     if (userError || !user) {
       return NextResponse.json(
-        { error: "Not authenticated" },
+        {
+          error: "Not authenticated",
+        },
         { status: 401 }
       );
     }
 
     /*
-     * Find the authenticated user's tenant.
+     * Current Next.js route params are async.
+     */
+    const { id: documentId } = await context.params;
+
+    if (!documentId) {
+      return NextResponse.json(
+        {
+          error: "Knowledge document ID is required",
+        },
+        { status: 400 }
+      );
+    }
+
+    /*
+     * Find the user's tenant.
      */
     const { data: tenant, error: tenantError } =
       await supabase
@@ -219,52 +321,63 @@ export async function DELETE(
 
     if (tenantError || !tenant) {
       return NextResponse.json(
-        { error: "Tenant not found" },
+        {
+          error: "Tenant not found",
+        },
         { status: 404 }
-      );
-    }
-
-    /*
-     * Next.js route-handler params are asynchronous.
-     */
-    const { id: documentId } = await context.params;
-
-    if (!documentId) {
-      return NextResponse.json(
-        { error: "Knowledge document ID is required" },
-        { status: 400 }
       );
     }
 
     const serviceSupabase = createServiceSupabase();
 
     /*
-     * Fetch the document first so we know its Storage path.
-     *
-     * The tenant_id check is critical for tenant isolation.
+     * Get the document first so we can determine
+     * whether there is an uploaded Storage file.
      */
     const {
       data: document,
       error: documentError,
     } = await serviceSupabase
       .from("knowledge_documents")
-      .select("id, storage_path")
+      .select(
+        `
+          id,
+          tenant_id,
+          storage_path
+        `
+      )
       .eq("id", documentId)
       .eq("tenant_id", tenant.id)
-      .single();
+      .maybeSingle();
 
-    if (documentError || !document) {
+    if (documentError) {
+      console.error(
+        "Knowledge DELETE: document query failed:",
+        documentError
+      );
+
       return NextResponse.json(
-        { error: "Knowledge document not found" },
+        {
+          error: "Failed to find knowledge document",
+        },
+        { status: 500 }
+      );
+    }
+
+    if (!document) {
+      return NextResponse.json(
+        {
+          error: "Knowledge document not found",
+        },
         { status: 404 }
       );
     }
 
     /*
-     * Remove the original file if this was a real upload.
+     * Remove the original uploaded file.
      *
-     * Manual entries use manual/... and don't have
-     * a Storage object that needs to be removed.
+     * Manual knowledge uses manual/... and therefore
+     * does not have an actual Storage object.
      */
     if (
       document.storage_path &&
@@ -276,24 +389,22 @@ export async function DELETE(
           .remove([document.storage_path]);
 
       if (storageError) {
+        /*
+         * Don't block database deletion just because
+         * Storage cleanup failed.
+         */
         console.error(
-          "Failed to remove knowledge file:",
+          "Knowledge DELETE: Storage cleanup failed:",
           storageError
         );
-
-        /*
-         * Continue with database deletion.
-         *
-         * A Storage problem should not leave the
-         * knowledge item permanently stuck.
-         */
       }
     }
 
     /*
+     * Delete the document.
+     *
      * knowledge_chunks should have ON DELETE CASCADE,
-     * so deleting the document also removes its chunks
-     * and embeddings.
+     * so its chunks/embeddings are deleted as well.
      */
     const { error: deleteError } =
       await serviceSupabase
@@ -304,12 +415,14 @@ export async function DELETE(
 
     if (deleteError) {
       console.error(
-        "Failed to delete knowledge document:",
+        "Knowledge DELETE: database deletion failed:",
         deleteError
       );
 
       return NextResponse.json(
-        { error: "Failed to delete knowledge" },
+        {
+          error: "Failed to delete knowledge",
+        },
         { status: 500 }
       );
     }
@@ -319,7 +432,7 @@ export async function DELETE(
     });
   } catch (error) {
     console.error(
-      "Knowledge delete error:",
+      "Knowledge DELETE unexpected error:",
       error
     );
 

@@ -6,14 +6,16 @@ import {
 
 export const dynamic = "force-dynamic";
 
-type RouteContext = {
-  params: Promise<{
+interface RouteContext {
+  params: {
     id: string;
-  }>;
-};
+  };
+}
 
 /**
  * GET /api/knowledge/[id]
+ *
+ * Returns a knowledge document and all of its readable content.
  */
 export async function GET(
   request: Request,
@@ -21,6 +23,10 @@ export async function GET(
 ) {
   try {
     const supabase = await createServerSupabase();
+
+    // ---------------------------------------------------------
+    // 1. Authenticate the user
+    // ---------------------------------------------------------
 
     const {
       data: { user },
@@ -34,33 +40,18 @@ export async function GET(
       );
     }
 
-    /*
-     * Next.js route params are async.
-     */
-    const { id: documentId } = await context.params;
+    // ---------------------------------------------------------
+    // 2. Find the user's tenant
+    // ---------------------------------------------------------
 
-    if (!documentId) {
-      return NextResponse.json(
-        { error: "Knowledge document ID is required" },
-        { status: 400 }
-      );
-    }
-
-    /*
-     * Find the authenticated user's tenant.
-     */
-    const { data: tenant, error: tenantError } =
-      await supabase
-        .from("tenants")
-        .select("id")
-        .eq("owner_user_id", user.id)
-        .single();
+    const { data: tenant, error: tenantError } = await supabase
+      .from("tenants")
+      .select("id")
+      .eq("owner_user_id", user.id)
+      .single();
 
     if (tenantError || !tenant) {
-      console.error(
-        "Knowledge GET: tenant not found:",
-        tenantError
-      );
+      console.error("Knowledge tenant lookup failed:", tenantError);
 
       return NextResponse.json(
         { error: "Tenant not found" },
@@ -68,111 +59,116 @@ export async function GET(
       );
     }
 
+    const documentId = context.params.id;
+
+    // ---------------------------------------------------------
+    // 3. Use the service client for the knowledge tables
+    // ---------------------------------------------------------
+
     const serviceSupabase = createServiceSupabase();
 
-    /*
-     * IMPORTANT:
-     *
-     * knowledge_documents does NOT have created_at.
-     *
-     * Only select columns that actually exist.
-     */
-    const {
-      data: document,
-      error: documentError,
-    } = await serviceSupabase
-      .from("knowledge_documents")
-      .select(
-        `
-          id,
-          tenant_id,
-          file_name,
-          storage_path,
-          uploaded_at
-        `
-      )
-      .eq("id", documentId)
-      .eq("tenant_id", tenant.id)
-      .maybeSingle();
+    // ---------------------------------------------------------
+    // 4. Fetch the document
+    //
+    // IMPORTANT:
+    // knowledge_documents does NOT have created_at.
+    // The actual timestamp column is uploaded_at.
+    // ---------------------------------------------------------
 
-    if (documentError) {
+    const { data: document, error: documentError } =
+      await serviceSupabase
+        .from("knowledge_documents")
+        .select(
+          "id, tenant_id, file_name, storage_path, uploaded_at"
+        )
+        .eq("id", documentId)
+        .eq("tenant_id", tenant.id)
+        .single();
+
+    if (documentError || !document) {
       console.error(
-        "Knowledge GET: document query failed:",
+        "Knowledge document not found:",
         documentError
       );
 
       return NextResponse.json(
         {
-          error: "Failed to load knowledge document",
-          details: documentError.message,
-        },
-        { status: 500 }
-      );
-    }
-
-    if (!document) {
-      console.error(
-        "Knowledge GET: document not found:",
-        {
-          documentId,
-          tenantId: tenant.id,
-        }
-      );
-
-      return NextResponse.json(
-        {
           error: "Knowledge document not found",
-          documentId,
+          details: documentError?.message ?? null,
         },
         { status: 404 }
       );
     }
 
+    // ---------------------------------------------------------
+    // 5. Fetch the document's chunks
+    //
+    // The actual readable text lives here.
+    // ---------------------------------------------------------
+
+    const { data: chunks, error: chunksError } =
+      await serviceSupabase
+        .from("knowledge_chunks")
+        .select("id, content")
+        .eq("document_id", document.id)
+        .eq("tenant_id", tenant.id)
+        .order("created_at", { ascending: true });
+
     /*
-     * Load the stored knowledge chunks.
+     * Some databases may not have created_at on knowledge_chunks.
+     * If that happens, retry without ordering by created_at.
      */
-    const {
-      data: chunks,
-      error: chunksError,
-    } = await serviceSupabase
-      .from("knowledge_chunks")
-      .select("id, content")
-      .eq("document_id", documentId)
-      .eq("tenant_id", tenant.id)
-      .order("id", { ascending: true });
+    let finalChunks = chunks;
 
     if (chunksError) {
-      console.error(
-        "Knowledge GET: chunk query failed:",
+      console.warn(
+        "Knowledge chunks query with created_at ordering failed. Retrying without ordering:",
         chunksError
       );
 
-      return NextResponse.json(
-        {
-          error: "Failed to load knowledge content",
-          details: chunksError.message,
-        },
-        { status: 500 }
-      );
+      const { data: retryChunks, error: retryError } =
+        await serviceSupabase
+          .from("knowledge_chunks")
+          .select("id, content")
+          .eq("document_id", document.id)
+          .eq("tenant_id", tenant.id);
+
+      if (retryError) {
+        console.error(
+          "Failed to load knowledge chunks:",
+          retryError
+        );
+
+        return NextResponse.json(
+          {
+            error: "Failed to load knowledge content",
+            details: retryError.message,
+          },
+          { status: 500 }
+        );
+      }
+
+      finalChunks = retryChunks;
     }
 
-    const normalizedChunks =
-      (chunks ?? []).map((chunk, index) => ({
-        id: chunk.id,
-        index: index + 1,
-        content: chunk.content ?? "",
-      }));
+    // ---------------------------------------------------------
+    // 6. Combine all readable chunks into the document content
+    // ---------------------------------------------------------
 
-    const content = normalizedChunks
-      .map((chunk) => chunk.content)
+    const readableChunks = (finalChunks ?? []).filter(
+      (chunk) =>
+        typeof chunk.content === "string" &&
+        chunk.content.trim().length > 0
+    );
+
+    const content = readableChunks
+      .map((chunk) => chunk.content.trim())
       .join("\n\n");
 
-    /*
-     * This structure matches the page.tsx we built:
-     *
-     * data.document
-     * data.chunks
-     */
+    // ---------------------------------------------------------
+    // 7. Return the document
+    // ---------------------------------------------------------
+
     return NextResponse.json({
       success: true,
 
@@ -181,18 +177,20 @@ export async function GET(
         file_name: document.file_name,
         storage_path: document.storage_path,
         uploaded_at: document.uploaded_at ?? null,
-        chunk_count: normalizedChunks.length,
+
+        chunk_count: readableChunks.length,
+
+        content,
+
+        chunks: readableChunks.map((chunk, index) => ({
+          id: chunk.id,
+          index: index + 1,
+          content: chunk.content,
+        })),
       },
-
-      chunks: normalizedChunks,
-
-      content,
     });
   } catch (error) {
-    console.error(
-      "Knowledge GET unexpected error:",
-      error
-    );
+    console.error("Knowledge details error:", error);
 
     return NextResponse.json(
       {
@@ -209,18 +207,21 @@ export async function GET(
 /**
  * DELETE /api/knowledge/[id]
  *
- * Deletes the knowledge document, its chunks/embeddings,
- * and its original Storage file if applicable.
+ * Deletes:
+ * - the knowledge document
+ * - its chunks/embeddings
+ * - its Storage file when applicable
  */
 export async function DELETE(
   request: Request,
   context: RouteContext
 ) {
   try {
-    /*
-     * Authenticate the user.
-     */
     const supabase = await createServerSupabase();
+
+    // ---------------------------------------------------------
+    // 1. Authenticate
+    // ---------------------------------------------------------
 
     const {
       data: { user },
@@ -229,97 +230,60 @@ export async function DELETE(
 
     if (userError || !user) {
       return NextResponse.json(
-        {
-          error: "Not authenticated",
-        },
+        { error: "Not authenticated" },
         { status: 401 }
       );
     }
 
-    /*
-     * Current Next.js route params are async.
-     */
-    const { id: documentId } = await context.params;
+    // ---------------------------------------------------------
+    // 2. Find tenant
+    // ---------------------------------------------------------
 
-    if (!documentId) {
-      return NextResponse.json(
-        {
-          error: "Knowledge document ID is required",
-        },
-        { status: 400 }
-      );
-    }
-
-    /*
-     * Find the user's tenant.
-     */
-    const { data: tenant, error: tenantError } =
-      await supabase
-        .from("tenants")
-        .select("id")
-        .eq("owner_user_id", user.id)
-        .single();
+    const { data: tenant, error: tenantError } = await supabase
+      .from("tenants")
+      .select("id")
+      .eq("owner_user_id", user.id)
+      .single();
 
     if (tenantError || !tenant) {
       return NextResponse.json(
-        {
-          error: "Tenant not found",
-        },
+        { error: "Tenant not found" },
         { status: 404 }
       );
     }
+
+    const documentId = context.params.id;
 
     const serviceSupabase = createServiceSupabase();
 
-    /*
-     * Get the document first so we can determine
-     * whether there is an uploaded Storage file.
-     */
-    const {
-      data: document,
-      error: documentError,
-    } = await serviceSupabase
-      .from("knowledge_documents")
-      .select(
-        `
-          id,
-          tenant_id,
-          storage_path
-        `
-      )
-      .eq("id", documentId)
-      .eq("tenant_id", tenant.id)
-      .maybeSingle();
+    // ---------------------------------------------------------
+    // 3. Fetch document
+    //
+    // Again, do NOT request created_at.
+    // ---------------------------------------------------------
 
-    if (documentError) {
-      console.error(
-        "Knowledge DELETE: document query failed:",
-        documentError
-      );
+    const { data: document, error: documentError } =
+      await serviceSupabase
+        .from("knowledge_documents")
+        .select("id, storage_path")
+        .eq("id", documentId)
+        .eq("tenant_id", tenant.id)
+        .single();
 
-      return NextResponse.json(
-        {
-          error: "Failed to find knowledge document",
-        },
-        { status: 500 }
-      );
-    }
-
-    if (!document) {
+    if (documentError || !document) {
       return NextResponse.json(
         {
           error: "Knowledge document not found",
+          details: documentError?.message ?? null,
         },
         { status: 404 }
       );
     }
 
-    /*
-     * Remove the original uploaded file.
-     *
-     * Manual knowledge uses manual/... and therefore
-     * does not have an actual Storage object.
-     */
+    // ---------------------------------------------------------
+    // 4. Remove Storage file when applicable
+    // ---------------------------------------------------------
+
     if (
       document.storage_path &&
       !document.storage_path.startsWith("manual/")
@@ -330,23 +294,22 @@ export async function DELETE(
           .remove([document.storage_path]);
 
       if (storageError) {
-        /*
-         * Don't block database deletion just because
-         * Storage cleanup failed.
-         */
         console.error(
-          "Knowledge DELETE: Storage cleanup failed:",
+          "Failed to remove knowledge file:",
           storageError
         );
+
+        // Continue with database deletion.
       }
     }
 
-    /*
-     * Delete the document.
-     *
-     * knowledge_chunks should have ON DELETE CASCADE,
-     * so its chunks/embeddings are deleted as well.
-     */
+    // ---------------------------------------------------------
+    // 5. Delete the document
+    //
+    // knowledge_chunks should cascade if the FK is configured
+    // with ON DELETE CASCADE.
+    // ---------------------------------------------------------
+
     const { error: deleteError } =
       await serviceSupabase
         .from("knowledge_documents")
@@ -356,13 +319,14 @@ export async function DELETE(
 
     if (deleteError) {
       console.error(
-        "Knowledge DELETE: database deletion failed:",
+        "Failed to delete knowledge document:",
         deleteError
       );
 
       return NextResponse.json(
         {
           error: "Failed to delete knowledge",
+          details: deleteError.message,
         },
         { status: 500 }
       );
@@ -372,10 +336,7 @@ export async function DELETE(
       success: true,
     });
   } catch (error) {
-    console.error(
-      "Knowledge DELETE unexpected error:",
-      error
-    );
+    console.error("Knowledge delete error:", error);
 
     return NextResponse.json(
       {

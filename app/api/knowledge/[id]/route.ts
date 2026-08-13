@@ -7,9 +7,9 @@ import {
 export const dynamic = "force-dynamic";
 
 interface RouteContext {
-  params: {
+  params: Promise<{
     id: string;
-  };
+  }>;
 }
 
 /**
@@ -18,7 +18,7 @@ interface RouteContext {
  * Returns the details and content of a knowledge document.
  */
 export async function GET(
-  request: Request,
+  _request: Request,
   context: RouteContext
 ) {
   try {
@@ -39,11 +39,12 @@ export async function GET(
     /*
      * Find the authenticated user's tenant.
      */
-    const { data: tenant, error: tenantError } = await supabase
-      .from("tenants")
-      .select("id")
-      .eq("owner_user_id", user.id)
-      .single();
+    const { data: tenant, error: tenantError } =
+      await supabase
+        .from("tenants")
+        .select("id")
+        .eq("owner_user_id", user.id)
+        .single();
 
     if (tenantError || !tenant) {
       return NextResponse.json(
@@ -52,30 +53,46 @@ export async function GET(
       );
     }
 
-    const documentId = context.params.id;
+    /*
+     * Next.js route-handler params are asynchronous.
+     */
+    const { id: documentId } = await context.params;
+
+    if (!documentId) {
+      return NextResponse.json(
+        { error: "Knowledge document ID is required" },
+        { status: 400 }
+      );
+    }
 
     const serviceSupabase = createServiceSupabase();
 
     /*
      * Fetch the document.
      *
-     * The tenant_id check is important so a user cannot
-     * access another tenant's knowledge.
+     * The tenant_id check is important so one user
+     * cannot access another tenant's knowledge.
      */
-    const { data: document, error: documentError } =
-      await serviceSupabase
-        .from("knowledge_documents")
-        .select(
-          "id, tenant_id, file_name, storage_path, uploaded_at, created_at"
-        )
-        .eq("id", documentId)
-        .eq("tenant_id", tenant.id)
-        .single();
+    const {
+      data: document,
+      error: documentError,
+    } = await serviceSupabase
+      .from("knowledge_documents")
+      .select(
+        "id, tenant_id, file_name, storage_path, uploaded_at, created_at"
+      )
+      .eq("id", documentId)
+      .eq("tenant_id", tenant.id)
+      .single();
 
     if (documentError || !document) {
       console.error(
         "Knowledge document not found:",
-        documentError
+        {
+          documentId,
+          tenantId: tenant.id,
+          error: documentError,
+        }
       );
 
       return NextResponse.json(
@@ -87,22 +104,26 @@ export async function GET(
     /*
      * Fetch all chunks belonging to this document.
      *
-     * We deliberately do NOT return the embedding itself.
-     * The embedding is only used for semantic search and
-     * does not need to be exposed to the browser.
+     * We deliberately do NOT return embeddings.
      */
-    const { data: chunks, error: chunksError } =
-      await serviceSupabase
-        .from("knowledge_chunks")
-        .select("id, content")
-        .eq("document_id", documentId)
-        .eq("tenant_id", tenant.id)
-        .order("id", { ascending: true });
+    const {
+      data: chunks,
+      error: chunksError,
+    } = await serviceSupabase
+      .from("knowledge_chunks")
+      .select("id, content")
+      .eq("document_id", documentId)
+      .eq("tenant_id", tenant.id)
+      .order("id", { ascending: true });
 
     if (chunksError) {
       console.error(
         "Failed to load knowledge chunks:",
-        chunksError
+        {
+          documentId,
+          tenantId: tenant.id,
+          error: chunksError,
+        }
       );
 
       return NextResponse.json(
@@ -112,10 +133,7 @@ export async function GET(
     }
 
     /*
-     * Combine the chunks back into readable content.
-     *
-     * The chunks are separated by blank lines so the
-     * original knowledge is easy to read in the UI.
+     * Combine the chunks into readable content.
      */
     const content = (chunks ?? [])
       .map((chunk) => chunk.content)
@@ -123,14 +141,21 @@ export async function GET(
 
     return NextResponse.json({
       success: true,
+
       document: {
         id: document.id,
         file_name: document.file_name,
         storage_path: document.storage_path,
+
         uploaded_at:
-          document.uploaded_at ?? document.created_at ?? null,
+          document.uploaded_at ??
+          document.created_at ??
+          null,
+
         chunk_count: chunks?.length ?? 0,
+
         content,
+
         chunks:
           chunks?.map((chunk, index) => ({
             id: chunk.id,
@@ -140,7 +165,10 @@ export async function GET(
       },
     });
   } catch (error) {
-    console.error("Knowledge details error:", error);
+    console.error(
+      "Knowledge details error:",
+      error
+    );
 
     return NextResponse.json(
       {
@@ -161,7 +189,7 @@ export async function GET(
  * and its original Storage file if applicable.
  */
 export async function DELETE(
-  request: Request,
+  _request: Request,
   context: RouteContext
 ) {
   try {
@@ -182,11 +210,12 @@ export async function DELETE(
     /*
      * Find the authenticated user's tenant.
      */
-    const { data: tenant, error: tenantError } = await supabase
-      .from("tenants")
-      .select("id")
-      .eq("owner_user_id", user.id)
-      .single();
+    const { data: tenant, error: tenantError } =
+      await supabase
+        .from("tenants")
+        .select("id")
+        .eq("owner_user_id", user.id)
+        .single();
 
     if (tenantError || !tenant) {
       return NextResponse.json(
@@ -195,7 +224,17 @@ export async function DELETE(
       );
     }
 
-    const documentId = context.params.id;
+    /*
+     * Next.js route-handler params are asynchronous.
+     */
+    const { id: documentId } = await context.params;
+
+    if (!documentId) {
+      return NextResponse.json(
+        { error: "Knowledge document ID is required" },
+        { status: 400 }
+      );
+    }
 
     const serviceSupabase = createServiceSupabase();
 
@@ -204,13 +243,15 @@ export async function DELETE(
      *
      * The tenant_id check is critical for tenant isolation.
      */
-    const { data: document, error: documentError } =
-      await serviceSupabase
-        .from("knowledge_documents")
-        .select("id, storage_path")
-        .eq("id", documentId)
-        .eq("tenant_id", tenant.id)
-        .single();
+    const {
+      data: document,
+      error: documentError,
+    } = await serviceSupabase
+      .from("knowledge_documents")
+      .select("id, storage_path")
+      .eq("id", documentId)
+      .eq("tenant_id", tenant.id)
+      .single();
 
     if (documentError || !document) {
       return NextResponse.json(
@@ -220,9 +261,10 @@ export async function DELETE(
     }
 
     /*
-     * Remove the original file if this was a real uploaded file.
+     * Remove the original file if this was a real upload.
      *
-     * Manual entries use manual/... and don't have a Storage object.
+     * Manual entries use manual/... and don't have
+     * a Storage object that needs to be removed.
      */
     if (
       document.storage_path &&
@@ -240,23 +282,25 @@ export async function DELETE(
         );
 
         /*
-         * We continue with database deletion.
+         * Continue with database deletion.
          *
-         * Otherwise a Storage problem could leave the user's
-         * knowledge permanently stuck in the dashboard.
+         * A Storage problem should not leave the
+         * knowledge item permanently stuck.
          */
       }
     }
 
     /*
      * knowledge_chunks should have ON DELETE CASCADE,
-     * so deleting the document also deletes its embeddings.
+     * so deleting the document also removes its chunks
+     * and embeddings.
      */
-    const { error: deleteError } = await serviceSupabase
-      .from("knowledge_documents")
-      .delete()
-      .eq("id", documentId)
-      .eq("tenant_id", tenant.id);
+    const { error: deleteError } =
+      await serviceSupabase
+        .from("knowledge_documents")
+        .delete()
+        .eq("id", documentId)
+        .eq("tenant_id", tenant.id);
 
     if (deleteError) {
       console.error(
@@ -274,7 +318,10 @@ export async function DELETE(
       success: true,
     });
   } catch (error) {
-    console.error("Knowledge delete error:", error);
+    console.error(
+      "Knowledge delete error:",
+      error
+    );
 
     return NextResponse.json(
       {

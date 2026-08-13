@@ -785,10 +785,10 @@ export default function AgentPage() {
         );
       }
 
-      setKnowledgeDetails({
-        document: data.document,
-        chunks: data.chunks ?? [],
-      });
+     setKnowledgeDetails({
+  document: data.document,
+  chunks: data.document?.chunks ?? [],
+});
     } catch (error) {
       console.error(
         "Failed to load knowledge details:",

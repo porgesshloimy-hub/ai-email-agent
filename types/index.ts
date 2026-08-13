@@ -2,7 +2,7 @@ export type PermissionLevel = "denied" | "approval_required" | "allowed";
 
 export type GmailAction = "gmail.read" | "gmail.draft" | "gmail.send" | "gmail.archive" | "gmail.delete";
 
-export type CalendarAction = "calendar.read" | "calendar.write";
+export type CalendarAction = "calendar.read" | "calendar.write"  | "calendar.meet";
 
 export type AgentAction = GmailAction | CalendarAction;
 

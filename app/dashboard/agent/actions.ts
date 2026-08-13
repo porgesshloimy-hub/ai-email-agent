@@ -76,6 +76,7 @@ export async function savePermission(formData: FormData) {
     "gmail.delete",
     "calendar.read",
     "calendar.write",
+    "calendar.meet",
   ];
 
   const validLevels: PermissionLevel[] = [

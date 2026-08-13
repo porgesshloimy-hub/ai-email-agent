@@ -79,6 +79,17 @@ export async function resolveCalendarWriteCapability(
   return "none";
 }
 
+export async function resolveMeetCapability(
+  tenantId: string
+): Promise<"write" | "propose_only" | "none"> {
+  const meetLevel = await getPermissionLevel(tenantId, "calendar.meet");
+
+  if (meetLevel === "allowed") return "write";
+  if (meetLevel === "approval_required") return "propose_only";
+
+  return "none";
+}
+
 export async function canReadCalendar(tenantId: string): Promise<boolean> {
   const level = await getPermissionLevel(tenantId, "calendar.read");
   return level === "allowed" || level === "approval_required"; // reading is never gated behind approval, only writes are

@@ -21,27 +21,19 @@ type KnowledgeDocument = {
   chunk_count: number;
 };
 
-type Permission = {
-  action: string;
-  level: PermissionLevel;
-};
-
-type Rule = {
-  description: string;
+type KnowledgeChunk = {
+  id: string;
+  content: string;
 };
 
 type KnowledgeDetails = {
-  id: string;
-  file_name: string;
-  storage_path: string;
-  uploaded_at: string | null;
-  chunk_count: number;
-  content: string;
-  chunks: {
-    id: string;
-    index: number;
-    content: string;
-  }[];
+  document: KnowledgeDocument;
+  chunks: KnowledgeChunk[];
+};
+
+type Permission = {
+  action: string;
+  level: PermissionLevel;
 };
 
 const EMAIL_ACTIONS = [
@@ -50,35 +42,30 @@ const EMAIL_ACTIONS = [
     label: "Read & search email",
     description:
       "Allow the agent to read incoming emails and search your mailbox.",
-    defaultLevel: "allowed" as PermissionLevel,
   },
   {
     key: "gmail.draft",
     label: "Create email drafts",
     description:
       "Allow the agent to prepare replies in Gmail without sending them.",
-    defaultLevel: "allowed" as PermissionLevel,
   },
   {
     key: "gmail.send",
     label: "Send email",
     description:
       "Allow the agent to send emails to customers automatically.",
-    defaultLevel: "approval_required" as PermissionLevel,
   },
   {
     key: "gmail.archive",
     label: "Archive email",
     description:
       "Allow the agent to archive emails after processing them.",
-    defaultLevel: "approval_required" as PermissionLevel,
   },
   {
     key: "gmail.delete",
     label: "Delete email",
     description:
       "Allow the agent to permanently delete emails.",
-    defaultLevel: "approval_required" as PermissionLevel,
   },
 ];
 
@@ -88,21 +75,18 @@ const CALENDAR_ACTIONS = [
     label: "Read calendar & availability",
     description:
       "Allow the agent to see your calendar and check available times.",
-    defaultLevel: "allowed" as PermissionLevel,
   },
   {
     key: "calendar.write",
     label: "Create & modify events",
     description:
       "Allow the agent to schedule or modify calendar events.",
-    defaultLevel: "approval_required" as PermissionLevel,
   },
   {
     key: "calendar.meet",
-    label: "Set up Google Meet meetings",
+    label: "Create Google Meet meetings",
     description:
-      "Allow the agent to create Google Meet links when scheduling calendar events.",
-    defaultLevel: "approval_required" as PermissionLevel,
+      "Allow the agent to create calendar events with a Google Meet video meeting.",
   },
 ];
 
@@ -123,8 +107,7 @@ function PermissionBadge({
           background: "#ecfdf3",
           color: "#027a48",
           fontSize: 12,
-          fontWeight: 650,
-          whiteSpace: "nowrap",
+          fontWeight: 600,
         }}
       >
         <span>✓</span>
@@ -145,8 +128,7 @@ function PermissionBadge({
           background: "#fff7ed",
           color: "#c2410c",
           fontSize: 12,
-          fontWeight: 650,
-          whiteSpace: "nowrap",
+          fontWeight: 600,
         }}
       >
         <span>●</span>
@@ -166,8 +148,7 @@ function PermissionBadge({
         background: "#f4f4f5",
         color: "#52525b",
         fontSize: 12,
-        fontWeight: 650,
-        whiteSpace: "nowrap",
+        fontWeight: 600,
       }}
     >
       <span>×</span>
@@ -179,18 +160,15 @@ function PermissionBadge({
 function PermissionSelect({
   action,
   level,
-  defaultLevel,
   onSaved,
   onError,
 }: {
   action: string;
   level: PermissionLevel;
-  defaultLevel: PermissionLevel;
   onSaved: (action: string, level: PermissionLevel) => void;
   onError: (message: string) => void;
 }) {
   const [saving, setSaving] = useState(false);
-
   const [selectedLevel, setSelectedLevel] =
     useState<PermissionLevel>(level);
 
@@ -236,19 +214,17 @@ function PermissionSelect({
       value={selectedLevel}
       onChange={handleChange}
       disabled={saving}
-      aria-label={`Permission for ${action}`}
       style={{
-        minWidth: 185,
-        padding: "10px 38px 10px 13px",
+        minWidth: 180,
+        padding: "9px 34px 9px 12px",
         border: "1px solid #d4d4d8",
-        borderRadius: 10,
+        borderRadius: 8,
         background: saving ? "#f4f4f5" : "#fff",
         fontSize: 13,
-        fontWeight: 550,
+        fontWeight: 500,
         color: "#18181b",
         cursor: saving ? "wait" : "pointer",
         opacity: saving ? 0.7 : 1,
-        outline: "none",
       }}
     >
       <option value="denied">Never</option>
@@ -274,11 +250,11 @@ function SectionHeader({
       <div
         style={{
           fontSize: 11,
-          fontWeight: 750,
-          letterSpacing: "0.09em",
+          fontWeight: 700,
+          letterSpacing: "0.08em",
           textTransform: "uppercase",
           color: "#71717a",
-          marginBottom: 7,
+          marginBottom: 6,
         }}
       >
         {eyebrow}
@@ -290,7 +266,7 @@ function SectionHeader({
           fontSize: 21,
           lineHeight: 1.3,
           color: "#18181b",
-          letterSpacing: "-0.025em",
+          letterSpacing: "-0.02em",
         }}
       >
         {title}
@@ -302,7 +278,6 @@ function SectionHeader({
           color: "#71717a",
           fontSize: 14,
           lineHeight: 1.6,
-          maxWidth: 700,
         }}
       >
         {description}
@@ -311,300 +286,14 @@ function SectionHeader({
   );
 }
 
-function Modal({
-  title,
-  subtitle,
-  onClose,
-  children,
-}: {
-  title: string;
-  subtitle?: string;
-  onClose: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 100,
-        background: "rgba(15, 23, 42, 0.42)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 24,
-        backdropFilter: "blur(3px)",
-      }}
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onClose();
-        }
-      }}
-    >
-      <div
-        style={{
-          width: "100%",
-          maxWidth: 720,
-          maxHeight: "min(760px, calc(100vh - 48px))",
-          background: "#fff",
-          borderRadius: 18,
-          border: "1px solid #e4e4e7",
-          boxShadow:
-            "0 24px 70px rgba(0,0,0,0.18)",
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-        }}
-      >
-        <div
-          style={{
-            padding: "22px 24px",
-            borderBottom: "1px solid #f0f0f1",
-            display: "flex",
-            alignItems: "flex-start",
-            justifyContent: "space-between",
-            gap: 20,
-          }}
-        >
-          <div style={{ minWidth: 0 }}>
-            <h3
-              style={{
-                margin: 0,
-                fontSize: 18,
-                letterSpacing: "-0.02em",
-                color: "#18181b",
-              }}
-            >
-              {title}
-            </h3>
-
-            {subtitle && (
-              <p
-                style={{
-                  margin: "5px 0 0",
-                  color: "#71717a",
-                  fontSize: 13,
-                }}
-              >
-                {subtitle}
-              </p>
-            )}
-          </div>
-
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            style={{
-              width: 34,
-              height: 34,
-              border: "1px solid #e4e4e7",
-              borderRadius: 9,
-              background: "#fff",
-              color: "#52525b",
-              fontSize: 19,
-              lineHeight: 1,
-              cursor: "pointer",
-              flexShrink: 0,
-            }}
-          >
-            ×
-          </button>
-        </div>
-
-        <div
-          style={{
-            padding: 24,
-            overflowY: "auto",
-          }}
-        >
-          {children}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function RuleDetailsModal({
-  rule,
-  index,
-  onClose,
-}: {
-  rule: Rule;
-  index: number;
-  onClose: () => void;
-}) {
-  return (
-    <Modal
-      title="Rule details"
-      subtitle={`Rule ${index + 1}`}
-      onClose={onClose}
-    >
-      <div
-        style={{
-          border: "1px solid #e4e4e7",
-          borderRadius: 12,
-          padding: 20,
-          background: "#fafafa",
-        }}
-      >
-        <div
-          style={{
-            fontSize: 11,
-            fontWeight: 700,
-            textTransform: "uppercase",
-            letterSpacing: "0.08em",
-            color: "#71717a",
-            marginBottom: 10,
-          }}
-        >
-          Agent rule
-        </div>
-
-        <div
-          style={{
-            fontSize: 15,
-            lineHeight: 1.7,
-            color: "#27272a",
-            whiteSpace: "pre-wrap",
-          }}
-        >
-          {rule.description}
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-function KnowledgeDetailsModal({
-  knowledge,
-  loading,
-  onClose,
-}: {
-  knowledge: KnowledgeDetails | null;
-  loading: boolean;
-  onClose: () => void;
-}) {
-  return (
-    <Modal
-      title={knowledge?.file_name ?? "Knowledge details"}
-      subtitle={
-        knowledge
-          ? `${knowledge.chunk_count} ${
-              knowledge.chunk_count === 1
-                ? "chunk"
-                : "chunks"
-            }`
-          : "Loading..."
-      }
-      onClose={onClose}
-    >
-      {loading || !knowledge ? (
-        <div
-          style={{
-            padding: "50px 20px",
-            textAlign: "center",
-            color: "#71717a",
-            fontSize: 14,
-          }}
-        >
-          Loading knowledge...
-        </div>
-      ) : (
-        <>
-          <div
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              gap: 8,
-              marginBottom: 18,
-            }}
-          >
-            <span
-              style={{
-                padding: "6px 10px",
-                borderRadius: 999,
-                background: "#f4f4f5",
-                color: "#52525b",
-                fontSize: 12,
-                fontWeight: 600,
-              }}
-            >
-              {knowledge.chunk_count}{" "}
-              {knowledge.chunk_count === 1
-                ? "chunk"
-                : "chunks"}
-            </span>
-
-            {knowledge.uploaded_at && (
-              <span
-                style={{
-                  padding: "6px 10px",
-                  borderRadius: 999,
-                  background: "#f4f4f5",
-                  color: "#52525b",
-                  fontSize: 12,
-                  fontWeight: 600,
-                }}
-              >
-                Added{" "}
-                {new Date(
-                  knowledge.uploaded_at
-                ).toLocaleDateString()}
-              </span>
-            )}
-          </div>
-
-          <div
-            style={{
-              border: "1px solid #e4e4e7",
-              borderRadius: 12,
-              overflow: "hidden",
-            }}
-          >
-            <div
-              style={{
-                padding: "11px 15px",
-                background: "#fafafa",
-                borderBottom: "1px solid #e4e4e7",
-                fontSize: 12,
-                fontWeight: 700,
-                color: "#52525b",
-              }}
-            >
-              Saved knowledge
-            </div>
-
-            <div
-              style={{
-                padding: 18,
-                fontSize: 14,
-                lineHeight: 1.7,
-                color: "#27272a",
-                whiteSpace: "pre-wrap",
-                maxHeight: 450,
-                overflowY: "auto",
-              }}
-            >
-              {knowledge.content || (
-                <span style={{ color: "#a1a1aa" }}>
-                  No readable content was saved.
-                </span>
-              )}
-            </div>
-          </div>
-        </>
-      )}
-    </Modal>
-  );
-}
-
 export default function AgentPage() {
   const [instructions, setInstructions] = useState("");
-  const [rules, setRules] = useState<Rule[]>([]);
-  const [permissions, setPermissions] = useState<Permission[]>([]);
+  const [rules, setRules] = useState<
+    { description: string }[]
+  >([]);
+  const [permissions, setPermissions] = useState<Permission[]>(
+    []
+  );
 
   const [loading, setLoading] = useState(true);
 
@@ -625,26 +314,27 @@ export default function AgentPage() {
 
   const [message, setMessage] = useState("");
 
-  const [selectedKnowledgeId, setSelectedKnowledgeId] =
-    useState<string | null>(null);
-
+  /*
+   * Knowledge detail dialog state.
+   */
   const [selectedKnowledge, setSelectedKnowledge] =
+    useState<KnowledgeDocument | null>(null);
+
+  const [knowledgeDetails, setKnowledgeDetails] =
     useState<KnowledgeDetails | null>(null);
 
-  const [knowledgeDetailsLoading, setKnowledgeDetailsLoading] =
+  const [knowledgeDetailLoading, setKnowledgeDetailLoading] =
     useState(false);
 
-  const [selectedRule, setSelectedRule] = useState<{
-    rule: Rule;
-    index: number;
-  } | null>(null);
+  const [knowledgeDetailError, setKnowledgeDetailError] =
+    useState("");
 
   useEffect(() => {
     async function loadAgent() {
       try {
-        const response = await fetch(
-          "/api/agent/settings"
-        );
+        const response = await fetch("/api/agent/settings", {
+          cache: "no-store",
+        });
 
         if (!response.ok) {
           throw new Error(
@@ -659,12 +349,6 @@ export default function AgentPage() {
         setPermissions(data.permissions ?? []);
       } catch (error) {
         console.error(error);
-
-        setMessage(
-          error instanceof Error
-            ? error.message
-            : "Failed to load agent settings."
-        );
       } finally {
         setLoading(false);
       }
@@ -674,8 +358,12 @@ export default function AgentPage() {
   }, []);
 
   async function loadKnowledge() {
+    setKnowledgeLoading(true);
+
     try {
-      const response = await fetch("/api/knowledge");
+      const response = await fetch("/api/knowledge", {
+        cache: "no-store",
+      });
 
       if (!response.ok) {
         throw new Error("Failed to load knowledge");
@@ -686,12 +374,6 @@ export default function AgentPage() {
       setDocuments(data.documents ?? []);
     } catch (error) {
       console.error(error);
-
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : "Failed to load knowledge."
-      );
     } finally {
       setKnowledgeLoading(false);
     }
@@ -701,52 +383,11 @@ export default function AgentPage() {
     loadKnowledge();
   }, []);
 
-  async function viewKnowledge(id: string) {
-    setSelectedKnowledgeId(id);
-    setSelectedKnowledge(null);
-    setKnowledgeDetailsLoading(true);
-
-    try {
-      const response = await fetch(
-        `/api/knowledge/${id}`
-      );
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(
-          data.error ||
-            "Failed to load knowledge details."
-        );
-      }
-
-      setSelectedKnowledge(data.document);
-    } catch (error) {
-      setSelectedKnowledgeId(null);
-
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : "Failed to load knowledge details."
-      );
-    } finally {
-      setKnowledgeDetailsLoading(false);
-    }
-  }
-
-  function closeKnowledge() {
-    setSelectedKnowledgeId(null);
-    setSelectedKnowledge(null);
-  }
-
-  function getPermission(
-    action: string,
-    defaultLevel: PermissionLevel
-  ): PermissionLevel {
+  function getPermission(action: string): PermissionLevel {
     return (
       permissions.find(
         (permission) => permission.action === action
-      )?.level ?? defaultLevel
+      )?.level ?? "approval_required"
     );
   }
 
@@ -767,22 +408,14 @@ export default function AgentPage() {
         );
       }
 
-      return [
-        ...current,
-        {
-          action,
-          level,
-        },
-      ];
+      return [...current, { action, level }];
     });
 
     setMessage("Permission saved.");
   }
 
-  function handlePermissionError(
-    errorMessage: string
-  ) {
-    setMessage(errorMessage);
+  function handlePermissionError(message: string) {
+    setMessage(message);
   }
 
   async function handleInstructionsSubmit(
@@ -790,9 +423,7 @@ export default function AgentPage() {
   ) {
     event.preventDefault();
 
-    const formData = new FormData(
-      event.currentTarget
-    );
+    const formData = new FormData(event.currentTarget);
 
     try {
       await saveInstructions(formData);
@@ -815,23 +446,16 @@ export default function AgentPage() {
       const description = newRule.trim();
 
       const formData = new FormData();
-
-      formData.append(
-        "description",
-        description
-      );
+      formData.append("description", description);
 
       await addRule(formData);
 
       setRules((current) => [
         ...current,
-        {
-          description,
-        },
+        { description },
       ]);
 
       setNewRule("");
-
       setMessage("Rule added.");
     } catch (error) {
       setMessage(
@@ -848,21 +472,15 @@ export default function AgentPage() {
     try {
       const formData = new FormData();
 
-      formData.append(
-        "index",
-        String(index)
-      );
+      formData.append("index", String(index));
 
       await deleteRule(formData);
 
       setRules((current) =>
         current.filter(
-          (_, ruleIndex) =>
-            ruleIndex !== index
+          (_, ruleIndex) => ruleIndex !== index
         )
       );
-
-      setSelectedRule(null);
 
       setMessage("Rule removed.");
     } catch (error) {
@@ -875,10 +493,7 @@ export default function AgentPage() {
   }
 
   async function handleManualKnowledge() {
-    if (
-      !title.trim() ||
-      !content.trim()
-    ) {
+    if (!title.trim() || !content.trim()) {
       setMessage(
         "Please enter both a title and the knowledge."
       );
@@ -894,8 +509,7 @@ export default function AgentPage() {
         {
           method: "POST",
           headers: {
-            "Content-Type":
-              "application/json",
+            "Content-Type": "application/json",
           },
           body: JSON.stringify({
             title,
@@ -908,17 +522,14 @@ export default function AgentPage() {
 
       if (!response.ok) {
         throw new Error(
-          data.error ||
-            "Failed to save knowledge."
+          data.error || "Failed to save knowledge."
         );
       }
 
       setTitle("");
       setContent("");
 
-      setMessage(
-        "Knowledge added successfully."
-      );
+      setMessage("Knowledge added successfully.");
 
       await loadKnowledge();
     } catch (error) {
@@ -935,8 +546,7 @@ export default function AgentPage() {
   async function handleUpload(
     event: React.ChangeEvent<HTMLInputElement>
   ) {
-    const file =
-      event.target.files?.[0];
+    const file = event.target.files?.[0];
 
     if (!file) return;
 
@@ -946,10 +556,7 @@ export default function AgentPage() {
     try {
       const formData = new FormData();
 
-      formData.append(
-        "file",
-        file
-      );
+      formData.append("file", file);
 
       const response = await fetch(
         "/api/knowledge/upload",
@@ -959,22 +566,16 @@ export default function AgentPage() {
         }
       );
 
-      const data =
-        await response.json();
+      const data = await response.json();
 
       if (!response.ok) {
         throw new Error(
-          data.error ||
-            "Upload failed."
+          data.error || "Upload failed."
         );
       }
 
       setMessage(
-        `Uploaded successfully. ${data.chunksCreated} knowledge ${
-          data.chunksCreated === 1
-            ? "chunk"
-            : "chunks"
-        } created.`
+        `Uploaded successfully. ${data.chunksCreated} knowledge chunks created.`
       );
 
       await loadKnowledge();
@@ -991,9 +592,7 @@ export default function AgentPage() {
     }
   }
 
-  async function handleDeleteKnowledge(
-    id: string
-  ) {
+  async function handleDeleteKnowledge(id: string) {
     if (
       !window.confirm(
         "Delete this knowledge? The agent will no longer use it."
@@ -1010,27 +609,27 @@ export default function AgentPage() {
         }
       );
 
-      const data =
-        await response.json();
+      const data = await response.json();
 
       if (!response.ok) {
         throw new Error(
-          data.error ||
-            "Failed to delete knowledge."
+          data.error || "Failed to delete knowledge."
         );
       }
 
-      if (
-        selectedKnowledgeId === id
-      ) {
-        closeKnowledge();
+      /*
+       * If the deleted item is currently open,
+       * close its dialog.
+       */
+      if (selectedKnowledge?.id === id) {
+        setSelectedKnowledge(null);
+        setKnowledgeDetails(null);
+        setKnowledgeDetailError("");
       }
 
       await loadKnowledge();
 
-      setMessage(
-        "Knowledge deleted."
-      );
+      setMessage("Knowledge deleted.");
     } catch (error) {
       setMessage(
         error instanceof Error
@@ -1040,42 +639,112 @@ export default function AgentPage() {
     }
   }
 
+  /*
+   * Open a knowledge item and load its stored chunks.
+   */
+  async function handleViewKnowledge(
+    document: KnowledgeDocument
+  ) {
+    setSelectedKnowledge(document);
+    setKnowledgeDetails(null);
+    setKnowledgeDetailError("");
+    setKnowledgeDetailLoading(true);
+
+    try {
+      const response = await fetch(
+        `/api/knowledge/${document.id}`,
+        {
+          method: "GET",
+          cache: "no-store",
+        }
+      );
+
+      /*
+       * Don't assume every response is JSON.
+       * This makes debugging much easier if a route
+       * unexpectedly returns a Next.js HTML error page.
+       */
+      const contentType =
+        response.headers.get("content-type") || "";
+
+      let data: any;
+
+      if (contentType.includes("application/json")) {
+        data = await response.json();
+      } else {
+        const text = await response.text();
+
+        throw new Error(
+          `Knowledge detail request returned an unexpected response (${response.status}).`
+        );
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          data.error ||
+            "Failed to load knowledge details."
+        );
+      }
+
+      setKnowledgeDetails({
+        document: data.document,
+        chunks: data.chunks ?? [],
+      });
+    } catch (error) {
+      console.error(
+        "Failed to load knowledge details:",
+        error
+      );
+
+      setKnowledgeDetailError(
+        error instanceof Error
+          ? error.message
+          : "Failed to load knowledge."
+      );
+    } finally {
+      setKnowledgeDetailLoading(false);
+    }
+  }
+
+  function closeKnowledgeDialog() {
+    if (knowledgeDetailLoading) {
+      return;
+    }
+
+    setSelectedKnowledge(null);
+    setKnowledgeDetails(null);
+    setKnowledgeDetailError("");
+  }
+
   if (loading) {
     return (
       <main
         style={{
-          minHeight: "100vh",
-          background: "#fafafa",
+          maxWidth: 980,
+          margin: "0 auto",
           padding: "48px 24px",
           fontFamily:
-            "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+            "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
         }}
       >
         <div
           style={{
-            maxWidth: 980,
-            margin: "0 auto",
+            height: 28,
+            width: 220,
+            background: "#f4f4f5",
+            borderRadius: 8,
+            marginBottom: 12,
           }}
-        >
-          <div
-            style={{
-              height: 28,
-              width: 220,
-              background: "#f4f4f5",
-              borderRadius: 8,
-              marginBottom: 12,
-            }}
-          />
+        />
 
-          <div
-            style={{
-              height: 16,
-              width: 420,
-              background: "#f4f4f5",
-              borderRadius: 6,
-            }}
-          />
-        </div>
+        <div
+          style={{
+            height: 16,
+            width: 420,
+            background: "#f4f4f5",
+            borderRadius: 6,
+          }}
+        />
       </main>
     );
   }
@@ -1094,27 +763,21 @@ export default function AgentPage() {
         style={{
           maxWidth: 980,
           margin: "0 auto",
-          padding:
-            "48px 24px 80px",
+          padding: "48px 24px 80px",
         }}
       >
-        <header
-          style={{
-            marginBottom: 38,
-          }}
-        >
+        <header style={{ marginBottom: 38 }}>
           <div
             style={{
               display: "inline-flex",
               alignItems: "center",
               gap: 7,
-              padding:
-                "6px 10px",
+              padding: "6px 10px",
               borderRadius: 999,
               background: "#f4f4f5",
               color: "#52525b",
               fontSize: 12,
-              fontWeight: 650,
+              fontWeight: 600,
               marginBottom: 14,
             }}
           >
@@ -1123,11 +786,9 @@ export default function AgentPage() {
                 width: 7,
                 height: 7,
                 borderRadius: "50%",
-                background:
-                  "#22c55e",
+                background: "#22c55e",
               }}
             />
-
             AI Agent
           </div>
 
@@ -1136,8 +797,7 @@ export default function AgentPage() {
               margin: 0,
               fontSize: 36,
               lineHeight: 1.15,
-              letterSpacing:
-                "-0.035em",
+              letterSpacing: "-0.035em",
             }}
           >
             Agent setup
@@ -1145,19 +805,16 @@ export default function AgentPage() {
 
           <p
             style={{
-              margin:
-                "10px 0 0",
+              margin: "10px 0 0",
               maxWidth: 650,
               fontSize: 16,
               lineHeight: 1.6,
               color: "#71717a",
             }}
           >
-            Teach your AI agent how
-            your business works and
-            decide exactly what it is
-            allowed to do on your
-            behalf.
+            Teach your AI agent how your business works
+            and decide exactly what it is allowed to do
+            on your behalf.
           </p>
         </header>
 
@@ -1165,13 +822,10 @@ export default function AgentPage() {
           <div
             style={{
               marginBottom: 20,
-              padding:
-                "12px 15px",
+              padding: "12px 15px",
               borderRadius: 10,
-              background:
-                "#f0fdf4",
-              border:
-                "1px solid #bbf7d0",
+              background: "#f0fdf4",
+              border: "1px solid #bbf7d0",
               color: "#166534",
               fontSize: 14,
             }}
@@ -1184,8 +838,7 @@ export default function AgentPage() {
         <section
           style={{
             background: "#fff",
-            border:
-              "1px solid #e4e4e7",
+            border: "1px solid #e4e4e7",
             borderRadius: 16,
             padding: 26,
             marginBottom: 20,
@@ -1199,18 +852,12 @@ export default function AgentPage() {
             description="Give the agent context about your business, how you want it to communicate, and how it should handle customers."
           />
 
-          <form
-            onSubmit={
-              handleInstructionsSubmit
-            }
-          >
+          <form onSubmit={handleInstructionsSubmit}>
             <textarea
               name="customInstructions"
               value={instructions}
               onChange={(event) =>
-                setInstructions(
-                  event.target.value
-                )
+                setInstructions(event.target.value)
               }
               rows={7}
               placeholder={`Example:
@@ -1220,15 +867,12 @@ We are a plumbing company serving Brooklyn.
 Answer straightforward pricing questions automatically. Be friendly and concise. If a customer asks for a refund or complains about a previous service, do not make a commitment without approval.`}
               style={{
                 width: "100%",
-                boxSizing:
-                  "border-box",
+                boxSizing: "border-box",
                 padding: 15,
-                border:
-                  "1px solid #d4d4d8",
+                border: "1px solid #d4d4d8",
                 borderRadius: 10,
                 resize: "vertical",
-                fontFamily:
-                  "inherit",
+                fontFamily: "inherit",
                 fontSize: 14,
                 lineHeight: 1.6,
                 outline: "none",
@@ -1238,8 +882,7 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
             <div
               style={{
                 display: "flex",
-                justifyContent:
-                  "flex-end",
+                justifyContent: "flex-end",
                 marginTop: 12,
               }}
             >
@@ -1248,15 +891,12 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
                 style={{
                   border: 0,
                   borderRadius: 9,
-                  padding:
-                    "10px 17px",
-                  background:
-                    "#18181b",
+                  padding: "10px 17px",
+                  background: "#18181b",
                   color: "#fff",
                   fontSize: 13,
                   fontWeight: 600,
-                  cursor:
-                    "pointer",
+                  cursor: "pointer",
                 }}
               >
                 Save instructions
@@ -1265,12 +905,11 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
           </form>
         </section>
 
-        {/* Email */}
+        {/* Email permissions */}
         <section
           style={{
             background: "#fff",
-            border:
-              "1px solid #e4e4e7",
+            border: "1px solid #e4e4e7",
             borderRadius: 16,
             padding: 26,
             marginBottom: 20,
@@ -1286,101 +925,64 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
 
           <div
             style={{
-              border:
-                "1px solid #e4e4e7",
+              border: "1px solid #e4e4e7",
               borderRadius: 12,
               overflow: "hidden",
             }}
           >
-            {EMAIL_ACTIONS.map(
-              (action, index) => {
-                const level =
-                  getPermission(
-                    action.key,
-                    action.defaultLevel
-                  );
+            {EMAIL_ACTIONS.map((action, index) => {
+              const level = getPermission(action.key);
 
-                return (
-                  <div
-                    key={action.key}
-                    style={{
-                      display:
-                        "flex",
-                      alignItems:
-                        "center",
-                      justifyContent:
-                        "space-between",
-                      gap: 24,
-                      padding:
-                        "17px 18px",
-                      borderTop:
-                        index === 0
-                          ? "none"
-                          : "1px solid #f0f0f1",
-                    }}
-                  >
+              return (
+                <div
+                  key={action.key}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 24,
+                    padding: "17px 18px",
+                    borderTop:
+                      index === 0
+                        ? "none"
+                        : "1px solid #f0f0f1",
+                  }}
+                >
+                  <div style={{ minWidth: 0 }}>
                     <div
                       style={{
-                        minWidth: 0,
+                        fontSize: 14,
+                        fontWeight: 600,
+                        marginBottom: 4,
                       }}
                     >
-                      <div
-                        style={{
-                          fontSize: 14,
-                          fontWeight:
-                            600,
-                          marginBottom: 4,
-                        }}
-                      >
-                        {action.label}
-                      </div>
-
-                      <div
-                        style={{
-                          fontSize: 13,
-                          color:
-                            "#71717a",
-                          lineHeight:
-                            1.45,
-                        }}
-                      >
-                        {
-                          action.description
-                        }
-                      </div>
-
-                      <div
-                        style={{
-                          marginTop: 8,
-                        }}
-                      >
-                        <PermissionBadge
-                          level={
-                            level
-                          }
-                        />
-                      </div>
+                      {action.label}
                     </div>
 
-                    <PermissionSelect
-                      action={
-                        action.key
-                      }
-                      level={level}
-                      defaultLevel={
-                        action.defaultLevel
-                      }
-                      onSaved={
-                        handlePermissionSaved
-                      }
-                      onError={
-                        handlePermissionError
-                      }
-                    />
+                    <div
+                      style={{
+                        fontSize: 13,
+                        color: "#71717a",
+                        lineHeight: 1.45,
+                      }}
+                    >
+                      {action.description}
+                    </div>
+
+                    <div style={{ marginTop: 8 }}>
+                      <PermissionBadge level={level} />
+                    </div>
                   </div>
-                );
-              }
-            )}
+
+                  <PermissionSelect
+                    action={action.key}
+                    level={level}
+                    onSaved={handlePermissionSaved}
+                    onError={handlePermissionError}
+                  />
+                </div>
+              );
+            })}
           </div>
 
           <div
@@ -1388,25 +990,17 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
               marginTop: 15,
               padding: 13,
               borderRadius: 10,
-              background:
-                "#fafafa",
+              background: "#fafafa",
               color: "#71717a",
               fontSize: 12,
               lineHeight: 1.55,
             }}
           >
-            <strong
-              style={{
-                color:
-                  "#52525b",
-              }}
-            >
+            <strong style={{ color: "#52525b" }}>
               Approval required
             </strong>{" "}
-            means the agent can
-            prepare the action, but
-            it cannot complete it
-            until you approve it.
+            means the agent can prepare the action, but
+            it cannot complete it until you approve it.
           </div>
         </section>
 
@@ -1414,8 +1008,7 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
         <section
           style={{
             background: "#fff",
-            border:
-              "1px solid #e4e4e7",
+            border: "1px solid #e4e4e7",
             borderRadius: 16,
             padding: 26,
             marginBottom: 20,
@@ -1425,107 +1018,88 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
         >
           <SectionHeader
             eyebrow="Permissions"
-            title="Calendar & meetings"
-            description="Choose what your agent can see and manage in your calendar, including whether it can create Google Meet links."
+            title="Calendar"
+            description="Choose whether your agent can view availability, manage calendar events, and create Google Meet meetings."
           />
 
           <div
             style={{
-              border:
-                "1px solid #e4e4e7",
+              border: "1px solid #e4e4e7",
               borderRadius: 12,
               overflow: "hidden",
             }}
           >
-            {CALENDAR_ACTIONS.map(
-              (action, index) => {
-                const level =
-                  getPermission(
-                    action.key,
-                    action.defaultLevel
-                  );
+            {CALENDAR_ACTIONS.map((action, index) => {
+              const level = getPermission(action.key);
 
-                return (
-                  <div
-                    key={action.key}
-                    style={{
-                      display:
-                        "flex",
-                      alignItems:
-                        "center",
-                      justifyContent:
-                        "space-between",
-                      gap: 24,
-                      padding:
-                        "17px 18px",
-                      borderTop:
-                        index === 0
-                          ? "none"
-                          : "1px solid #f0f0f1",
-                    }}
-                  >
+              return (
+                <div
+                  key={action.key}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 24,
+                    padding: "17px 18px",
+                    borderTop:
+                      index === 0
+                        ? "none"
+                        : "1px solid #f0f0f1",
+                  }}
+                >
+                  <div style={{ minWidth: 0 }}>
                     <div
                       style={{
-                        minWidth: 0,
+                        fontSize: 14,
+                        fontWeight: 600,
+                        marginBottom: 4,
                       }}
                     >
-                      <div
-                        style={{
-                          fontSize: 14,
-                          fontWeight:
-                            600,
-                          marginBottom: 4,
-                        }}
-                      >
-                        {action.label}
-                      </div>
-
-                      <div
-                        style={{
-                          fontSize: 13,
-                          color:
-                            "#71717a",
-                          lineHeight:
-                            1.45,
-                        }}
-                      >
-                        {
-                          action.description
-                        }
-                      </div>
-
-                      <div
-                        style={{
-                          marginTop: 8,
-                        }}
-                      >
-                        <PermissionBadge
-                          level={
-                            level
-                          }
-                        />
-                      </div>
+                      {action.label}
                     </div>
 
-                    <PermissionSelect
-                      action={
-                        action.key
-                      }
-                      level={level}
-                      defaultLevel={
-                        action.defaultLevel
-                      }
-                      onSaved={
-                        handlePermissionSaved
-                      }
-                      onError={
-                        handlePermissionError
-                      }
-                    />
+                    <div
+                      style={{
+                        fontSize: 13,
+                        color: "#71717a",
+                        lineHeight: 1.45,
+                      }}
+                    >
+                      {action.description}
+                    </div>
+
+                    <div style={{ marginTop: 8 }}>
+                      <PermissionBadge level={level} />
+                    </div>
                   </div>
-                );
-              }
-            )}
+
+                  <PermissionSelect
+                    action={action.key}
+                    level={level}
+                    onSaved={handlePermissionSaved}
+                    onError={handlePermissionError}
+                  />
+                </div>
+              );
+            })}
+          </div>
+
+          <div
+            style={{
+              marginTop: 15,
+              padding: 13,
+              borderRadius: 10,
+              background: "#fafafa",
+              color: "#71717a",
+              fontSize: 12,
+              lineHeight: 1.55,
+            }}
+          >
+            <strong style={{ color: "#52525b" }}>
+              Google Meet
+            </strong>{" "}
+            controls whether the agent may add a Google
+            Meet conference when creating a calendar event.
           </div>
         </section>
 
@@ -1533,8 +1107,7 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
         <section
           style={{
             background: "#fff",
-            border:
-              "1px solid #e4e4e7",
+            border: "1px solid #e4e4e7",
             borderRadius: 16,
             padding: 26,
             marginBottom: 20,
@@ -1556,135 +1129,66 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
                 marginBottom: 14,
               }}
             >
-              {rules.map(
-                (rule, index) => (
+              {rules.map((rule, index) => (
+                <div
+                  key={`${rule.description}-${index}`}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 15,
+                    padding: "13px 15px",
+                    border: "1px solid #e4e4e7",
+                    borderRadius: 10,
+                    background: "#fafafa",
+                  }}
+                >
                   <div
-                    key={`${rule.description}-${index}`}
                     style={{
-                      display:
-                        "flex",
-                      alignItems:
-                        "center",
-                      justifyContent:
-                        "space-between",
-                      gap: 15,
-                      padding:
-                        "13px 15px",
-                      border:
-                        "1px solid #e4e4e7",
-                      borderRadius: 10,
-                      background:
-                        "#fafafa",
+                      display: "flex",
+                      gap: 10,
+                      alignItems: "flex-start",
                     }}
                   >
-                    <div
+                    <span
                       style={{
-                        display:
-                          "flex",
-                        gap: 10,
-                        alignItems:
-                          "flex-start",
-                        minWidth: 0,
-                      }}
-                    >
-                      <span
-                        style={{
-                          marginTop: 5,
-                          width: 7,
-                          height: 7,
-                          borderRadius:
-                            "50%",
-                          background:
-                            "#a1a1aa",
-                          flexShrink: 0,
-                        }}
-                      />
-
-                      <span
-                        style={{
-                          fontSize: 14,
-                          lineHeight:
-                            1.5,
-                          overflow:
-                            "hidden",
-                          textOverflow:
-                            "ellipsis",
-                          whiteSpace:
-                            "nowrap",
-                        }}
-                      >
-                        {
-                          rule.description
-                        }
-                      </span>
-                    </div>
-
-                    <div
-                      style={{
-                        display:
-                          "flex",
-                        alignItems:
-                          "center",
-                        gap: 6,
+                        marginTop: 5,
+                        width: 7,
+                        height: 7,
+                        borderRadius: "50%",
+                        background: "#a1a1aa",
                         flexShrink: 0,
                       }}
-                    >
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setSelectedRule(
-                            {
-                              rule,
-                              index,
-                            }
-                          )
-                        }
-                        style={{
-                          border:
-                            "1px solid #e4e4e7",
-                          background:
-                            "#fff",
-                          color:
-                            "#52525b",
-                          borderRadius: 8,
-                          padding:
-                            "6px 9px",
-                          fontSize: 12,
-                          fontWeight:
-                            600,
-                          cursor:
-                            "pointer",
-                        }}
-                      >
-                        View
-                      </button>
+                    />
 
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleDeleteRule(
-                            index
-                          )
-                        }
-                        style={{
-                          border: 0,
-                          background:
-                            "transparent",
-                          color:
-                            "#71717a",
-                          fontSize: 12,
-                          cursor:
-                            "pointer",
-                          padding:
-                            "6px 7px",
-                        }}
-                      >
-                        Remove
-                      </button>
-                    </div>
+                    <span
+                      style={{
+                        fontSize: 14,
+                        lineHeight: 1.5,
+                      }}
+                    >
+                      {rule.description}
+                    </span>
                   </div>
-                )
-              )}
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleDeleteRule(index)
+                    }
+                    style={{
+                      border: 0,
+                      background: "transparent",
+                      color: "#a1a1aa",
+                      fontSize: 13,
+                      cursor: "pointer",
+                      padding: "5px 7px",
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
             </div>
           )}
 
@@ -1697,15 +1201,10 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
             <input
               value={newRule}
               onChange={(event) =>
-                setNewRule(
-                  event.target.value
-                )
+                setNewRule(event.target.value)
               }
               onKeyDown={(event) => {
-                if (
-                  event.key ===
-                  "Enter"
-                ) {
+                if (event.key === "Enter") {
                   event.preventDefault();
                   handleAddRule();
                 }
@@ -1714,53 +1213,41 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
               style={{
                 flex: 1,
                 minWidth: 0,
-                padding:
-                  "11px 13px",
-                border:
-                  "1px solid #d4d4d8",
+                padding: "11px 13px",
+                border: "1px solid #d4d4d8",
                 borderRadius: 9,
-                fontFamily:
-                  "inherit",
+                fontFamily: "inherit",
                 fontSize: 14,
               }}
             />
 
             <button
               type="button"
-              onClick={
-                handleAddRule
-              }
+              onClick={handleAddRule}
               disabled={
-                savingRule ||
-                !newRule.trim()
+                savingRule || !newRule.trim()
               }
               style={{
                 border: 0,
                 borderRadius: 9,
-                padding:
-                  "0 17px",
+                padding: "0 17px",
                 background:
-                  savingRule ||
-                  !newRule.trim()
+                  savingRule || !newRule.trim()
                     ? "#e4e4e7"
                     : "#18181b",
                 color:
-                  savingRule ||
-                  !newRule.trim()
+                  savingRule || !newRule.trim()
                     ? "#a1a1aa"
                     : "#fff",
                 fontSize: 13,
                 fontWeight: 600,
                 cursor:
-                  savingRule ||
-                  !newRule.trim()
+                  savingRule || !newRule.trim()
                     ? "default"
                     : "pointer",
               }}
             >
-              {savingRule
-                ? "Adding..."
-                : "Add rule"}
+              Add rule
             </button>
           </div>
         </section>
@@ -1769,8 +1256,7 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
         <section
           style={{
             background: "#fff",
-            border:
-              "1px solid #e4e4e7",
+            border: "1px solid #e4e4e7",
             borderRadius: 16,
             padding: 26,
             marginBottom: 20,
@@ -1788,11 +1274,9 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
           <div
             style={{
               padding: 20,
-              border:
-                "1px dashed #d4d4d8",
+              border: "1px dashed #d4d4d8",
               borderRadius: 12,
-              background:
-                "#fafafa",
+              background: "#fafafa",
               marginBottom: 18,
             }}
           >
@@ -1814,21 +1298,15 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
                 lineHeight: 1.5,
               }}
             >
-              Upload pricing, FAQs,
-              policies, product
-              information, or other
-              business documents.
+              Upload pricing, FAQs, policies, product
+              information, or other business documents.
             </div>
 
             <input
               type="file"
               accept=".pdf,.docx,.txt"
-              onChange={
-                handleUpload
-              }
-              disabled={
-                uploading
-              }
+              onChange={handleUpload}
+              disabled={uploading}
               style={{
                 fontSize: 13,
               }}
@@ -1839,12 +1317,10 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
                 style={{
                   marginTop: 10,
                   fontSize: 13,
-                  color:
-                    "#71717a",
+                  color: "#71717a",
                 }}
               >
-                Uploading and
-                indexing...
+                Uploading and indexing...
               </div>
             )}
           </div>
@@ -1853,8 +1329,7 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
           <div
             style={{
               padding: 20,
-              border:
-                "1px solid #e4e4e7",
+              border: "1px solid #e4e4e7",
               borderRadius: 12,
               marginBottom: 20,
             }}
@@ -1866,8 +1341,7 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
                 marginBottom: 5,
               }}
             >
-              Add individual
-              knowledge
+              Add individual knowledge
             </div>
 
             <div
@@ -1877,30 +1351,23 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
                 marginBottom: 15,
               }}
             >
-              Add a specific fact,
-              price, policy, or
+              Add a specific fact, price, policy, or
               instruction.
             </div>
 
             <input
               value={title}
               onChange={(event) =>
-                setTitle(
-                  event.target.value
-                )
+                setTitle(event.target.value)
               }
               placeholder="Title — e.g. Emergency service pricing"
               style={{
                 width: "100%",
-                boxSizing:
-                  "border-box",
-                padding:
-                  "11px 13px",
-                border:
-                  "1px solid #d4d4d8",
+                boxSizing: "border-box",
+                padding: "11px 13px",
+                border: "1px solid #d4d4d8",
                 borderRadius: 9,
-                fontFamily:
-                  "inherit",
+                fontFamily: "inherit",
                 fontSize: 14,
                 marginBottom: 10,
               }}
@@ -1909,24 +1376,18 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
             <textarea
               value={content}
               onChange={(event) =>
-                setContent(
-                  event.target.value
-                )
+                setContent(event.target.value)
               }
               placeholder="Emergency plumbing service costs $250 after 6 PM."
               rows={4}
               style={{
                 width: "100%",
-                boxSizing:
-                  "border-box",
-                padding:
-                  "11px 13px",
-                border:
-                  "1px solid #d4d4d8",
+                boxSizing: "border-box",
+                padding: "11px 13px",
+                border: "1px solid #d4d4d8",
                 borderRadius: 9,
                 resize: "vertical",
-                fontFamily:
-                  "inherit",
+                fontFamily: "inherit",
                 fontSize: 14,
                 lineHeight: 1.5,
               }}
@@ -1935,16 +1396,13 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
             <div
               style={{
                 display: "flex",
-                justifyContent:
-                  "flex-end",
+                justifyContent: "flex-end",
                 marginTop: 10,
               }}
             >
               <button
                 type="button"
-                onClick={
-                  handleManualKnowledge
-                }
+                onClick={handleManualKnowledge}
                 disabled={
                   savingKnowledge ||
                   !title.trim() ||
@@ -1953,8 +1411,7 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
                 style={{
                   border: 0,
                   borderRadius: 9,
-                  padding:
-                    "10px 16px",
+                  padding: "10px 16px",
                   background:
                     savingKnowledge ||
                     !title.trim() ||
@@ -1969,8 +1426,7 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
                       : "#fff",
                   fontSize: 13,
                   fontWeight: 600,
-                  cursor:
-                    "pointer",
+                  cursor: "pointer",
                 }}
               >
                 {savingKnowledge
@@ -1997,225 +1453,507 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
               <div
                 style={{
                   padding: 20,
-                  color:
-                    "#71717a",
+                  color: "#71717a",
                   fontSize: 13,
                 }}
               >
                 Loading knowledge...
               </div>
-            ) : documents.length ===
-              0 ? (
+            ) : documents.length === 0 ? (
               <div
                 style={{
                   padding: 20,
-                  border:
-                    "1px solid #e4e4e7",
+                  border: "1px solid #e4e4e7",
                   borderRadius: 10,
-                  color:
-                    "#71717a",
+                  color: "#71717a",
                   fontSize: 13,
-                  textAlign:
-                    "center",
+                  textAlign: "center",
                 }}
               >
-                No business
-                knowledge has
-                been added yet.
+                No business knowledge has been added
+                yet.
               </div>
             ) : (
               <div
                 style={{
-                  display:
-                    "grid",
+                  display: "grid",
                   gap: 8,
                 }}
               >
-                {documents.map(
-                  (document) => (
-                    <div
-                      key={
-                        document.id
+                {documents.map((document) => (
+                  <div
+                    key={document.id}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      gap: 15,
+                      padding: "13px 15px",
+                      border: "1px solid #e4e4e7",
+                      borderRadius: 10,
+                      transition:
+                        "background 0.15s ease",
+                    }}
+                  >
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleViewKnowledge(document)
                       }
                       style={{
-                        display:
-                          "flex",
-                        justifyContent:
-                          "space-between",
-                        alignItems:
-                          "center",
-                        gap: 15,
-                        padding:
-                          "13px 15px",
-                        border:
-                          "1px solid #e4e4e7",
-                        borderRadius: 10,
+                        border: 0,
+                        background: "transparent",
+                        padding: 0,
+                        margin: 0,
+                        textAlign: "left",
+                        cursor: "pointer",
+                        flex: 1,
+                        minWidth: 0,
                       }}
                     >
                       <div
                         style={{
-                          minWidth: 0,
+                          fontSize: 14,
+                          fontWeight: 600,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
                         }}
                       >
-                        <div
-                          style={{
-                            fontSize: 14,
-                            fontWeight:
-                              600,
-                            overflow:
-                              "hidden",
-                            textOverflow:
-                              "ellipsis",
-                            whiteSpace:
-                              "nowrap",
-                          }}
-                        >
-                          {
-                            document.file_name
-                          }
-                        </div>
-
-                        <div
-                          style={{
-                            fontSize: 12,
-                            color:
-                              "#a1a1aa",
-                            marginTop: 4,
-                          }}
-                        >
-                          {
-                            document.chunk_count
-                          }{" "}
-                          knowledge{" "}
-                          {document.chunk_count ===
-                          1
-                            ? "chunk"
-                            : "chunks"}{" "}
-                          ·{" "}
-                          {new Date(
-                            document.uploaded_at
-                          ).toLocaleDateString()}
-                        </div>
+                        {document.file_name}
                       </div>
 
                       <div
                         style={{
-                          display:
-                            "flex",
-                          alignItems:
-                            "center",
-                          gap: 7,
-                          flexShrink: 0,
+                          fontSize: 12,
+                          color: "#a1a1aa",
+                          marginTop: 4,
                         }}
                       >
-                        <button
-                          type="button"
-                          onClick={() =>
-                            viewKnowledge(
-                              document.id
-                            )
-                          }
-                          style={{
-                            border:
-                              "1px solid #e4e4e7",
-                            background:
-                              "#fff",
-                            color:
-                              "#52525b",
-                            borderRadius:
-                              8,
-                            padding:
-                              "7px 10px",
-                            fontSize: 12,
-                            fontWeight:
-                              600,
-                            cursor:
-                              "pointer",
-                          }}
-                        >
-                          View
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleDeleteKnowledge(
-                              document.id
-                            )
-                          }
-                          style={{
-                            border: 0,
-                            background:
-                              "transparent",
-                            color:
-                              "#71717a",
-                            fontSize: 12,
-                            cursor:
-                              "pointer",
-                            padding:
-                              "7px 6px",
-                          }}
-                        >
-                          Delete
-                        </button>
+                        {document.chunk_count} knowledge{" "}
+                        {document.chunk_count === 1
+                          ? "chunk"
+                          : "chunks"}{" "}
+                        ·{" "}
+                        {new Date(
+                          document.uploaded_at
+                        ).toLocaleDateString()}
                       </div>
-                    </div>
-                  )
-                )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleDeleteKnowledge(
+                          document.id
+                        )
+                      }
+                      style={{
+                        border: 0,
+                        background: "transparent",
+                        color: "#71717a",
+                        fontSize: 12,
+                        cursor: "pointer",
+                        flexShrink: 0,
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                ))}
               </div>
             )}
           </div>
         </section>
 
+        {/* Footer explanation */}
         <div
           style={{
-            textAlign:
-              "center",
-            color:
-              "#a1a1aa",
+            textAlign: "center",
+            color: "#a1a1aa",
             fontSize: 12,
             lineHeight: 1.6,
-            padding:
-              "10px 20px",
+            padding: "10px 20px",
           }}
         >
-          Your permissions are
-          enforced by the application
-          before the AI can perform an
-          action. The AI cannot override
-          these settings.
+          Your permissions are enforced by the
+          application before the AI can perform an
+          action. The AI cannot override these settings.
         </div>
       </div>
 
-      {selectedKnowledgeId && (
-        <KnowledgeDetailsModal
-          knowledge={
-            selectedKnowledge
-          }
-          loading={
-            knowledgeDetailsLoading
-          }
-          onClose={
-            closeKnowledge
-          }
-        />
+      {/* Knowledge detail dialog */}
+      {selectedKnowledge && (
+        <div
+          onClick={() => {
+            if (!knowledgeDetailLoading) {
+              closeKnowledgeDialog();
+            }
+          }}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            background: "rgba(0,0,0,0.45)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 20,
+          }}
+        >
+          <div
+            onClick={(event) =>
+              event.stopPropagation()
+            }
+            style={{
+              width: "100%",
+              maxWidth: 760,
+              maxHeight: "85vh",
+              background: "#fff",
+              borderRadius: 16,
+              boxShadow:
+                "0 20px 60px rgba(0,0,0,0.2)",
+              overflow: "hidden",
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            {/* Dialog header */}
+            <div
+              style={{
+                padding: "20px 22px",
+                borderBottom: "1px solid #e4e4e7",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 15,
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 700,
+                    letterSpacing: "0.08em",
+                    textTransform: "uppercase",
+                    color: "#71717a",
+                    marginBottom: 5,
+                  }}
+                >
+                  Business knowledge
+                </div>
+
+                <h2
+                  style={{
+                    margin: 0,
+                    fontSize: 20,
+                    letterSpacing: "-0.02em",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {selectedKnowledge.file_name}
+                </h2>
+              </div>
+
+              <button
+                type="button"
+                onClick={closeKnowledgeDialog}
+                disabled={knowledgeDetailLoading}
+                aria-label="Close"
+                style={{
+                  border: 0,
+                  background: "#f4f4f5",
+                  width: 34,
+                  height: 34,
+                  borderRadius: 8,
+                  cursor: knowledgeDetailLoading
+                    ? "default"
+                    : "pointer",
+                  fontSize: 18,
+                  color: "#52525b",
+                  flexShrink: 0,
+                  opacity: knowledgeDetailLoading
+                    ? 0.5
+                    : 1,
+                }}
+              >
+                ×
+              </button>
+            </div>
+
+            {/* Dialog content */}
+            <div
+              style={{
+                padding: 22,
+                overflowY: "auto",
+              }}
+            >
+              {knowledgeDetailLoading ? (
+                <div
+                  style={{
+                    padding: "55px 20px",
+                    textAlign: "center",
+                    color: "#71717a",
+                    fontSize: 14,
+                  }}
+                >
+                  <div
+                    style={{
+                      width: 28,
+                      height: 28,
+                      border: "3px solid #e4e4e7",
+                      borderTop:
+                        "3px solid #18181b",
+                      borderRadius: "50%",
+                      margin: "0 auto 14px",
+                      animation:
+                        "knowledge-spin 0.8s linear infinite",
+                    }}
+                  />
+
+                  Loading knowledge...
+                </div>
+              ) : knowledgeDetailError ? (
+                <div
+                  style={{
+                    padding: 16,
+                    borderRadius: 10,
+                    background: "#fef2f2",
+                    border: "1px solid #fecaca",
+                    color: "#b91c1c",
+                    fontSize: 14,
+                    lineHeight: 1.5,
+                  }}
+                >
+                  <strong>
+                    Could not load this knowledge.
+                  </strong>
+
+                  <div style={{ marginTop: 5 }}>
+                    {knowledgeDetailError}
+                  </div>
+                </div>
+              ) : knowledgeDetails ? (
+                <>
+                  {/* Metadata */}
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 24,
+                      marginBottom: 20,
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <div>
+                      <div
+                        style={{
+                          fontSize: 11,
+                          color: "#a1a1aa",
+                          textTransform: "uppercase",
+                          fontWeight: 700,
+                          letterSpacing:
+                            "0.06em",
+                        }}
+                      >
+                        File
+                      </div>
+
+                      <div
+                        style={{
+                          fontSize: 13,
+                          marginTop: 4,
+                        }}
+                      >
+                        {
+                          knowledgeDetails.document
+                            .file_name
+                        }
+                      </div>
+                    </div>
+
+                    <div>
+                      <div
+                        style={{
+                          fontSize: 11,
+                          color: "#a1a1aa",
+                          textTransform: "uppercase",
+                          fontWeight: 700,
+                          letterSpacing:
+                            "0.06em",
+                        }}
+                      >
+                        Added
+                      </div>
+
+                      <div
+                        style={{
+                          fontSize: 13,
+                          marginTop: 4,
+                        }}
+                      >
+                        {new Date(
+                          knowledgeDetails.document.uploaded_at
+                        ).toLocaleString()}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div
+                        style={{
+                          fontSize: 11,
+                          color: "#a1a1aa",
+                          textTransform: "uppercase",
+                          fontWeight: 700,
+                          letterSpacing:
+                            "0.06em",
+                        }}
+                      >
+                        Chunks
+                      </div>
+
+                      <div
+                        style={{
+                          fontSize: 13,
+                          marginTop: 4,
+                        }}
+                      >
+                        {
+                          knowledgeDetails.chunks
+                            .length
+                        }
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Stored content */}
+                  <div
+                    style={{
+                      fontSize: 13,
+                      fontWeight: 700,
+                      color: "#52525b",
+                      marginBottom: 10,
+                    }}
+                  >
+                    Stored knowledge
+                  </div>
+
+                  <div
+                    style={{
+                      border: "1px solid #e4e4e7",
+                      borderRadius: 10,
+                      overflow: "hidden",
+                    }}
+                  >
+                    {knowledgeDetails.chunks
+                      .length === 0 ? (
+                      <div
+                        style={{
+                          padding: 20,
+                          color: "#71717a",
+                          fontSize: 13,
+                        }}
+                      >
+                        No readable text was stored
+                        for this knowledge item.
+                      </div>
+                    ) : (
+                      knowledgeDetails.chunks.map(
+                        (chunk, index) => (
+                          <div
+                            key={chunk.id}
+                            style={{
+                              padding:
+                                "16px 18px",
+                              borderTop:
+                                index === 0
+                                  ? "none"
+                                  : "1px solid #f0f0f1",
+                            }}
+                          >
+                            <div
+                              style={{
+                                fontSize: 11,
+                                fontWeight: 700,
+                                color: "#a1a1aa",
+                                marginBottom: 8,
+                              }}
+                            >
+                              CHUNK {index + 1}
+                            </div>
+
+                            <div
+                              style={{
+                                fontSize: 14,
+                                lineHeight: 1.65,
+                                whiteSpace:
+                                  "pre-wrap",
+                                color: "#27272a",
+                              }}
+                            >
+                              {chunk.content}
+                            </div>
+                          </div>
+                        )
+                      )
+                    )}
+                  </div>
+                </>
+              ) : null}
+            </div>
+
+            {/* Dialog footer */}
+            <div
+              style={{
+                padding: "14px 22px",
+                borderTop: "1px solid #e4e4e7",
+                display: "flex",
+                justifyContent: "flex-end",
+              }}
+            >
+              <button
+                type="button"
+                onClick={closeKnowledgeDialog}
+                disabled={knowledgeDetailLoading}
+                style={{
+                  border: 0,
+                  borderRadius: 9,
+                  padding: "10px 16px",
+                  background:
+                    knowledgeDetailLoading
+                      ? "#e4e4e7"
+                      : "#18181b",
+                  color:
+                    knowledgeDetailLoading
+                      ? "#a1a1aa"
+                      : "#fff",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor:
+                    knowledgeDetailLoading
+                      ? "default"
+                      : "pointer",
+                }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
-      {selectedRule && (
-        <RuleDetailsModal
-          rule={
-            selectedRule.rule
+      <style jsx global>{`
+        @keyframes knowledge-spin {
+          from {
+            transform: rotate(0deg);
           }
-          index={
-            selectedRule.index
+
+          to {
+            transform: rotate(360deg);
           }
-          onClose={() =>
-            setSelectedRule(
-              null
-            )
-          }
-        />
-      )}
+        }
+      `}</style>
     </main>
   );
 }

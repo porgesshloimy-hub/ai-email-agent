@@ -1,8 +1,14 @@
 import { NextResponse } from "next/server";
-import { createServerSupabase, createServiceSupabase } from "@/lib/supabase/server";
+import {
+  createServerSupabase,
+  createServiceSupabase,
+} from "@/lib/supabase/server";
 import OpenAI from "openai";
 import mammoth from "mammoth";
 import { PDFParse } from "pdf-parse";
+
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -18,7 +24,9 @@ function chunkText(text: string, maxChars = 2500): string[] {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  if (!cleaned) return [];
+  if (!cleaned) {
+    return [];
+  }
 
   const paragraphs = cleaned
     .split(/\n\s*\n/)
@@ -34,8 +42,10 @@ function chunkText(text: string, maxChars = 2500): string[] {
       continue;
     }
 
-    if ((current + "\n\n" + paragraph).length <= maxChars) {
-      current += "\n\n" + paragraph;
+    const combined = `${current}\n\n${paragraph}`;
+
+    if (combined.length <= maxChars) {
+      current = combined;
     } else {
       chunks.push(current);
       current = paragraph;
@@ -51,24 +61,11 @@ function chunkText(text: string, maxChars = 2500): string[] {
 
 async function extractText(file: File): Promise<string> {
   const buffer = Buffer.from(await file.arrayBuffer());
-
   const name = file.name.toLowerCase();
 
   if (name.endsWith(".txt")) {
     return buffer.toString("utf8");
   }
-
-  if (name.endsWith(".pdf")) {
-  const parser = new PDFParse({
-    data: buffer,
-  });
-
-  const result = await parser.getText();
-
-  await parser.destroy();
-
-  return result.text;
-}
 
   if (name.endsWith(".docx")) {
     const result = await mammoth.extractRawText({
@@ -78,13 +75,66 @@ async function extractText(file: File): Promise<string> {
     return result.value;
   }
 
+  if (name.endsWith(".pdf")) {
+    let parser: PDFParse | null = null;
+
+    try {
+      parser = new PDFParse({
+        data: buffer,
+      });
+
+      const result = await parser.getText();
+
+      return result.text || "";
+    } finally {
+      if (parser) {
+        try {
+          await parser.destroy();
+        } catch (destroyError) {
+          console.warn(
+            "PDF parser cleanup failed:",
+            destroyError
+          );
+        }
+      }
+    }
+  }
+
   throw new Error(
     "Unsupported file type. Please upload a PDF, DOCX, or TXT file."
   );
 }
 
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error
+  ) {
+    return String(
+      (error as { message?: unknown }).message
+    );
+  }
+
+  return "Unknown error";
+}
+
 export async function POST(request: Request) {
+  let serviceSupabase: ReturnType<typeof createServiceSupabase> | null =
+    null;
+
+  let documentId: string | null = null;
+  let storagePath: string | null = null;
+
   try {
+    // ---------------------------------------------------------
+    // 1. Authenticate
+    // ---------------------------------------------------------
+
     const supabase = await createServerSupabase();
 
     const {
@@ -94,49 +144,105 @@ export async function POST(request: Request) {
 
     if (userError || !user) {
       return NextResponse.json(
-        { error: "Not authenticated" },
+        {
+          error: "Not authenticated",
+        },
         { status: 401 }
       );
     }
 
-    const { data: tenant, error: tenantError } = await supabase
-      .from("tenants")
-      .select("id")
-      .eq("owner_user_id", user.id)
-      .single();
+    // ---------------------------------------------------------
+    // 2. Find tenant
+    // ---------------------------------------------------------
+
+    const { data: tenant, error: tenantError } =
+      await supabase
+        .from("tenants")
+        .select("id")
+        .eq("owner_user_id", user.id)
+        .single();
 
     if (tenantError || !tenant) {
+      console.error(
+        "Knowledge upload tenant lookup failed:",
+        tenantError
+      );
+
       return NextResponse.json(
-        { error: "Tenant not found" },
+        {
+          error: "Tenant not found",
+          details: tenantError?.message ?? null,
+        },
         { status: 404 }
       );
     }
 
-    const formData = await request.formData();
+    // ---------------------------------------------------------
+    // 3. Read multipart form
+    // ---------------------------------------------------------
+
+    let formData: FormData;
+
+    try {
+      formData = await request.formData();
+    } catch (error) {
+      console.error(
+        "Failed to parse upload form data:",
+        error
+      );
+
+      return NextResponse.json(
+        {
+          error: "Could not read the uploaded file.",
+          details: errorMessage(error),
+        },
+        { status: 400 }
+      );
+    }
+
     const file = formData.get("file");
 
     if (!(file instanceof File)) {
       return NextResponse.json(
-        { error: "No file uploaded" },
+        {
+          error: "No file uploaded.",
+        },
+        { status: 400 }
+      );
+    }
+
+    // ---------------------------------------------------------
+    // 4. Validate file
+    // ---------------------------------------------------------
+
+    if (file.size === 0) {
+      return NextResponse.json(
+        {
+          error: "The uploaded file is empty.",
+        },
         { status: 400 }
       );
     }
 
     if (file.size > MAX_FILE_SIZE) {
       return NextResponse.json(
-        { error: "File is too large. Maximum size is 10 MB." },
+        {
+          error:
+            "File is too large. Maximum size is 10 MB.",
+        },
         { status: 400 }
       );
     }
 
-    const fileName = file.name;
+    const fileName = file.name.trim();
 
-    const supported =
-      fileName.toLowerCase().endsWith(".pdf") ||
-      fileName.toLowerCase().endsWith(".docx") ||
-      fileName.toLowerCase().endsWith(".txt");
+    const lowerName = fileName.toLowerCase();
 
-    if (!supported) {
+    const isPdf = lowerName.endsWith(".pdf");
+    const isDocx = lowerName.endsWith(".docx");
+    const isTxt = lowerName.endsWith(".txt");
+
+    if (!isPdf && !isDocx && !isTxt) {
       return NextResponse.json(
         {
           error:
@@ -146,12 +252,45 @@ export async function POST(request: Request) {
       );
     }
 
-    const serviceSupabase = createServiceSupabase();
+    // ---------------------------------------------------------
+    // 5. Make sure required environment variables exist
+    // ---------------------------------------------------------
 
-    /*
-     * Create the document row first so we have its UUID
-     * for both Storage and knowledge_chunks.
-     */
+    if (!process.env.OPENAI_API_KEY) {
+      console.error(
+        "OPENAI_API_KEY is missing."
+      );
+
+      return NextResponse.json(
+        {
+          error:
+            "OpenAI is not configured on the server.",
+        },
+        { status: 500 }
+      );
+    }
+
+    // ---------------------------------------------------------
+    // 6. Create service Supabase client
+    // ---------------------------------------------------------
+
+    serviceSupabase = createServiceSupabase();
+
+    // ---------------------------------------------------------
+    // 7. Create knowledge document
+    //
+    // IMPORTANT:
+    // Your actual table contains:
+    //
+    // id
+    // tenant_id
+    // file_name
+    // storage_path
+    // uploaded_at
+    //
+    // There is NO created_at here.
+    // ---------------------------------------------------------
+
     const { data: document, error: documentError } =
       await serviceSupabase
         .from("knowledge_documents")
@@ -164,163 +303,201 @@ export async function POST(request: Request) {
         .single();
 
     if (documentError || !document) {
-      console.error("Failed to create knowledge document:", documentError);
+      console.error(
+        "Failed to create knowledge document:",
+        documentError
+      );
 
       return NextResponse.json(
-        { error: "Failed to create knowledge document" },
+        {
+          error:
+            "Failed to create knowledge document.",
+          details: documentError?.message ?? null,
+        },
         { status: 500 }
       );
     }
 
-    const storagePath = `${tenant.id}/${document.id}/${fileName}`;
+    documentId = document.id;
 
-    /*
-     * Upload original file to private Supabase Storage.
-     */
-    const { error: uploadError } = await serviceSupabase.storage
-      .from("knowledge")
-      .upload(storagePath, file, {
-        contentType: file.type || "application/octet-stream",
-        upsert: false,
-      });
+    // ---------------------------------------------------------
+    // 8. Upload original file to Storage
+    // ---------------------------------------------------------
 
-    if (uploadError) {
-      console.error("Knowledge file upload failed:", uploadError);
+    storagePath =
+      `${tenant.id}/${document.id}/${fileName}`;
 
-      await serviceSupabase
-        .from("knowledge_documents")
-        .delete()
-        .eq("id", document.id);
+    const fileBuffer = Buffer.from(
+      await file.arrayBuffer()
+    );
 
-      return NextResponse.json(
-        { error: "Failed to upload file" },
-        { status: 500 }
-      );
-    }
-
-    /*
-     * Update the document with the real Storage path.
-     */
-    const { error: pathError } = await serviceSupabase
-      .from("knowledge_documents")
-      .update({
-        storage_path: storagePath,
-      })
-      .eq("id", document.id)
-      .eq("tenant_id", tenant.id);
-
-    if (pathError) {
-      console.error("Failed to update storage path:", pathError);
-
+    const { error: uploadError } =
       await serviceSupabase.storage
         .from("knowledge")
-        .remove([storagePath]);
+        .upload(storagePath, fileBuffer, {
+          contentType:
+            file.type ||
+            (isPdf
+              ? "application/pdf"
+              : isDocx
+                ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                : "text/plain"),
+          upsert: false,
+        });
 
-      await serviceSupabase
-        .from("knowledge_documents")
-        .delete()
-        .eq("id", document.id);
+    if (uploadError) {
+      console.error(
+        "Knowledge Storage upload failed:",
+        uploadError
+      );
 
-      return NextResponse.json(
-        { error: "Failed to save document information" },
-        { status: 500 }
+      throw new Error(
+        `Failed to upload file to Storage: ${uploadError.message}`
       );
     }
 
-    /*
-     * Extract readable text.
-     */
+    // ---------------------------------------------------------
+    // 9. Save actual Storage path
+    // ---------------------------------------------------------
+
+    const { error: pathError } =
+      await serviceSupabase
+        .from("knowledge_documents")
+        .update({
+          storage_path: storagePath,
+        })
+        .eq("id", document.id)
+        .eq("tenant_id", tenant.id);
+
+    if (pathError) {
+      console.error(
+        "Failed to save knowledge Storage path:",
+        pathError
+      );
+
+      throw new Error(
+        `Failed to save document information: ${pathError.message}`
+      );
+    }
+
+    // ---------------------------------------------------------
+    // 10. Extract readable text
+    // ---------------------------------------------------------
+
     let text: string;
 
     try {
       text = await extractText(file);
     } catch (error) {
-      console.error("Text extraction failed:", error);
+      console.error(
+        "Knowledge text extraction failed:",
+        error
+      );
 
-      await serviceSupabase.storage
-        .from("knowledge")
-        .remove([storagePath]);
-
-      await serviceSupabase
-        .from("knowledge_documents")
-        .delete()
-        .eq("id", document.id);
-
-      return NextResponse.json(
-        {
-          error:
-            error instanceof Error
-              ? error.message
-              : "Could not read the uploaded file.",
-        },
-        { status: 400 }
+      throw new Error(
+        `Could not read the uploaded ${isPdf ? "PDF" : isDocx ? "DOCX" : "TXT"}: ${errorMessage(error)}`
       );
     }
 
-    const chunks = chunkText(text);
+    // ---------------------------------------------------------
+    // 11. Check that text was actually extracted
+    // ---------------------------------------------------------
+
+    const cleanedText = text.trim();
+
+    if (!cleanedText) {
+      throw new Error(
+        isPdf
+          ? "The PDF did not contain readable text. Scanned/image-only PDFs are not supported yet."
+          : "The uploaded file did not contain readable text."
+      );
+    }
+
+    // ---------------------------------------------------------
+    // 12. Split text into chunks
+    // ---------------------------------------------------------
+
+    const chunks = chunkText(cleanedText);
 
     if (chunks.length === 0) {
-      await serviceSupabase.storage
-        .from("knowledge")
-        .remove([storagePath]);
-
-      await serviceSupabase
-        .from("knowledge_documents")
-        .delete()
-        .eq("id", document.id);
-
-      return NextResponse.json(
-        {
-          error:
-            "The file did not contain readable text. Scanned/image-only PDFs are not supported yet.",
-        },
-        { status: 400 }
+      throw new Error(
+        "No readable text could be created from this file."
       );
     }
 
-    /*
-     * Generate embeddings in one OpenAI request.
-     */
-    const embeddingResponse = await openai.embeddings.create({
-      model: "text-embedding-3-small",
-      input: chunks,
-    });
+    console.log(
+      `Knowledge extraction successful: ${chunks.length} chunks`
+    );
 
-    if (embeddingResponse.data.length !== chunks.length) {
-      throw new Error("Embedding count did not match chunk count.");
+    // ---------------------------------------------------------
+    // 13. Generate embeddings
+    // ---------------------------------------------------------
+
+    let embeddingResponse;
+
+    try {
+      embeddingResponse =
+        await openai.embeddings.create({
+          model: "text-embedding-3-small",
+          input: chunks,
+        });
+    } catch (error) {
+      console.error(
+        "Knowledge embedding generation failed:",
+        error
+      );
+
+      throw new Error(
+        `Failed to generate embeddings: ${errorMessage(error)}`
+      );
     }
 
-    const chunkRows = chunks.map((content, index) => ({
-      tenant_id: tenant.id,
-      document_id: document.id,
-      content,
-      embedding: embeddingResponse.data[index].embedding,
-    }));
+    if (
+      !embeddingResponse.data ||
+      embeddingResponse.data.length !== chunks.length
+    ) {
+      throw new Error(
+        `Embedding count mismatch. Expected ${chunks.length}, received ${embeddingResponse.data?.length ?? 0}.`
+      );
+    }
 
-    /*
-     * Insert the chunks and embeddings.
-     */
-    const { error: chunkError } = await serviceSupabase
-      .from("knowledge_chunks")
-      .insert(chunkRows);
+    // ---------------------------------------------------------
+    // 14. Build chunk rows
+    // ---------------------------------------------------------
+
+    const chunkRows = chunks.map(
+      (content, index) => ({
+        tenant_id: tenant.id,
+        document_id: document.id,
+        content,
+        embedding:
+          embeddingResponse.data[index].embedding,
+      })
+    );
+
+    // ---------------------------------------------------------
+    // 15. Insert chunks
+    // ---------------------------------------------------------
+
+    const { error: chunkError } =
+      await serviceSupabase
+        .from("knowledge_chunks")
+        .insert(chunkRows);
 
     if (chunkError) {
-      console.error("Failed to insert knowledge chunks:", chunkError);
+      console.error(
+        "Failed to insert knowledge chunks:",
+        chunkError
+      );
 
-      await serviceSupabase.storage
-        .from("knowledge")
-        .remove([storagePath]);
-
-      await serviceSupabase
-        .from("knowledge_documents")
-        .delete()
-        .eq("id", document.id);
-
-      return NextResponse.json(
-        { error: "Failed to index the document" },
-        { status: 500 }
+      throw new Error(
+        `Failed to index the document: ${chunkError.message}`
       );
     }
+
+    // ---------------------------------------------------------
+    // 16. Success
+    // ---------------------------------------------------------
 
     return NextResponse.json({
       success: true,
@@ -329,14 +506,77 @@ export async function POST(request: Request) {
       chunksCreated: chunks.length,
     });
   } catch (error) {
-    console.error("Knowledge upload error:", error);
+    const message = errorMessage(error);
+
+    console.error(
+      "================================================="
+    );
+    console.error(
+      "KNOWLEDGE UPLOAD FAILED"
+    );
+    console.error(
+      "Document:",
+      documentId
+    );
+    console.error(
+      "Storage:",
+      storagePath
+    );
+    console.error(
+      "Error:",
+      message
+    );
+    console.error(
+      "================================================="
+    );
+
+    // ---------------------------------------------------------
+    // Cleanup Storage
+    // ---------------------------------------------------------
+
+    if (
+      serviceSupabase &&
+      storagePath
+    ) {
+      try {
+        await serviceSupabase.storage
+          .from("knowledge")
+          .remove([storagePath]);
+      } catch (cleanupError) {
+        console.error(
+          "Storage cleanup failed:",
+          cleanupError
+        );
+      }
+    }
+
+    // ---------------------------------------------------------
+    // Cleanup database document
+    //
+    // If knowledge_chunks has ON DELETE CASCADE,
+    // this also removes any chunks already inserted.
+    // ---------------------------------------------------------
+
+    if (
+      serviceSupabase &&
+      documentId
+    ) {
+      try {
+        await serviceSupabase
+          .from("knowledge_documents")
+          .delete()
+          .eq("id", documentId);
+      } catch (cleanupError) {
+        console.error(
+          "Knowledge document cleanup failed:",
+          cleanupError
+        );
+      }
+    }
 
     return NextResponse.json(
       {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Unexpected knowledge upload error",
+        error: message,
       },
       { status: 500 }
     );

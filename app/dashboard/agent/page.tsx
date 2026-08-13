@@ -8,16 +8,10 @@ import {
   savePermission,
 } from "./actions";
 
-type PermissionLevel = "denied" | "approval_required" | "allowed";
-
-type Permission = {
-  action: string;
-  level: PermissionLevel;
-};
-
-type Rule = {
-  description: string;
-};
+type PermissionLevel =
+  | "denied"
+  | "approval_required"
+  | "allowed";
 
 type KnowledgeDocument = {
   id: string;
@@ -27,36 +21,50 @@ type KnowledgeDocument = {
   chunk_count: number;
 };
 
+type KnowledgeDetails = {
+  id: string;
+  file_name: string;
+  storage_path: string;
+  uploaded_at: string;
+  chunk_count: number;
+  content: string;
+};
+
+type Permission = {
+  action: string;
+  level: PermissionLevel;
+};
+
 const EMAIL_ACTIONS = [
   {
     key: "gmail.read",
     label: "Read & search email",
     description:
-      "Read incoming messages and search your Gmail mailbox when needed.",
+      "Allow the agent to read incoming emails and search your mailbox.",
   },
   {
     key: "gmail.draft",
     label: "Create email drafts",
     description:
-      "Prepare replies and other emails in Gmail without sending them.",
+      "Allow the agent to prepare replies in Gmail without sending them.",
   },
   {
     key: "gmail.send",
     label: "Send email",
     description:
-      "Send emails to customers automatically when permitted.",
+      "Allow the agent to send emails to customers automatically.",
   },
   {
     key: "gmail.archive",
     label: "Archive email",
     description:
-      "Archive emails after the agent has finished processing them.",
+      "Allow the agent to archive emails after processing them.",
   },
   {
     key: "gmail.delete",
     label: "Delete email",
     description:
-      "Permanently delete emails. Consider requiring approval for this action.",
+      "Allow the agent to permanently delete emails.",
   },
 ];
 
@@ -65,88 +73,15 @@ const CALENDAR_ACTIONS = [
     key: "calendar.read",
     label: "Read calendar & availability",
     description:
-      "Check your calendar and determine available times.",
+      "Allow the agent to see your calendar and check available times.",
   },
   {
     key: "calendar.write",
     label: "Create & modify events",
     description:
-      "Schedule, update, or modify calendar events.",
+      "Allow the agent to schedule or modify calendar events.",
   },
 ];
-
-function Card({
-  children,
-  style,
-}: {
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-}) {
-  return (
-    <section
-      style={{
-        background: "#ffffff",
-        border: "1px solid #e4e4e7",
-        borderRadius: 18,
-        boxShadow: "0 2px 8px rgba(0,0,0,0.025)",
-        ...style,
-      }}
-    >
-      {children}
-    </section>
-  );
-}
-
-function SectionHeader({
-  eyebrow,
-  title,
-  description,
-}: {
-  eyebrow: string;
-  title: string;
-  description: string;
-}) {
-  return (
-    <div style={{ marginBottom: 22 }}>
-      <div
-        style={{
-          fontSize: 11,
-          fontWeight: 700,
-          letterSpacing: "0.09em",
-          textTransform: "uppercase",
-          color: "#71717a",
-          marginBottom: 7,
-        }}
-      >
-        {eyebrow}
-      </div>
-
-      <h2
-        style={{
-          margin: 0,
-          fontSize: 21,
-          lineHeight: 1.3,
-          letterSpacing: "-0.025em",
-          color: "#18181b",
-        }}
-      >
-        {title}
-      </h2>
-
-      <p
-        style={{
-          margin: "7px 0 0",
-          maxWidth: 700,
-          color: "#71717a",
-          fontSize: 14,
-          lineHeight: 1.6,
-        }}
-      >
-        {description}
-      </p>
-    </div>
-  );
-}
 
 function PermissionBadge({
   level,
@@ -160,13 +95,12 @@ function PermissionBadge({
           display: "inline-flex",
           alignItems: "center",
           gap: 6,
-          padding: "5px 9px",
+          padding: "5px 10px",
           borderRadius: 999,
           background: "#ecfdf3",
           color: "#027a48",
-          fontSize: 11,
-          fontWeight: 700,
-          whiteSpace: "nowrap",
+          fontSize: 12,
+          fontWeight: 600,
         }}
       >
         <span>✓</span>
@@ -182,13 +116,12 @@ function PermissionBadge({
           display: "inline-flex",
           alignItems: "center",
           gap: 6,
-          padding: "5px 9px",
+          padding: "5px 10px",
           borderRadius: 999,
           background: "#fff7ed",
           color: "#c2410c",
-          fontSize: 11,
-          fontWeight: 700,
-          whiteSpace: "nowrap",
+          fontSize: 12,
+          fontWeight: 600,
         }}
       >
         <span>●</span>
@@ -203,13 +136,12 @@ function PermissionBadge({
         display: "inline-flex",
         alignItems: "center",
         gap: 6,
-        padding: "5px 9px",
+        padding: "5px 10px",
         borderRadius: 999,
         background: "#f4f4f5",
         color: "#52525b",
-        fontSize: 11,
-        fontWeight: 700,
-        whiteSpace: "nowrap",
+        fontSize: 12,
+        fontWeight: 600,
       }}
     >
       <span>×</span>
@@ -229,9 +161,9 @@ function PermissionSelect({
   onSaved: (action: string, level: PermissionLevel) => void;
   onError: (message: string) => void;
 }) {
+  const [saving, setSaving] = useState(false);
   const [selectedLevel, setSelectedLevel] =
     useState<PermissionLevel>(level);
-  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     setSelectedLevel(level);
@@ -249,6 +181,7 @@ function PermissionSelect({
 
     try {
       const formData = new FormData();
+
       formData.append("action", action);
       formData.append("level", newLevel);
 
@@ -270,22 +203,21 @@ function PermissionSelect({
 
   return (
     <select
+      name="level"
       value={selectedLevel}
       onChange={handleChange}
       disabled={saving}
       style={{
-        width: 190,
-        maxWidth: "100%",
-        padding: "9px 34px 9px 11px",
+        minWidth: 180,
+        padding: "9px 34px 9px 12px",
         border: "1px solid #d4d4d8",
-        borderRadius: 9,
+        borderRadius: 8,
         background: saving ? "#f4f4f5" : "#fff",
-        color: "#18181b",
         fontSize: 13,
-        fontWeight: 600,
+        fontWeight: 500,
+        color: "#18181b",
         cursor: saving ? "wait" : "pointer",
-        opacity: saving ? 0.65 : 1,
-        outline: "none",
+        opacity: saving ? 0.7 : 1,
       }}
     >
       <option value="denied">Never</option>
@@ -297,214 +229,465 @@ function PermissionSelect({
   );
 }
 
-function PermissionGroup({
-  actions,
-  permissions,
-  onSaved,
-  onError,
+function SectionHeader({
+  eyebrow,
+  title,
+  description,
 }: {
-  actions: typeof EMAIL_ACTIONS;
-  permissions: Permission[];
-  onSaved: (action: string, level: PermissionLevel) => void;
-  onError: (message: string) => void;
+  eyebrow: string;
+  title: string;
+  description: string;
 }) {
-  function getPermission(action: string): PermissionLevel {
-    return (
-      permissions.find(
-        (permission) => permission.action === action
-      )?.level ?? "approval_required"
-    );
-  }
-
   return (
-    <div
-      style={{
-        border: "1px solid #e4e4e7",
-        borderRadius: 13,
-        overflow: "hidden",
-      }}
-    >
-      {actions.map((action, index) => {
-        const level = getPermission(action.key);
+    <div style={{ marginBottom: 22 }}>
+      <div
+        style={{
+          fontSize: 11,
+          fontWeight: 700,
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+          color: "#71717a",
+          marginBottom: 6,
+        }}
+      >
+        {eyebrow}
+      </div>
 
-        return (
-          <div
-            key={action.key}
-            style={{
-              padding: "18px",
-              borderTop:
-                index === 0 ? "none" : "1px solid #f0f0f1",
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                alignItems: "flex-start",
-                justifyContent: "space-between",
-                gap: 20,
-                flexWrap: "wrap",
-              }}
-            >
-              <div
-                style={{
-                  flex: "1 1 300px",
-                  minWidth: 0,
-                }}
-              >
-                <div
-                  style={{
-                    fontSize: 14,
-                    fontWeight: 700,
-                    color: "#18181b",
-                    marginBottom: 5,
-                  }}
-                >
-                  {action.label}
-                </div>
+      <h2
+        style={{
+          margin: 0,
+          fontSize: 21,
+          lineHeight: 1.3,
+          color: "#18181b",
+          letterSpacing: "-0.02em",
+        }}
+      >
+        {title}
+      </h2>
 
-                <div
-                  style={{
-                    color: "#71717a",
-                    fontSize: 13,
-                    lineHeight: 1.55,
-                    maxWidth: 600,
-                  }}
-                >
-                  {action.description}
-                </div>
-
-                <div style={{ marginTop: 9 }}>
-                  <PermissionBadge level={level} />
-                </div>
-              </div>
-
-              <div
-                style={{
-                  flex: "0 0 auto",
-                  paddingTop: 2,
-                }}
-              >
-                <PermissionSelect
-                  action={action.key}
-                  level={level}
-                  onSaved={onSaved}
-                  onError={onError}
-                />
-              </div>
-            </div>
-          </div>
-        );
-      })}
+      <p
+        style={{
+          margin: "7px 0 0",
+          color: "#71717a",
+          fontSize: 14,
+          lineHeight: 1.6,
+        }}
+      >
+        {description}
+      </p>
     </div>
   );
 }
 
-function LoadingBlock() {
+function FileIcon() {
   return (
     <div
       style={{
-        background: "#fff",
-        border: "1px solid #e4e4e7",
-        borderRadius: 18,
-        padding: 28,
+        width: 38,
+        height: 38,
+        borderRadius: 10,
+        background: "#f4f4f5",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+        color: "#52525b",
+        fontSize: 17,
+      }}
+    >
+      ▤
+    </div>
+  );
+}
+
+function DetailModal({
+  document,
+  loading,
+  error,
+  onClose,
+  onDelete,
+}: {
+  document: KnowledgeDetails | null;
+  loading: boolean;
+  error: string;
+  onClose: () => void;
+  onDelete: () => void;
+}) {
+  if (!document && !loading && !error) {
+    return null;
+  }
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.45)",
+        zIndex: 1000,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 24,
       }}
     >
       <div
+        onClick={(event) => event.stopPropagation()}
         style={{
-          width: 180,
-          height: 15,
-          borderRadius: 7,
-          background: "#f4f4f5",
-          marginBottom: 13,
+          width: "100%",
+          maxWidth: 760,
+          maxHeight: "85vh",
+          background: "#fff",
+          borderRadius: 18,
+          boxShadow: "0 24px 80px rgba(0,0,0,0.18)",
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
         }}
-      />
+      >
+        {/* Modal header */}
+        <div
+          style={{
+            padding: "22px 24px",
+            borderBottom: "1px solid #e4e4e7",
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "space-between",
+            gap: 20,
+          }}
+        >
+          <div style={{ minWidth: 0 }}>
+            <div
+              style={{
+                fontSize: 11,
+                fontWeight: 700,
+                letterSpacing: "0.08em",
+                textTransform: "uppercase",
+                color: "#71717a",
+                marginBottom: 7,
+              }}
+            >
+              Knowledge
+            </div>
 
-      <div
-        style={{
-          width: "75%",
-          height: 12,
-          borderRadius: 6,
-          background: "#f4f4f5",
-          marginBottom: 8,
-        }}
-      />
+            <h3
+              style={{
+                margin: 0,
+                fontSize: 20,
+                lineHeight: 1.3,
+                letterSpacing: "-0.02em",
+                color: "#18181b",
+                overflowWrap: "anywhere",
+              }}
+            >
+              {document?.file_name ?? "Knowledge details"}
+            </h3>
+          </div>
 
-      <div
-        style={{
-          width: "55%",
-          height: 12,
-          borderRadius: 6,
-          background: "#f4f4f5",
-        }}
-      />
+          <button
+            type="button"
+            onClick={onClose}
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: 8,
+              border: "1px solid #e4e4e7",
+              background: "#fff",
+              color: "#52525b",
+              fontSize: 20,
+              lineHeight: 1,
+              cursor: "pointer",
+              flexShrink: 0,
+            }}
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+
+        {/* Modal body */}
+        <div
+          style={{
+            overflowY: "auto",
+            padding: 24,
+          }}
+        >
+          {loading && (
+            <div
+              style={{
+                padding: "50px 20px",
+                textAlign: "center",
+                color: "#71717a",
+                fontSize: 14,
+              }}
+            >
+              Loading knowledge...
+            </div>
+          )}
+
+          {error && !loading && (
+            <div
+              style={{
+                padding: 16,
+                borderRadius: 10,
+                background: "#fef2f2",
+                border: "1px solid #fecaca",
+                color: "#b91c1c",
+                fontSize: 14,
+                lineHeight: 1.5,
+              }}
+            >
+              {error}
+            </div>
+          )}
+
+          {document && !loading && !error && (
+            <>
+              {/* Metadata */}
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns:
+                    "repeat(auto-fit, minmax(160px, 1fr))",
+                  gap: 10,
+                  marginBottom: 22,
+                }}
+              >
+                <div
+                  style={{
+                    padding: 14,
+                    border: "1px solid #e4e4e7",
+                    borderRadius: 10,
+                    background: "#fafafa",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: "#71717a",
+                      marginBottom: 5,
+                      fontWeight: 600,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.05em",
+                    }}
+                  >
+                    Added
+                  </div>
+
+                  <div
+                    style={{
+                      fontSize: 14,
+                      fontWeight: 600,
+                      color: "#18181b",
+                    }}
+                  >
+                    {new Date(
+                      document.uploaded_at
+                    ).toLocaleDateString()}
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    padding: 14,
+                    border: "1px solid #e4e4e7",
+                    borderRadius: 10,
+                    background: "#fafafa",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: "#71717a",
+                      marginBottom: 5,
+                      fontWeight: 600,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.05em",
+                    }}
+                  >
+                    Indexed
+                  </div>
+
+                  <div
+                    style={{
+                      fontSize: 14,
+                      fontWeight: 600,
+                      color: "#18181b",
+                    }}
+                  >
+                    {document.chunk_count}{" "}
+                    {document.chunk_count === 1
+                      ? "chunk"
+                      : "chunks"}
+                  </div>
+                </div>
+              </div>
+
+              {/* Content */}
+              <div>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 12,
+                    marginBottom: 9,
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: 13,
+                      fontWeight: 700,
+                      color: "#52525b",
+                    }}
+                  >
+                    Indexed content
+                  </div>
+
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: "#a1a1aa",
+                    }}
+                  >
+                    This is what the agent can search
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    padding: 18,
+                    border: "1px solid #e4e4e7",
+                    borderRadius: 12,
+                    background: "#fafafa",
+                    whiteSpace: "pre-wrap",
+                    fontSize: 14,
+                    lineHeight: 1.7,
+                    color: "#27272a",
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  {document.content || (
+                    <span style={{ color: "#a1a1aa" }}>
+                      No text content was returned.
+                    </span>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Modal footer */}
+        {document && !loading && !error && (
+          <div
+            style={{
+              padding: "16px 24px",
+              borderTop: "1px solid #e4e4e7",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: 12,
+            }}
+          >
+            <button
+              type="button"
+              onClick={onDelete}
+              style={{
+                border: 0,
+                background: "transparent",
+                color: "#b91c1c",
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: "pointer",
+                padding: "8px 0",
+              }}
+            >
+              Delete knowledge
+            </button>
+
+            <button
+              type="button"
+              onClick={onClose}
+              style={{
+                border: "1px solid #d4d4d8",
+                background: "#fff",
+                color: "#18181b",
+                borderRadius: 9,
+                padding: "9px 15px",
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              Close
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
 export default function AgentPage() {
   const [instructions, setInstructions] = useState("");
-  const [rules, setRules] = useState<Rule[]>([]);
+  const [rules, setRules] = useState<
+    { description: string }[]
+  >([]);
   const [permissions, setPermissions] = useState<Permission[]>([]);
 
   const [loading, setLoading] = useState(true);
 
   const [newRule, setNewRule] = useState("");
   const [savingRule, setSavingRule] = useState(false);
-  const [deletingRule, setDeletingRule] = useState<number | null>(null);
 
-  const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
-  const [knowledgeLoading, setKnowledgeLoading] = useState(true);
+  const [documents, setDocuments] = useState<
+    KnowledgeDocument[]
+  >([]);
+  const [knowledgeLoading, setKnowledgeLoading] =
+    useState(true);
 
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
-  const [savingKnowledge, setSavingKnowledge] = useState(false);
+  const [savingKnowledge, setSavingKnowledge] =
+    useState(false);
   const [uploading, setUploading] = useState(false);
-  const [deletingKnowledge, setDeletingKnowledge] =
-    useState<string | null>(null);
 
   const [message, setMessage] = useState("");
-  const [messageType, setMessageType] = useState<
-    "success" | "error"
-  >("success");
 
-  function showMessage(
-    text: string,
-    type: "success" | "error" = "success"
-  ) {
-    setMessage(text);
-    setMessageType(type);
-
-    window.setTimeout(() => {
-      setMessage((current) =>
-        current === text ? "" : current
-      );
-    }, 4000);
-  }
+  const [selectedDocument, setSelectedDocument] =
+    useState<KnowledgeDetails | null>(null);
+  const [detailsLoading, setDetailsLoading] =
+    useState(false);
+  const [detailsError, setDetailsError] = useState("");
 
   useEffect(() => {
     async function loadAgent() {
       try {
-        const response = await fetch("/api/agent/settings");
+        const response = await fetch(
+          "/api/agent/settings"
+        );
 
         if (!response.ok) {
-          throw new Error("Failed to load agent settings.");
+          throw new Error(
+            "Failed to load agent settings"
+          );
         }
 
         const data = await response.json();
 
-        setInstructions(data.customInstructions ?? "");
-        setRules(Array.isArray(data.rules) ? data.rules : []);
-        setPermissions(
-          Array.isArray(data.permissions) ? data.permissions : []
+        setInstructions(
+          data.customInstructions ?? ""
         );
+        setRules(data.rules ?? []);
+        setPermissions(data.permissions ?? []);
       } catch (error) {
         console.error(error);
 
-        showMessage(
+        setMessage(
           error instanceof Error
             ? error.message
-            : "Failed to load agent settings.",
-          "error"
+            : "Failed to load agent settings."
         );
       } finally {
         setLoading(false);
@@ -515,28 +698,25 @@ export default function AgentPage() {
   }, []);
 
   async function loadKnowledge() {
+    setKnowledgeLoading(true);
+
     try {
-      const response = await fetch("/api/knowledge", {
-        cache: "no-store",
-      });
+      const response = await fetch("/api/knowledge");
 
       if (!response.ok) {
-        throw new Error("Failed to load business knowledge.");
+        throw new Error("Failed to load knowledge");
       }
 
       const data = await response.json();
 
-      setDocuments(
-        Array.isArray(data.documents) ? data.documents : []
-      );
+      setDocuments(data.documents ?? []);
     } catch (error) {
       console.error(error);
 
-      showMessage(
+      setMessage(
         error instanceof Error
           ? error.message
-          : "Failed to load business knowledge.",
-        "error"
+          : "Failed to load knowledge."
       );
     } finally {
       setKnowledgeLoading(false);
@@ -546,6 +726,16 @@ export default function AgentPage() {
   useEffect(() => {
     loadKnowledge();
   }, []);
+
+  function getPermission(
+    action: string
+  ): PermissionLevel {
+    return (
+      permissions.find(
+        (permission) => permission.action === action
+      )?.level ?? "approval_required"
+    );
+  }
 
   function handlePermissionSaved(
     action: string,
@@ -564,14 +754,20 @@ export default function AgentPage() {
         );
       }
 
-      return [...current, { action, level }];
+      return [
+        ...current,
+        {
+          action,
+          level,
+        },
+      ];
     });
 
-    showMessage("Permission saved.");
+    setMessage("Permission saved.");
   }
 
-  function handlePermissionError(errorMessage: string) {
-    showMessage(errorMessage, "error");
+  function handlePermissionError(message: string) {
+    setMessage(message);
   }
 
   async function handleInstructionsSubmit(
@@ -579,49 +775,55 @@ export default function AgentPage() {
   ) {
     event.preventDefault();
 
-    try {
-      const formData = new FormData(event.currentTarget);
+    const formData = new FormData(
+      event.currentTarget
+    );
 
+    try {
       await saveInstructions(formData);
 
-      showMessage("Instructions saved.");
+      setMessage("Instructions saved.");
     } catch (error) {
-      showMessage(
+      setMessage(
         error instanceof Error
           ? error.message
-          : "Failed to save instructions.",
-        "error"
+          : "Failed to save instructions."
       );
     }
   }
 
   async function handleAddRule() {
-    const trimmed = newRule.trim();
-
-    if (!trimmed) return;
+    if (!newRule.trim()) return;
 
     setSavingRule(true);
 
     try {
+      const description = newRule.trim();
+
       const formData = new FormData();
-      formData.append("description", trimmed);
+
+      formData.append(
+        "description",
+        description
+      );
 
       await addRule(formData);
 
       setRules((current) => [
         ...current,
-        { description: trimmed },
+        {
+          description,
+        },
       ]);
 
       setNewRule("");
 
-      showMessage("Rule added.");
+      setMessage("Rule added.");
     } catch (error) {
-      showMessage(
+      setMessage(
         error instanceof Error
           ? error.message
-          : "Failed to add rule.",
-        "error"
+          : "Failed to add rule."
       );
     } finally {
       setSavingRule(false);
@@ -629,83 +831,86 @@ export default function AgentPage() {
   }
 
   async function handleDeleteRule(index: number) {
-    setDeletingRule(index);
-
     try {
       const formData = new FormData();
-      formData.append("index", String(index));
+
+      formData.append(
+        "index",
+        String(index)
+      );
 
       await deleteRule(formData);
 
       setRules((current) =>
-        current.filter((_, ruleIndex) => ruleIndex !== index)
+        current.filter(
+          (_, ruleIndex) =>
+            ruleIndex !== index
+        )
       );
 
-      showMessage("Rule removed.");
+      setMessage("Rule removed.");
     } catch (error) {
-      showMessage(
+      setMessage(
         error instanceof Error
           ? error.message
-          : "Failed to remove rule.",
-        "error"
+          : "Failed to remove rule."
       );
-    } finally {
-      setDeletingRule(null);
     }
   }
 
   async function handleManualKnowledge() {
-    const trimmedTitle = title.trim();
-    const trimmedContent = content.trim();
-
-    if (!trimmedTitle || !trimmedContent) {
-      showMessage(
-        "Please enter both a title and the knowledge.",
-        "error"
+    if (
+      !title.trim() ||
+      !content.trim()
+    ) {
+      setMessage(
+        "Please enter both a title and the knowledge."
       );
+
       return;
     }
 
     setSavingKnowledge(true);
+    setMessage("");
 
     try {
-      const response = await fetch("/api/knowledge/manual", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          title: trimmedTitle,
-          content: trimmedContent,
-        }),
-      });
+      const response = await fetch(
+        "/api/knowledge/manual",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type":
+              "application/json",
+          },
+          body: JSON.stringify({
+            title,
+            content,
+          }),
+        }
+      );
 
       const data = await response.json();
 
       if (!response.ok) {
         throw new Error(
-          data.error || "Failed to save knowledge."
+          data.error ||
+            "Failed to save knowledge."
         );
       }
 
       setTitle("");
       setContent("");
 
-      await loadKnowledge();
-
-      showMessage(
-        `Knowledge added successfully. ${
-          data.chunksCreated ?? 0
-        } knowledge ${
-          data.chunksCreated === 1 ? "chunk" : "chunks"
-        } created.`
+      setMessage(
+        "Knowledge added successfully."
       );
+
+      await loadKnowledge();
     } catch (error) {
-      showMessage(
+      setMessage(
         error instanceof Error
           ? error.message
-          : "Failed to save knowledge.",
-        "error"
+          : "Failed to save knowledge."
       );
     } finally {
       setSavingKnowledge(false);
@@ -715,8 +920,8 @@ export default function AgentPage() {
   async function handleUpload(
     event: React.ChangeEvent<HTMLInputElement>
   ) {
-    const input = event.currentTarget;
-    const file = input.files?.[0];
+    const file =
+      event.target.files?.[0];
 
     if (!file) return;
 
@@ -725,82 +930,136 @@ export default function AgentPage() {
 
     try {
       const formData = new FormData();
-      formData.append("file", file);
 
-      const response = await fetch("/api/knowledge/upload", {
-        method: "POST",
-        body: formData,
-      });
+      formData.append(
+        "file",
+        file
+      );
 
-      /*
-       * The upload route should normally return JSON.
-       * If the server crashes and Next.js returns its HTML
-       * 500 page, don't show the confusing "Unexpected token <"
-       * message to the user.
-       */
-      const contentType =
-        response.headers.get("content-type") ?? "";
+      const response = await fetch(
+        "/api/knowledge/upload",
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
+
+      const rawText =
+        await response.text();
 
       let data: {
         error?: string;
         chunksCreated?: number;
       } = {};
 
-      if (contentType.includes("application/json")) {
-        data = await response.json();
-      } else {
-        const text = await response.text();
-
-        console.error(
-          "Knowledge upload returned non-JSON response:",
-          response.status,
-          text
-        );
-
+      try {
+        data = JSON.parse(rawText);
+      } catch {
         throw new Error(
-          response.status >= 500
-            ? "The server could not process this document. Please try again."
-            : "The document upload failed."
+          `Upload endpoint returned an unexpected response (${response.status}).`
         );
       }
 
       if (!response.ok) {
         throw new Error(
-          data.error || "Upload failed."
+          data.error ||
+            "Upload failed."
         );
       }
 
-      await loadKnowledge();
-
-      showMessage(
+      setMessage(
         `Uploaded successfully. ${
           data.chunksCreated ?? 0
         } knowledge ${
-          data.chunksCreated === 1 ? "chunk" : "chunks"
+          data.chunksCreated === 1
+            ? "chunk"
+            : "chunks"
         } created.`
       );
 
-      input.value = "";
+      await loadKnowledge();
+
+      event.target.value = "";
     } catch (error) {
-      showMessage(
+      console.error(error);
+
+      setMessage(
         error instanceof Error
           ? error.message
-          : "Upload failed.",
-        "error"
+          : "Upload failed."
       );
     } finally {
       setUploading(false);
     }
   }
 
-  async function handleDeleteKnowledge(id: string) {
-    const confirmed = window.confirm(
-      "Delete this knowledge? The agent will no longer use it."
-    );
+  async function handleViewKnowledge(
+    id: string
+  ) {
+    setDetailsLoading(true);
+    setDetailsError("");
+    setSelectedDocument(null);
 
-    if (!confirmed) return;
+    try {
+      const response = await fetch(
+        `/api/knowledge/${id}`
+      );
 
-    setDeletingKnowledge(id);
+      const rawText =
+        await response.text();
+
+      let data: {
+        document?: KnowledgeDetails;
+        error?: string;
+      } = {};
+
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        throw new Error(
+          `The knowledge details endpoint returned an unexpected response (${response.status}).`
+        );
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          data.error ||
+            "Failed to load knowledge details."
+        );
+      }
+
+      if (!data.document) {
+        throw new Error(
+          "Knowledge details were not returned."
+        );
+      }
+
+      setSelectedDocument(
+        data.document
+      );
+    } catch (error) {
+      console.error(error);
+
+      setDetailsError(
+        error instanceof Error
+          ? error.message
+          : "Failed to load knowledge details."
+      );
+    } finally {
+      setDetailsLoading(false);
+    }
+  }
+
+  async function handleDeleteKnowledge(
+    id: string
+  ) {
+    if (
+      !window.confirm(
+        "Delete this knowledge? The agent will no longer use it."
+      )
+    ) {
+      return;
+    }
 
     try {
       const response = await fetch(
@@ -810,28 +1069,45 @@ export default function AgentPage() {
         }
       );
 
-      const data = await response.json();
+      const rawText =
+        await response.text();
+
+      let data: {
+        error?: string;
+      } = {};
+
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        if (!response.ok) {
+          throw new Error(
+            `Delete failed (${response.status}).`
+          );
+        }
+      }
 
       if (!response.ok) {
         throw new Error(
-          data.error || "Failed to delete knowledge."
+          data.error ||
+            "Failed to delete knowledge."
         );
       }
 
-      setDocuments((current) =>
-        current.filter((document) => document.id !== id)
-      );
+      if (
+        selectedDocument?.id === id
+      ) {
+        setSelectedDocument(null);
+      }
 
-      showMessage("Knowledge deleted.");
+      await loadKnowledge();
+
+      setMessage("Knowledge deleted.");
     } catch (error) {
-      showMessage(
+      setMessage(
         error instanceof Error
           ? error.message
-          : "Failed to delete knowledge.",
-        "error"
+          : "Failed to delete knowledge."
       );
-    } finally {
-      setDeletingKnowledge(null);
     }
   }
 
@@ -839,764 +1115,262 @@ export default function AgentPage() {
     return (
       <main
         style={{
+          maxWidth: 980,
+          margin: "0 auto",
+          padding: "48px 24px",
+          fontFamily:
+            "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        }}
+      >
+        <div
+          style={{
+            height: 28,
+            width: 220,
+            background: "#f4f4f5",
+            borderRadius: 8,
+            marginBottom: 12,
+          }}
+        />
+
+        <div
+          style={{
+            height: 16,
+            width: 420,
+            background: "#f4f4f5",
+            borderRadius: 6,
+          }}
+        />
+      </main>
+    );
+  }
+
+  return (
+    <>
+      <main
+        style={{
           minHeight: "100vh",
           background: "#fafafa",
-          padding: "48px 24px 80px",
           fontFamily:
             "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+          color: "#18181b",
         }}
       >
         <div
           style={{
             maxWidth: 980,
             margin: "0 auto",
+            padding: "48px 24px 80px",
           }}
         >
-          <LoadingBlock />
-          <div style={{ height: 16 }} />
-          <LoadingBlock />
-        </div>
-      </main>
-    );
-  }
-
-  return (
-    <main
-      style={{
-        minHeight: "100vh",
-        background: "#fafafa",
-        color: "#18181b",
-        fontFamily:
-          "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-      }}
-    >
-      <div
-        style={{
-          maxWidth: 980,
-          margin: "0 auto",
-          padding: "44px 24px 80px",
-        }}
-      >
-        {/* Header */}
-        <header style={{ marginBottom: 34 }}>
-          <div
+          <header
             style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 7,
-              padding: "6px 10px",
-              borderRadius: 999,
-              background: "#f4f4f5",
-              color: "#52525b",
-              fontSize: 11,
-              fontWeight: 700,
-              letterSpacing: "0.02em",
-              marginBottom: 14,
-            }}
-          >
-            <span
-              style={{
-                width: 7,
-                height: 7,
-                borderRadius: "50%",
-                background: "#22c55e",
-              }}
-            />
-            AI AGENT
-          </div>
-
-          <h1
-            style={{
-              margin: 0,
-              fontSize: 38,
-              lineHeight: 1.12,
-              letterSpacing: "-0.04em",
-              fontWeight: 750,
-            }}
-          >
-            Agent setup
-          </h1>
-
-          <p
-            style={{
-              margin: "10px 0 0",
-              maxWidth: 690,
-              color: "#71717a",
-              fontSize: 16,
-              lineHeight: 1.65,
-            }}
-          >
-            Teach your agent how your business works, what it
-            knows, and exactly what it is allowed to do on your
-            behalf.
-          </p>
-        </header>
-
-        {/* Global status */}
-        {message && (
-          <div
-            role="status"
-            style={{
-              display: "flex",
-              alignItems: "flex-start",
-              gap: 10,
-              marginBottom: 20,
-              padding: "12px 14px",
-              borderRadius: 11,
-              background:
-                messageType === "error"
-                  ? "#fef2f2"
-                  : "#f0fdf4",
-              border:
-                messageType === "error"
-                  ? "1px solid #fecaca"
-                  : "1px solid #bbf7d0",
-              color:
-                messageType === "error"
-                  ? "#b91c1c"
-                  : "#166534",
-              fontSize: 13,
-              lineHeight: 1.5,
-            }}
-          >
-            <span style={{ fontWeight: 700 }}>
-              {messageType === "error" ? "!" : "✓"}
-            </span>
-
-            <span>{message}</span>
-          </div>
-        )}
-
-        {/* Instructions */}
-        <Card style={{ padding: 26, marginBottom: 20 }}>
-          <SectionHeader
-            eyebrow="Behavior"
-            title="Instructions"
-            description="Tell your agent about your business, communication style, priorities, and how you want it to handle customers."
-          />
-
-          <form onSubmit={handleInstructionsSubmit}>
-            <textarea
-              name="customInstructions"
-              value={instructions}
-              onChange={(event) =>
-                setInstructions(event.target.value)
-              }
-              rows={8}
-              placeholder={`Example:
-
-We are a plumbing company serving Brooklyn.
-
-Answer straightforward pricing questions automatically. Be friendly and concise. If a customer asks for a refund or complains about a previous service, ask for approval before making a commitment.`}
-              style={{
-                width: "100%",
-                boxSizing: "border-box",
-                padding: 15,
-                border: "1px solid #d4d4d8",
-                borderRadius: 11,
-                resize: "vertical",
-                fontFamily: "inherit",
-                fontSize: 14,
-                lineHeight: 1.65,
-                color: "#18181b",
-                outline: "none",
-                background: "#fff",
-              }}
-            />
-
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "flex-end",
-                marginTop: 12,
-              }}
-            >
-              <button
-                type="submit"
-                style={{
-                  border: 0,
-                  borderRadius: 9,
-                  padding: "10px 17px",
-                  background: "#18181b",
-                  color: "#fff",
-                  fontSize: 13,
-                  fontWeight: 700,
-                  cursor: "pointer",
-                }}
-              >
-                Save instructions
-              </button>
-            </div>
-          </form>
-        </Card>
-
-        {/* Email */}
-        <Card style={{ padding: 26, marginBottom: 20 }}>
-          <SectionHeader
-            eyebrow="Permissions"
-            title="Email"
-            description="Control exactly what your agent can do with Gmail. These permissions are enforced by the application before an action is performed."
-          />
-
-          <PermissionGroup
-            actions={EMAIL_ACTIONS}
-            permissions={permissions}
-            onSaved={handlePermissionSaved}
-            onError={handlePermissionError}
-          />
-
-          <div
-            style={{
-              marginTop: 14,
-              padding: "12px 14px",
-              borderRadius: 10,
-              background: "#fafafa",
-              color: "#71717a",
-              fontSize: 12,
-              lineHeight: 1.6,
-            }}
-          >
-            <strong style={{ color: "#52525b" }}>
-              Approval required
-            </strong>{" "}
-            means the agent can prepare the action but cannot
-            complete it until you approve it.
-          </div>
-        </Card>
-
-        {/* Calendar */}
-        <Card style={{ padding: 26, marginBottom: 20 }}>
-          <SectionHeader
-            eyebrow="Permissions"
-            title="Calendar"
-            description="Choose whether your agent can view availability and manage calendar events."
-          />
-
-          <PermissionGroup
-            actions={CALENDAR_ACTIONS}
-            permissions={permissions}
-            onSaved={handlePermissionSaved}
-            onError={handlePermissionError}
-          />
-        </Card>
-
-        {/* Rules */}
-        <Card style={{ padding: 26, marginBottom: 20 }}>
-          <SectionHeader
-            eyebrow="Guardrails"
-            title="Rules"
-            description="Add specific situations where the agent should behave differently, avoid an action, or ask for your approval."
-          />
-
-          {rules.length > 0 && (
-            <div
-              style={{
-                display: "grid",
-                gap: 9,
-                marginBottom: 14,
-              }}
-            >
-              {rules.map((rule, index) => (
-                <div
-                  key={`${rule.description}-${index}`}
-                  style={{
-                    display: "flex",
-                    alignItems: "flex-start",
-                    justifyContent: "space-between",
-                    gap: 14,
-                    padding: "13px 15px",
-                    border: "1px solid #e4e4e7",
-                    borderRadius: 11,
-                    background: "#fafafa",
-                  }}
-                >
-                  <div
-                    style={{
-                      display: "flex",
-                      gap: 10,
-                      alignItems: "flex-start",
-                      minWidth: 0,
-                    }}
-                  >
-                    <span
-                      style={{
-                        marginTop: 7,
-                        width: 6,
-                        height: 6,
-                        borderRadius: "50%",
-                        background: "#a1a1aa",
-                        flexShrink: 0,
-                      }}
-                    />
-
-                    <span
-                      style={{
-                        fontSize: 14,
-                        lineHeight: 1.55,
-                      }}
-                    >
-                      {rule.description}
-                    </span>
-                  </div>
-
-                  <button
-                    type="button"
-                    disabled={deletingRule === index}
-                    onClick={() =>
-                      handleDeleteRule(index)
-                    }
-                    style={{
-                      border: 0,
-                      background: "transparent",
-                      color: "#71717a",
-                      fontSize: 12,
-                      fontWeight: 600,
-                      cursor:
-                        deletingRule === index
-                          ? "wait"
-                          : "pointer",
-                      padding: "5px 4px",
-                      flexShrink: 0,
-                    }}
-                  >
-                    {deletingRule === index
-                      ? "Removing..."
-                      : "Remove"}
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div
-            style={{
-              display: "flex",
-              gap: 9,
-              flexWrap: "wrap",
-            }}
-          >
-            <input
-              value={newRule}
-              onChange={(event) =>
-                setNewRule(event.target.value)
-              }
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  handleAddRule();
-                }
-              }}
-              maxLength={500}
-              placeholder="Example: Refund requests always require approval."
-              style={{
-                flex: "1 1 400px",
-                minWidth: 0,
-                padding: "11px 13px",
-                border: "1px solid #d4d4d8",
-                borderRadius: 9,
-                fontFamily: "inherit",
-                fontSize: 14,
-                outline: "none",
-              }}
-            />
-
-            <button
-              type="button"
-              onClick={handleAddRule}
-              disabled={
-                savingRule || !newRule.trim()
-              }
-              style={{
-                border: 0,
-                borderRadius: 9,
-                padding: "0 17px",
-                minHeight: 42,
-                background:
-                  savingRule || !newRule.trim()
-                    ? "#e4e4e7"
-                    : "#18181b",
-                color:
-                  savingRule || !newRule.trim()
-                    ? "#a1a1aa"
-                    : "#fff",
-                fontSize: 13,
-                fontWeight: 700,
-                cursor:
-                  savingRule || !newRule.trim()
-                    ? "default"
-                    : "pointer",
-              }}
-            >
-              {savingRule ? "Adding..." : "Add rule"}
-            </button>
-          </div>
-        </Card>
-
-        {/* Knowledge */}
-        <Card style={{ padding: 26, marginBottom: 20 }}>
-          <SectionHeader
-            eyebrow="Knowledge"
-            title="Business knowledge"
-            description="Give your agent reliable information about your business so it can answer customers accurately without inventing facts."
-          />
-
-          {/* Upload */}
-          <div
-            style={{
-              border: "1px dashed #c4c4c9",
-              borderRadius: 14,
-              padding: 22,
-              background:
-                "linear-gradient(180deg, #fcfcfc 0%, #fafafa 100%)",
-              marginBottom: 16,
+              marginBottom: 38,
             }}
           >
             <div
               style={{
-                display: "flex",
-                alignItems: "flex-start",
-                gap: 13,
-              }}
-            >
-              <div
-                style={{
-                  width: 38,
-                  height: 38,
-                  borderRadius: 10,
-                  background: "#18181b",
-                  color: "#fff",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontSize: 17,
-                  flexShrink: 0,
-                }}
-              >
-                ↑
-              </div>
-
-              <div style={{ minWidth: 0 }}>
-                <div
-                  style={{
-                    fontSize: 14,
-                    fontWeight: 700,
-                    marginBottom: 5,
-                  }}
-                >
-                  Upload a document
-                </div>
-
-                <div
-                  style={{
-                    color: "#71717a",
-                    fontSize: 13,
-                    lineHeight: 1.55,
-                    marginBottom: 14,
-                  }}
-                >
-                  Upload pricing, FAQs, policies, product
-                  information, or other business documents.
-                  PDF, DOCX, and TXT files up to 10 MB.
-                </div>
-
-                <input
-                  type="file"
-                  accept=".pdf,.docx,.txt"
-                  onChange={handleUpload}
-                  disabled={uploading}
-                  style={{
-                    fontSize: 13,
-                    maxWidth: "100%",
-                  }}
-                />
-
-                {uploading && (
-                  <div
-                    style={{
-                      marginTop: 10,
-                      color: "#71717a",
-                      fontSize: 12,
-                    }}
-                  >
-                    Uploading and indexing your document...
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Manual knowledge */}
-          <div
-            style={{
-              border: "1px solid #e4e4e7",
-              borderRadius: 14,
-              padding: 22,
-              marginBottom: 22,
-            }}
-          >
-            <div
-              style={{
-                fontSize: 14,
-                fontWeight: 700,
-                marginBottom: 5,
-              }}
-            >
-              Add individual knowledge
-            </div>
-
-            <div
-              style={{
-                color: "#71717a",
-                fontSize: 13,
-                lineHeight: 1.55,
-                marginBottom: 15,
-              }}
-            >
-              Add a specific fact, price, policy, or instruction
-              directly to your agent's knowledge base.
-            </div>
-
-            <input
-              value={title}
-              onChange={(event) =>
-                setTitle(event.target.value)
-              }
-              placeholder="Title — e.g. Emergency service pricing"
-              style={{
-                width: "100%",
-                boxSizing: "border-box",
-                padding: "11px 13px",
-                border: "1px solid #d4d4d8",
-                borderRadius: 9,
-                fontFamily: "inherit",
-                fontSize: 14,
-                marginBottom: 10,
-                outline: "none",
-              }}
-            />
-
-            <textarea
-              value={content}
-              onChange={(event) =>
-                setContent(event.target.value)
-              }
-              placeholder="Emergency plumbing service costs $250 after 6 PM."
-              rows={5}
-              maxLength={100000}
-              style={{
-                width: "100%",
-                boxSizing: "border-box",
-                padding: "11px 13px",
-                border: "1px solid #d4d4d8",
-                borderRadius: 9,
-                resize: "vertical",
-                fontFamily: "inherit",
-                fontSize: 14,
-                lineHeight: 1.55,
-                outline: "none",
-              }}
-            />
-
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
+                display: "inline-flex",
                 alignItems: "center",
-                gap: 12,
-                marginTop: 10,
-                flexWrap: "wrap",
+                gap: 7,
+                padding: "6px 10px",
+                borderRadius: 999,
+                background: "#f4f4f5",
+                color: "#52525b",
+                fontSize: 12,
+                fontWeight: 600,
+                marginBottom: 14,
               }}
             >
               <span
                 style={{
-                  color: "#a1a1aa",
-                  fontSize: 11,
+                  width: 7,
+                  height: 7,
+                  borderRadius: "50%",
+                  background: "#22c55e",
                 }}
-              >
-                {content.length.toLocaleString()} / 100,000
-              </span>
+              />
 
-              <button
-                type="button"
-                onClick={handleManualKnowledge}
-                disabled={
-                  savingKnowledge ||
-                  !title.trim() ||
-                  !content.trim()
-                }
-                style={{
-                  border: 0,
-                  borderRadius: 9,
-                  padding: "10px 16px",
-                  background:
-                    savingKnowledge ||
-                    !title.trim() ||
-                    !content.trim()
-                      ? "#e4e4e7"
-                      : "#18181b",
-                  color:
-                    savingKnowledge ||
-                    !title.trim() ||
-                    !content.trim()
-                      ? "#a1a1aa"
-                      : "#fff",
-                  fontSize: 13,
-                  fontWeight: 700,
-                  cursor:
-                    savingKnowledge ||
-                    !title.trim() ||
-                    !content.trim()
-                      ? "default"
-                      : "pointer",
-                }}
-              >
-                {savingKnowledge
-                  ? "Saving..."
-                  : "Add knowledge"}
-              </button>
+              AI Agent
             </div>
-          </div>
 
-          {/* Existing knowledge */}
-          <div>
-            <div
+            <h1
               style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 12,
-                marginBottom: 10,
+                margin: 0,
+                fontSize: 36,
+                lineHeight: 1.15,
+                letterSpacing: "-0.035em",
               }}
             >
-              <div
-                style={{
-                  fontSize: 13,
-                  fontWeight: 700,
-                  color: "#52525b",
-                }}
-              >
-                Your knowledge
-              </div>
+              Agent setup
+            </h1>
 
-              {!knowledgeLoading && documents.length > 0 && (
-                <div
-                  style={{
-                    fontSize: 11,
-                    color: "#a1a1aa",
-                  }}
-                >
-                  {documents.length}{" "}
-                  {documents.length === 1
-                    ? "source"
-                    : "sources"}
-                </div>
-              )}
+            <p
+              style={{
+                margin: "10px 0 0",
+                maxWidth: 650,
+                fontSize: 16,
+                lineHeight: 1.6,
+                color: "#71717a",
+              }}
+            >
+              Teach your AI agent how your business
+              works and decide exactly what it is
+              allowed to do on your behalf.
+            </p>
+          </header>
+
+          {message && (
+            <div
+              style={{
+                marginBottom: 20,
+                padding: "12px 15px",
+                borderRadius: 10,
+                background: "#f0fdf4",
+                border:
+                  "1px solid #bbf7d0",
+                color: "#166534",
+                fontSize: 14,
+              }}
+            >
+              {message}
             </div>
+          )}
 
-            {knowledgeLoading ? (
+          {/* Instructions */}
+          <section
+            style={{
+              background: "#fff",
+              border:
+                "1px solid #e4e4e7",
+              borderRadius: 16,
+              padding: 26,
+              marginBottom: 20,
+              boxShadow:
+                "0 1px 2px rgba(0,0,0,0.03)",
+            }}
+          >
+            <SectionHeader
+              eyebrow="Behavior"
+              title="Instructions"
+              description="Give the agent context about your business, how you want it to communicate, and how it should handle customers."
+            />
+
+            <form
+              onSubmit={
+                handleInstructionsSubmit
+              }
+            >
+              <textarea
+                name="customInstructions"
+                value={instructions}
+                onChange={(event) =>
+                  setInstructions(
+                    event.target.value
+                  )
+                }
+                rows={7}
+                placeholder={`Example:
+
+We are a plumbing company serving Brooklyn.
+
+Answer straightforward pricing questions automatically. Be friendly and concise. If a customer asks for a refund or complains about a previous service, do not make a commitment without approval.`}
+                style={{
+                  width: "100%",
+                  boxSizing:
+                    "border-box",
+                  padding: 15,
+                  border:
+                    "1px solid #d4d4d8",
+                  borderRadius: 10,
+                  resize: "vertical",
+                  fontFamily: "inherit",
+                  fontSize: 14,
+                  lineHeight: 1.6,
+                  outline: "none",
+                }}
+              />
+
               <div
                 style={{
-                  padding: 22,
-                  border: "1px solid #e4e4e7",
-                  borderRadius: 11,
-                  color: "#71717a",
-                  fontSize: 13,
+                  display: "flex",
+                  justifyContent:
+                    "flex-end",
+                  marginTop: 12,
                 }}
               >
-                Loading knowledge...
-              </div>
-            ) : documents.length === 0 ? (
-              <div
-                style={{
-                  padding: "30px 20px",
-                  border: "1px solid #e4e4e7",
-                  borderRadius: 11,
-                  color: "#71717a",
-                  fontSize: 13,
-                  textAlign: "center",
-                  background: "#fafafa",
-                }}
-              >
-                <div
+                <button
+                  type="submit"
                   style={{
-                    fontSize: 22,
-                    marginBottom: 7,
-                    opacity: 0.45,
-                  }}
-                >
-                  ◇
-                </div>
-
-                <div
-                  style={{
+                    border: 0,
+                    borderRadius: 9,
+                    padding:
+                      "10px 17px",
+                    background:
+                      "#18181b",
+                    color: "#fff",
+                    fontSize: 13,
                     fontWeight: 600,
-                    color: "#52525b",
-                    marginBottom: 4,
+                    cursor: "pointer",
                   }}
                 >
-                  No business knowledge yet
-                </div>
-
-                <div>
-                  Upload a document or add an individual
-                  knowledge entry above.
-                </div>
+                  Save instructions
+                </button>
               </div>
-            ) : (
-              <div
-                style={{
-                  display: "grid",
-                  gap: 8,
-                }}
-              >
-                {documents.map((document) => (
-                  <div
-                    key={document.id}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                      gap: 15,
-                      padding: "14px 15px",
-                      border: "1px solid #e4e4e7",
-                      borderRadius: 11,
-                      background: "#fff",
-                    }}
-                  >
+            </form>
+          </section>
+
+          {/* Email permissions */}
+          <section
+            style={{
+              background: "#fff",
+              border:
+                "1px solid #e4e4e7",
+              borderRadius: 16,
+              padding: 26,
+              marginBottom: 20,
+              boxShadow:
+                "0 1px 2px rgba(0,0,0,0.03)",
+            }}
+          >
+            <SectionHeader
+              eyebrow="Permissions"
+              title="Email"
+              description="Control exactly what the agent can do with your Gmail account."
+            />
+
+            <div
+              style={{
+                border:
+                  "1px solid #e4e4e7",
+                borderRadius: 12,
+                overflow: "hidden",
+              }}
+            >
+              {EMAIL_ACTIONS.map(
+                (action, index) => {
+                  const level =
+                    getPermission(
+                      action.key
+                    );
+
+                  return (
                     <div
+                      key={action.key}
                       style={{
                         display: "flex",
-                        alignItems: "center",
-                        gap: 12,
-                        minWidth: 0,
+                        alignItems:
+                          "center",
+                        justifyContent:
+                          "space-between",
+                        gap: 24,
+                        padding:
+                          "17px 18px",
+                        borderTop:
+                          index === 0
+                            ? "none"
+                            : "1px solid #f0f0f1",
                       }}
                     >
-                      <div
-                        style={{
-                          width: 34,
-                          height: 34,
-                          borderRadius: 9,
-                          background: "#f4f4f5",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          color: "#52525b",
-                          fontSize: 13,
-                          fontWeight: 700,
-                          flexShrink: 0,
-                        }}
-                      >
-                        {document.file_name
-                          .toLowerCase()
-                          .endsWith(".pdf")
-                          ? "PDF"
-                          : document.file_name
-                              .toLowerCase()
-                              .endsWith(".docx")
-                          ? "DOC"
-                          : "TXT"}
-                      </div>
-
                       <div
                         style={{
                           minWidth: 0,
@@ -1605,90 +1379,865 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
                         <div
                           style={{
                             fontSize: 14,
-                            fontWeight: 650,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
+                            fontWeight: 600,
+                            marginBottom: 4,
                           }}
                         >
-                          {document.file_name}
+                          {action.label}
                         </div>
 
                         <div
                           style={{
-                            fontSize: 11,
-                            color: "#a1a1aa",
-                            marginTop: 4,
+                            fontSize: 13,
+                            color: "#71717a",
+                            lineHeight:
+                              1.45,
                           }}
                         >
-                          {document.chunk_count}{" "}
-                          {document.chunk_count === 1
-                            ? "knowledge chunk"
-                            : "knowledge chunks"}{" "}
-                          ·{" "}
-                          {new Date(
-                            document.uploaded_at
-                          ).toLocaleDateString()}
+                          {
+                            action.description
+                          }
+                        </div>
+
+                        <div
+                          style={{
+                            marginTop: 8,
+                          }}
+                        >
+                          <PermissionBadge
+                            level={
+                              level
+                            }
+                          />
                         </div>
                       </div>
+
+                      <PermissionSelect
+                        action={
+                          action.key
+                        }
+                        level={level}
+                        onSaved={
+                          handlePermissionSaved
+                        }
+                        onError={
+                          handlePermissionError
+                        }
+                      />
                     </div>
+                  );
+                }
+              )}
+            </div>
 
-                    <button
-                      type="button"
-                      disabled={
-                        deletingKnowledge === document.id
-                      }
-                      onClick={() =>
-                        handleDeleteKnowledge(document.id)
-                      }
-                      style={{
-                        border: 0,
-                        background: "transparent",
-                        color: "#71717a",
-                        fontSize: 12,
-                        fontWeight: 600,
-                        cursor:
-                          deletingKnowledge === document.id
-                            ? "wait"
-                            : "pointer",
-                        padding: "6px 4px",
-                        flexShrink: 0,
-                      }}
-                    >
-                      {deletingKnowledge === document.id
-                        ? "Deleting..."
-                        : "Delete"}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </Card>
+            <div
+              style={{
+                marginTop: 15,
+                padding: 13,
+                borderRadius: 10,
+                background: "#fafafa",
+                color: "#71717a",
+                fontSize: 12,
+                lineHeight: 1.55,
+              }}
+            >
+              <strong
+                style={{
+                  color: "#52525b",
+                }}
+              >
+                Approval required
+              </strong>{" "}
+              means the agent can prepare the
+              action, but it cannot complete it
+              until you approve it.
+            </div>
+          </section>
 
-        {/* Security note */}
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "center",
-            padding: "8px 20px",
-          }}
-        >
-          <div
+          {/* Calendar */}
+          <section
             style={{
-              maxWidth: 700,
-              textAlign: "center",
-              color: "#a1a1aa",
-              fontSize: 11,
-              lineHeight: 1.65,
+              background: "#fff",
+              border:
+                "1px solid #e4e4e7",
+              borderRadius: 16,
+              padding: 26,
+              marginBottom: 20,
+              boxShadow:
+                "0 1px 2px rgba(0,0,0,0.03)",
             }}
           >
-            Your permissions are enforced by the application
-            before the AI can perform an action. The AI cannot
-            override these settings.
+            <SectionHeader
+              eyebrow="Permissions"
+              title="Calendar"
+              description="Choose whether your agent can view availability and manage calendar events."
+            />
+
+            <div
+              style={{
+                border:
+                  "1px solid #e4e4e7",
+                borderRadius: 12,
+                overflow: "hidden",
+              }}
+            >
+              {CALENDAR_ACTIONS.map(
+                (action, index) => {
+                  const level =
+                    getPermission(
+                      action.key
+                    );
+
+                  return (
+                    <div
+                      key={action.key}
+                      style={{
+                        display: "flex",
+                        alignItems:
+                          "center",
+                        justifyContent:
+                          "space-between",
+                        gap: 24,
+                        padding:
+                          "17px 18px",
+                        borderTop:
+                          index === 0
+                            ? "none"
+                            : "1px solid #f0f0f1",
+                      }}
+                    >
+                      <div
+                        style={{
+                          minWidth: 0,
+                        }}
+                      >
+                        <div
+                          style={{
+                            fontSize: 14,
+                            fontWeight: 600,
+                            marginBottom: 4,
+                          }}
+                        >
+                          {action.label}
+                        </div>
+
+                        <div
+                          style={{
+                            fontSize: 13,
+                            color: "#71717a",
+                            lineHeight:
+                              1.45,
+                          }}
+                        >
+                          {
+                            action.description
+                          }
+                        </div>
+
+                        <div
+                          style={{
+                            marginTop: 8,
+                          }}
+                        >
+                          <PermissionBadge
+                            level={
+                              level
+                            }
+                          />
+                        </div>
+                      </div>
+
+                      <PermissionSelect
+                        action={
+                          action.key
+                        }
+                        level={level}
+                        onSaved={
+                          handlePermissionSaved
+                        }
+                        onError={
+                          handlePermissionError
+                        }
+                      />
+                    </div>
+                  );
+                }
+              )}
+            </div>
+          </section>
+
+          {/* Rules */}
+          <section
+            style={{
+              background: "#fff",
+              border:
+                "1px solid #e4e4e7",
+              borderRadius: 16,
+              padding: 26,
+              marginBottom: 20,
+              boxShadow:
+                "0 1px 2px rgba(0,0,0,0.03)",
+            }}
+          >
+            <SectionHeader
+              eyebrow="Guardrails"
+              title="Rules"
+              description="Add specific situations where the agent should behave differently or ask for your approval."
+            />
+
+            {rules.length > 0 && (
+              <div
+                style={{
+                  display: "grid",
+                  gap: 9,
+                  marginBottom: 14,
+                }}
+              >
+                {rules.map(
+                  (rule, index) => (
+                    <div
+                      key={`${rule.description}-${index}`}
+                      style={{
+                        display: "flex",
+                        alignItems:
+                          "center",
+                        justifyContent:
+                          "space-between",
+                        gap: 15,
+                        padding:
+                          "13px 15px",
+                        border:
+                          "1px solid #e4e4e7",
+                        borderRadius: 10,
+                        background:
+                          "#fafafa",
+                      }}
+                    >
+                      <div
+                        style={{
+                          display:
+                            "flex",
+                          gap: 10,
+                          alignItems:
+                            "flex-start",
+                        }}
+                      >
+                        <span
+                          style={{
+                            marginTop: 5,
+                            width: 7,
+                            height: 7,
+                            borderRadius:
+                              "50%",
+                            background:
+                              "#a1a1aa",
+                            flexShrink: 0,
+                          }}
+                        />
+
+                        <span
+                          style={{
+                            fontSize: 14,
+                            lineHeight:
+                              1.5,
+                          }}
+                        >
+                          {
+                            rule.description
+                          }
+                        </span>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleDeleteRule(
+                            index
+                          )
+                        }
+                        style={{
+                          border: 0,
+                          background:
+                            "transparent",
+                          color:
+                            "#a1a1aa",
+                          fontSize: 13,
+                          cursor:
+                            "pointer",
+                          padding:
+                            "5px 7px",
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  )
+                )}
+              </div>
+            )}
+
+            <div
+              style={{
+                display: "flex",
+                gap: 9,
+              }}
+            >
+              <input
+                value={newRule}
+                onChange={(event) =>
+                  setNewRule(
+                    event.target.value
+                  )
+                }
+                onKeyDown={(event) => {
+                  if (
+                    event.key ===
+                    "Enter"
+                  ) {
+                    event.preventDefault();
+                    handleAddRule();
+                  }
+                }}
+                placeholder="Example: Refund requests always require approval."
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  padding:
+                    "11px 13px",
+                  border:
+                    "1px solid #d4d4d8",
+                  borderRadius: 9,
+                  fontFamily: "inherit",
+                  fontSize: 14,
+                }}
+              />
+
+              <button
+                type="button"
+                onClick={
+                  handleAddRule
+                }
+                disabled={
+                  savingRule ||
+                  !newRule.trim()
+                }
+                style={{
+                  border: 0,
+                  borderRadius: 9,
+                  padding:
+                    "0 17px",
+                  background:
+                    savingRule ||
+                    !newRule.trim()
+                      ? "#e4e4e7"
+                      : "#18181b",
+                  color:
+                    savingRule ||
+                    !newRule.trim()
+                      ? "#a1a1aa"
+                      : "#fff",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor:
+                    savingRule ||
+                    !newRule.trim()
+                      ? "default"
+                      : "pointer",
+                }}
+              >
+                {savingRule
+                  ? "Adding..."
+                  : "Add rule"}
+              </button>
+            </div>
+          </section>
+
+          {/* Knowledge */}
+          <section
+            style={{
+              background: "#fff",
+              border:
+                "1px solid #e4e4e7",
+              borderRadius: 16,
+              padding: 26,
+              marginBottom: 20,
+              boxShadow:
+                "0 1px 2px rgba(0,0,0,0.03)",
+            }}
+          >
+            <SectionHeader
+              eyebrow="Knowledge"
+              title="Business knowledge"
+              description="Give your agent the information it needs to answer customers accurately."
+            />
+
+            {/* Upload */}
+            <div
+              style={{
+                padding: 20,
+                border:
+                  "1px dashed #d4d4d8",
+                borderRadius: 12,
+                background: "#fafafa",
+                marginBottom: 18,
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 14,
+                  fontWeight: 600,
+                  marginBottom: 5,
+                }}
+              >
+                Upload a document
+              </div>
+
+              <div
+                style={{
+                  fontSize: 13,
+                  color: "#71717a",
+                  marginBottom: 14,
+                  lineHeight: 1.5,
+                }}
+              >
+                Upload pricing, FAQs, policies,
+                product information, or other
+                business documents.
+              </div>
+
+              <input
+                type="file"
+                accept=".pdf,.docx,.txt"
+                onChange={
+                  handleUpload
+                }
+                disabled={uploading}
+                style={{
+                  fontSize: 13,
+                }}
+              />
+
+              {uploading && (
+                <div
+                  style={{
+                    marginTop: 10,
+                    fontSize: 13,
+                    color: "#71717a",
+                  }}
+                >
+                  Uploading and indexing...
+                </div>
+              )}
+            </div>
+
+            {/* Manual knowledge */}
+            <div
+              style={{
+                padding: 20,
+                border:
+                  "1px solid #e4e4e7",
+                borderRadius: 12,
+                marginBottom: 20,
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 14,
+                  fontWeight: 600,
+                  marginBottom: 5,
+                }}
+              >
+                Add individual knowledge
+              </div>
+
+              <div
+                style={{
+                  fontSize: 13,
+                  color: "#71717a",
+                  marginBottom: 15,
+                }}
+              >
+                Add a specific fact, price,
+                policy, or instruction.
+              </div>
+
+              <input
+                value={title}
+                onChange={(event) =>
+                  setTitle(
+                    event.target.value
+                  )
+                }
+                placeholder="Title — e.g. Emergency service pricing"
+                style={{
+                  width: "100%",
+                  boxSizing:
+                    "border-box",
+                  padding:
+                    "11px 13px",
+                  border:
+                    "1px solid #d4d4d8",
+                  borderRadius: 9,
+                  fontFamily: "inherit",
+                  fontSize: 14,
+                  marginBottom: 10,
+                }}
+              />
+
+              <textarea
+                value={content}
+                onChange={(event) =>
+                  setContent(
+                    event.target.value
+                  )
+                }
+                placeholder="Emergency plumbing service costs $250 after 6 PM."
+                rows={4}
+                style={{
+                  width: "100%",
+                  boxSizing:
+                    "border-box",
+                  padding:
+                    "11px 13px",
+                  border:
+                    "1px solid #d4d4d8",
+                  borderRadius: 9,
+                  resize: "vertical",
+                  fontFamily: "inherit",
+                  fontSize: 14,
+                  lineHeight: 1.5,
+                }}
+              />
+
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent:
+                    "flex-end",
+                  marginTop: 10,
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={
+                    handleManualKnowledge
+                  }
+                  disabled={
+                    savingKnowledge ||
+                    !title.trim() ||
+                    !content.trim()
+                  }
+                  style={{
+                    border: 0,
+                    borderRadius: 9,
+                    padding:
+                      "10px 16px",
+                    background:
+                      savingKnowledge ||
+                      !title.trim() ||
+                      !content.trim()
+                        ? "#e4e4e7"
+                        : "#18181b",
+                    color:
+                      savingKnowledge ||
+                      !title.trim() ||
+                      !content.trim()
+                        ? "#a1a1aa"
+                        : "#fff",
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor:
+                      savingKnowledge ||
+                      !title.trim() ||
+                      !content.trim()
+                        ? "default"
+                        : "pointer",
+                  }}
+                >
+                  {savingKnowledge
+                    ? "Saving..."
+                    : "Add knowledge"}
+                </button>
+              </div>
+            </div>
+
+            {/* Existing knowledge */}
+            <div>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent:
+                    "space-between",
+                  gap: 12,
+                  marginBottom: 10,
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: "#52525b",
+                  }}
+                >
+                  Your knowledge
+                </div>
+
+                {documents.length >
+                  0 && (
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color:
+                        "#a1a1aa",
+                    }}
+                  >
+                    {documents.length}{" "}
+                    {documents.length ===
+                    1
+                      ? "item"
+                      : "items"}
+                  </div>
+                )}
+              </div>
+
+              {knowledgeLoading ? (
+                <div
+                  style={{
+                    padding: 20,
+                    color: "#71717a",
+                    fontSize: 13,
+                    border:
+                      "1px solid #e4e4e7",
+                    borderRadius: 10,
+                  }}
+                >
+                  Loading knowledge...
+                </div>
+              ) : documents.length ===
+                0 ? (
+                <div
+                  style={{
+                    padding: 30,
+                    border:
+                      "1px solid #e4e4e7",
+                    borderRadius: 12,
+                    color: "#71717a",
+                    fontSize: 13,
+                    textAlign:
+                      "center",
+                    background:
+                      "#fafafa",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: 24,
+                      marginBottom: 8,
+                    }}
+                  >
+                    ◇
+                  </div>
+
+                  <div
+                    style={{
+                      fontWeight: 600,
+                      color:
+                        "#52525b",
+                      marginBottom: 4,
+                    }}
+                  >
+                    No business knowledge yet
+                  </div>
+
+                  <div>
+                    Upload a document or
+                    add individual knowledge
+                    above.
+                  </div>
+                </div>
+              ) : (
+                <div
+                  style={{
+                    display: "grid",
+                    gap: 8,
+                  }}
+                >
+                  {documents.map(
+                    (document) => (
+                      <div
+                        key={
+                          document.id
+                        }
+                        style={{
+                          display:
+                            "flex",
+                          alignItems:
+                            "center",
+                          gap: 13,
+                          padding:
+                            "13px 15px",
+                          border:
+                            "1px solid #e4e4e7",
+                          borderRadius: 11,
+                          background:
+                            "#fff",
+                          transition:
+                            "background 0.15s",
+                        }}
+                      >
+                        <FileIcon />
+
+                        <div
+                          style={{
+                            minWidth: 0,
+                            flex: 1,
+                          }}
+                        >
+                          <div
+                            style={{
+                              fontSize: 14,
+                              fontWeight: 600,
+                              overflow:
+                                "hidden",
+                              textOverflow:
+                                "ellipsis",
+                              whiteSpace:
+                                "nowrap",
+                              color:
+                                "#18181b",
+                            }}
+                          >
+                            {
+                              document.file_name
+                            }
+                          </div>
+
+                          <div
+                            style={{
+                              fontSize: 12,
+                              color:
+                                "#a1a1aa",
+                              marginTop: 4,
+                            }}
+                          >
+                            {
+                              document.chunk_count
+                            }{" "}
+                            knowledge{" "}
+                            {document.chunk_count ===
+                            1
+                              ? "chunk"
+                              : "chunks"}{" "}
+                            ·{" "}
+                            {new Date(
+                              document.uploaded_at
+                            ).toLocaleDateString()}
+                          </div>
+                        </div>
+
+                        <div
+                          style={{
+                            display:
+                              "flex",
+                            alignItems:
+                              "center",
+                            gap: 6,
+                            flexShrink: 0,
+                          }}
+                        >
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleViewKnowledge(
+                                document.id
+                              )
+                            }
+                            style={{
+                              border:
+                                "1px solid #d4d4d8",
+                              background:
+                                "#fff",
+                              color:
+                                "#18181b",
+                              borderRadius: 8,
+                              padding:
+                                "8px 11px",
+                              fontSize: 12,
+                              fontWeight: 600,
+                              cursor:
+                                "pointer",
+                            }}
+                          >
+                            View details
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleDeleteKnowledge(
+                                document.id
+                              )
+                            }
+                            style={{
+                              border: 0,
+                              background:
+                                "transparent",
+                              color:
+                                "#71717a",
+                              fontSize: 12,
+                              cursor:
+                                "pointer",
+                              padding:
+                                "8px 7px",
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  )}
+                </div>
+              )}
+            </div>
+          </section>
+
+          {/* Footer */}
+          <div
+            style={{
+              textAlign: "center",
+              color: "#a1a1aa",
+              fontSize: 12,
+              lineHeight: 1.6,
+              padding:
+                "10px 20px",
+            }}
+          >
+            Your permissions are enforced by the
+            application before the AI can perform an
+            action. The AI cannot override these
+            settings.
           </div>
         </div>
-      </div>
-    </main>
+      </main>
+
+      <DetailModal
+        document={selectedDocument}
+        loading={detailsLoading}
+        error={detailsError}
+        onClose={() => {
+          setSelectedDocument(null);
+          setDetailsError("");
+        }}
+        onDelete={() => {
+          if (selectedDocument) {
+            handleDeleteKnowledge(
+              selectedDocument.id
+            );
+          }
+        }}
+      />
+    </>
   );
 }

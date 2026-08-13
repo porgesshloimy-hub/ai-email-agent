@@ -416,7 +416,7 @@ export async function processIncomingEmail(
 
           "Only send an immediate reply when the email received is clearly connected to the company business model, the sender is probably expecting a reply, and the response is clearly supported by the available business information and configured permissions.",
 
-          "Keep replies professional, concise, natural, and personalized to the specific email.",
+          "Keep replies short, concise, natural, and personalized to the specific email. DO not sound overly proffesional.",
 
           "Answer the customer's actual question directly whenever possible.",
 

@@ -5,7 +5,7 @@ import {
 } from "@/lib/supabase/server";
 import OpenAI from "openai";
 import mammoth from "mammoth";
-import pdfParse from "pdf-parse";
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -84,6 +84,11 @@ async function extractText(file: File): Promise<string> {
         `[knowledge] Starting PDF extraction: ${file.name}, ${file.size} bytes`
       );
 
+      // pdf-parse 1.1.1 is CommonJS.
+      // Load it only when a PDF is actually being processed.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const pdfParse = require("pdf-parse");
+
       const result = await pdfParse(buffer);
 
       console.log(
@@ -104,8 +109,9 @@ async function extractText(file: File): Promise<string> {
     }
   }
 
+  // UNSUPPORTED
   throw new Error(
-    "Unsupported file type. Please upload a PDF, DOCX, or TXT file."
+    `Unsupported file type: "${file.name}". Supported types are .txt, .docx, and .pdf.`
   );
 }
 

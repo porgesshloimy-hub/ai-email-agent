@@ -15,14 +15,14 @@
   "/dashboard/page": "app/dashboard/page.js",
   "/dashboard/settings/knowledge/page": "app/dashboard/settings/knowledge/page.js",
   "/dashboard/settings/page": "app/dashboard/settings/page.js",
-  "/favicon.ico/route": "app/favicon.ico/route.js",
   "/page": "app/page.js",
-  "/api/auth/gmail/route": "app/api/auth/gmail/route.js",
   "/api/auth/gmail/callback/route": "app/api/auth/gmail/callback/route.js",
-  "/api/agent/settings/route": "app/api/agent/settings/route.js",
-  "/api/knowledge/[id]/route": "app/api/knowledge/[id]/route.js",
+  "/favicon.ico/route": "app/favicon.ico/route.js",
+  "/api/auth/gmail/route": "app/api/auth/gmail/route.js",
   "/api/knowledge/route": "app/api/knowledge/route.js",
+  "/api/knowledge/[id]/route": "app/api/knowledge/[id]/route.js",
   "/api/inngest/route": "app/api/inngest/route.js",
-  "/api/knowledge/upload/route": "app/api/knowledge/upload/route.js",
-  "/privacy/page": "app/privacy/page.js"
+  "/api/agent/settings/route": "app/api/agent/settings/route.js",
+  "/privacy/page": "app/privacy/page.js",
+  "/api/knowledge/upload/route": "app/api/knowledge/upload/route.js"
 }

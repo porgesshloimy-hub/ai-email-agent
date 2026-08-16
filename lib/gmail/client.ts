@@ -891,6 +891,59 @@ export async function sendDraft(
 }
 
 /**
+ * Delete an existing Gmail draft.
+ */
+export async function deleteDraft(
+  tenantId: string,
+  draftId: string
+) {
+  const gmail = await getGmailClient(tenantId);
+ 
+  console.log("GMAIL DELETE DRAFT:", {
+    tenantId,
+    draftId,
+  });
+ 
+  try {
+    await gmail.users.drafts.delete({
+      userId: "me",
+      id: draftId,
+    });
+ 
+    console.log("GMAIL DRAFT DELETED:", {
+      tenantId,
+      draftId,
+    });
+  } catch (error: any) {
+    /**
+     * If the draft is already gone (e.g. the owner already sent or
+     * deleted it manually in Gmail, and our reconciliation job hasn't
+     * caught up yet), a 404 here isn't a real failure — the end state
+     * we wanted (no draft sitting in Gmail) is already true.
+     */
+    if (error?.code === 404) {
+      console.warn("GMAIL DELETE DRAFT: ALREADY GONE", {
+        tenantId,
+        draftId,
+      });
+ 
+      return;
+    }
+ 
+    console.error("GMAIL DELETE DRAFT FAILED:", {
+      tenantId,
+      draftId,
+      errorCode: error?.code,
+      errorMessage: error?.message,
+      status: error?.response?.status,
+      responseData: error?.response?.data,
+    });
+ 
+    throw error;
+  }
+}
+
+/**
  * Archive a Gmail thread.
  */
 export async function archiveThread(
@@ -949,6 +1002,96 @@ export async function archiveThread(
   }
 }
 
+//Monitor draft for deleted and sent emails
+export async function getDraftResolution(
+  tenantId: string,
+  draftId: string,
+  messageId: string | null
+): Promise<"still_draft" | "sent" | "deleted" | "unknown"> {
+  const gmail = await getGmailClient(tenantId);
+ 
+  try {
+    await gmail.users.drafts.get({
+      userId: "me",
+      id: draftId,
+    });
+ 
+    // Draft still exists — nothing to reconcile.
+    return "still_draft";
+  } catch (error: any) {
+    if (error?.code !== 404) {
+      console.error("GMAIL DRAFT STATUS CHECK FAILED:", {
+        tenantId,
+        draftId,
+        errorCode: error?.code,
+        errorMessage: error?.message,
+        status: error?.response?.status,
+      });
+ 
+      return "unknown";
+    }
+ 
+    console.log("GMAIL DRAFT NO LONGER EXISTS:", {
+      tenantId,
+      draftId,
+      messageId,
+    });
+  }
+ 
+  // Draft is gone. If we don't have the underlying message ID (older
+  // rows created before this column existed), we can't tell sent from
+  // deleted — treat as unknown so the row isn't guessed at incorrectly.
+  if (!messageId) {
+    console.warn("GMAIL DRAFT GONE BUT NO MESSAGE ID STORED:", {
+      tenantId,
+      draftId,
+    });
+ 
+    return "unknown";
+  }
+ 
+  try {
+    const message = await gmail.users.messages.get({
+      userId: "me",
+      id: messageId,
+      format: "minimal",
+    });
+ 
+    const labelIds = message.data.labelIds ?? [];
+    const wasSent = labelIds.includes("SENT");
+ 
+    console.log("GMAIL DRAFT RESOLUTION MESSAGE CHECK:", {
+      tenantId,
+      draftId,
+      messageId,
+      labelIds,
+      wasSent,
+    });
+ 
+    return wasSent ? "sent" : "unknown";
+  } catch (error: any) {
+    if (error?.code === 404) {
+      console.log("GMAIL DRAFT RESOLUTION: MESSAGE ALSO GONE — DELETED:", {
+        tenantId,
+        draftId,
+        messageId,
+      });
+ 
+      return "deleted";
+    }
+ 
+    console.error("GMAIL DRAFT RESOLUTION MESSAGE CHECK FAILED:", {
+      tenantId,
+      draftId,
+      messageId,
+      errorCode: error?.code,
+      errorMessage: error?.message,
+      status: error?.response?.status,
+    });
+ 
+    return "unknown";
+  }
+}
 /**
  * Get a Gmail header value case-insensitively.
  */

@@ -3,6 +3,7 @@ import { createServiceSupabase } from "@/lib/supabase/server";
 import {
   getHistoryChanges,
   watchGmail,
+  getDraftResolution,
 } from "@/lib/gmail/client";
 import { processIncomingEmail } from "@/lib/agent/run";
 import { reconcileUnreportedUsage } from "@/lib/billing/meter";
@@ -536,3 +537,141 @@ export const reconcileUsageReporting =
       };
     }
   );
+
+
+/**
+ * Catches drafts that the business owner sent or deleted directly in
+ * Gmail instead of using the in-app approve/reject buttons.
+ *
+ * approveAndSend/rejectDraft (the in-app path) already update
+ * email_actions.status correctly when the owner uses the dashboard.
+ * This job exists only for the out-of-band case: the owner opened
+ * Gmail itself and acted on the draft there, which the app has no
+ * other way of learning about.
+ *
+ * Runs every 10 minutes. Mirrors the exact status/resolved_at shape
+ * that approveAndSend/rejectDraft already write, so the approvals
+ * dashboard query needs no changes.
+ */
+export const reconcilePendingDrafts = inngest.createFunction(
+  {
+    id: "reconcile-pending-drafts",
+  },
+
+  {
+    cron: "*/10 * * * *",
+  },
+
+  async ({ step }) => {
+    const supabase = createServiceSupabase();
+
+    const pendingActions = await step.run(
+      "find-pending-drafts",
+      async () => {
+        const { data, error } = await supabase
+          .from("email_actions")
+          .select("id, tenant_id, gmail_draft_id, gmail_draft_message_id")
+          .eq("status", "pending_approval")
+          .not("gmail_draft_id", "is", null);
+
+        if (error) {
+          throw new Error(
+            `Failed to find pending drafts: ${error.message}`
+          );
+        }
+
+        return data ?? [];
+      }
+    );
+
+    console.log("RECONCILE PENDING DRAFTS START:", {
+      pendingCount: pendingActions.length,
+    });
+
+    let sentCount = 0;
+    let deletedCount = 0;
+    let unknownCount = 0;
+
+    for (const action of pendingActions) {
+      const resolution = await step.run(
+        `check-draft-${action.id}`,
+        async () => {
+          return getDraftResolution(
+            action.tenant_id,
+            action.gmail_draft_id as string,
+            action.gmail_draft_message_id
+          );
+        }
+      );
+
+      if (resolution === "still_draft") {
+        continue;
+      }
+
+      if (resolution === "unknown") {
+        unknownCount++;
+
+        console.warn("RECONCILE DRAFT STATUS UNKNOWN:", {
+          emailActionId: action.id,
+          tenantId: action.tenant_id,
+          draftId: action.gmail_draft_id,
+        });
+
+        continue;
+      }
+
+      const newStatus = resolution === "sent" ? "sent" : "rejected";
+
+      await step.run(`update-action-${action.id}`, async () => {
+        const { error } = await supabase
+          .from("email_actions")
+          .update({
+            status: newStatus,
+            resolved_at: new Date().toISOString(),
+          })
+          .eq("id", action.id)
+          /**
+           * Guard against a race with the in-app approve/reject path:
+           * only apply this update if the row is still pending_approval
+           * at write time. If the owner clicked approve/reject in the
+           * dashboard between our read and our write, that action wins.
+           */
+          .eq("status", "pending_approval");
+
+        if (error) {
+          throw new Error(
+            `Failed to update reconciled email action ${action.id}: ${error.message}`
+          );
+        }
+      });
+
+      if (resolution === "sent") {
+        sentCount++;
+      } else {
+        deletedCount++;
+      }
+
+      console.log("RECONCILE DRAFT RESOLVED:", {
+        emailActionId: action.id,
+        tenantId: action.tenant_id,
+        draftId: action.gmail_draft_id,
+        resolution,
+        newStatus,
+      });
+    }
+
+    console.log("RECONCILE PENDING DRAFTS COMPLETE:", {
+      checked: pendingActions.length,
+      sentCount,
+      deletedCount,
+      unknownCount,
+    });
+
+    return {
+      checked: pendingActions.length,
+      sentCount,
+      deletedCount,
+      unknownCount,
+    };
+  }
+);

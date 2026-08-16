@@ -45,31 +45,37 @@ export async function approveAndSend(formData: FormData) {
 
 export async function rejectDraft(formData: FormData) {
   const actionId = formData.get("actionId") as string;
-
+ 
   const userSupabase = await createServerSupabase();
   const {
     data: { user },
   } = await userSupabase.auth.getUser();
   if (!user) throw new Error("Not authenticated");
-
+ 
   const supabase = createServiceSupabase();
   const { data: action } = await supabase
     .from("email_actions")
     .select("*, tenants!inner(owner_user_id)")
     .eq("id", actionId)
     .single();
-
+ 
   if (!action || (action as any).tenants.owner_user_id !== user.id) {
     throw new Error("Not authorized to reject this draft");
   }
-
+ 
+  if (action.gmail_draft_id) {
+    const { deleteDraft } = await import("@/lib/gmail/client");
+    await deleteDraft(action.tenant_id, action.gmail_draft_id);
+  }
+ 
   await supabase
     .from("email_actions")
     .update({ status: "rejected", resolved_at: new Date().toISOString() })
     .eq("id", actionId);
-
+ 
   revalidatePath("/dashboard/approvals");
 }
+ 
 
 /**
  * The calendar equivalent of approveAndSend — this is the ONLY place that

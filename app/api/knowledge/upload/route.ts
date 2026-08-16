@@ -5,7 +5,7 @@ import {
 } from "@/lib/supabase/server";
 import OpenAI from "openai";
 import mammoth from "mammoth";
-
+import pdfParse from "pdf-parse/lib/pdf-parse.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -83,11 +83,6 @@ async function extractText(file: File): Promise<string> {
       console.log(
         `[knowledge] Starting PDF extraction: ${file.name}, ${file.size} bytes`
       );
-
-      // pdf-parse 1.1.1 is CommonJS.
-      // Load it only when a PDF is actually being processed.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const pdfParse = require("pdf-parse");
 
       const result = await pdfParse(buffer);
 

@@ -307,9 +307,21 @@ export async function processIncomingEmail(
      * If a rule requires approval, do not expose send_reply.
      */
 
+    
     const effectiveSendAllowed =
       sendCapability === "send" &&
       !ruleCheck.requiresApproval;
+
+      console.log("AGENT PERMISSION DECISION:", {
+  tenantId: email.tenantId,
+  sendCapability,
+  calendarWriteCapability,
+  calendarReadAllowed,
+  topicTags,
+  rules,
+  ruleCheck,
+  effectiveSendAllowed,
+});
 
     const tools =
       buildToolDefinitions({

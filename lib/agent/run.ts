@@ -360,6 +360,7 @@ export async function processIncomingEmail(
       "Calendar invitations and Gmail replies are separate actions: creating a calendar event with an attendee sends the invitation through Google Calendar, while send_reply/create_draft creates a separate Gmail message. Use both when both are logically required.",
       "You may use multiple tools in sequence. After each tool result, reassess whether anything else is needed — do not stop merely because you completed one action. Only finish once the overall customer request has been handled.",
       "A plain-text assistant response (no tool call) is appropriate only when no business action is required, the email is irrelevant, or the task is genuinely already complete.",
+      "Every action tool call must include a `reasoning` argument: a brief (1-2 sentence) internal explanation of why this action was chosen, including why approval was or wasn't required if relevant. This field is for internal logs only — never reference it in the email body, and never assume the customer or business owner will see it.",
       "</action_rules>",
 
       "<safety_rules>",
@@ -382,6 +383,7 @@ export async function processIncomingEmail(
       "Never invent a company name, employee name, sender name, job title, phone number, website, address, or other identifying information. Never use placeholders or square-bracket template variables.",
       "Do not add or invent a signature — only include one if it's explicitly provided in business knowledge or custom instructions; otherwise end the email naturally after the final sentence.",
       "Do not mention that you are an AI or email assistant. Do not comment on personal subjects, even if raised by the sender. Do not commit to or discuss commitments on behalf of the business owner.",
+      "Always write in full, natural language in your reply — never copy shorthand, abbreviations, or terse label-style phrasing from source documents, and do not adopt such styles either.",
       "Do not put 'Subject:' inside the body argument of create_draft or send_reply — the subject is handled separately; the body argument must contain only the actual email body.",
       "</email_writing_rules>",
 
@@ -614,6 +616,17 @@ export async function processIncomingEmail(
               step: step + 1,
               toolName,
               args,
+            }
+          );
+
+          console.log(
+            "AGENT ACTION REASONING:",
+            {
+              tenantId: email.tenantId,
+              emailActionId,
+              step: step + 1,
+              toolName,
+              reasoning: args.reasoning ?? null,
             }
           );
 
@@ -1264,12 +1277,13 @@ function buildToolDefinitions(
                 type: "string",
 
                 description:
-                  "Brief explanation of why this response is appropriate.",
+                  "Brief internal explanation (1-2 sentences) of why this response is appropriate and why it required approval rather than being sent directly. Logged internally only — never shown to the customer or referenced in the email body.",
               },
             },
 
             required: [
               "body",
+              "reasoning",
             ],
           },
         },
@@ -1304,12 +1318,13 @@ function buildToolDefinitions(
               type: "string",
 
               description:
-                "Brief explanation of why this reply is authorized and appropriate.",
+                "Brief internal explanation (1-2 sentences) of why this reply is authorized and appropriate. Logged internally only — never shown to the customer or referenced in the email body.",
             },
           },
 
           required: [
             "body",
+            "reasoning",
           ],
         },
       },
@@ -1364,7 +1379,7 @@ function buildToolDefinitions(
           type: "string",
 
           description:
-            "Brief explanation of why the event should be created.",
+            "Brief internal explanation (1-2 sentences) of why the event should be created. Logged internally only.",
         },
       },
 
@@ -1372,6 +1387,7 @@ function buildToolDefinitions(
         "summary",
         "startTime",
         "endTime",
+        "reasoning",
       ],
     };
 

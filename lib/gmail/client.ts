@@ -1,5 +1,8 @@
 import { google } from "googleapis";
-import { getGoogleAuthedClient } from "@/lib/google/authClient";
+import {
+  getGoogleAuthedClient,
+  markGoogleReauthRequired,
+} from "@/lib/google/authClient";
 
 async function getGmailClient(tenantId: string) {
   const auth = await getGoogleAuthedClient(tenantId);
@@ -65,17 +68,36 @@ export async function readThread(
 
     return thread.data;
   } catch (error: any) {
-    console.error("GMAIL READ THREAD FAILED:", {
-      tenantId,
-      threadId,
-      errorCode: error?.code,
-      errorMessage: error?.message,
-      status: error?.response?.status,
-      responseData: error?.response?.data,
-    });
+  console.error("GMAIL PROFILE CHECK FAILED:", {
+    tenantId,
+    errorCode: error?.code,
+    errorMessage: error?.message,
+    status: error?.response?.status,
+    responseData: error?.response?.data,
+  });
 
-    throw error;
+  const isInvalidGrant =
+    error?.message === "invalid_grant" ||
+    error?.response?.data?.error === "invalid_grant" ||
+    error?.response?.data?.error_description
+      ?.toLowerCase()
+      ?.includes("expired or revoked");
+
+  if (isInvalidGrant) {
+    await markGoogleReauthRequired(tenantId);
+
+    console.warn(
+      "GOOGLE OAUTH GRANT INVALID — REAUTH REQUIRED:",
+      {
+        tenantId,
+      }
+    );
+
+    throw new Error("GOOGLE_REAUTH_REQUIRED");
   }
+
+  throw error;
+}
 }
 
 /**

@@ -6,11 +6,25 @@ export async function GET(request: Request) {
   const requestUrl = new URL(request.url);
 
   const code = requestUrl.searchParams.get("code");
+  const state = requestUrl.searchParams.get("state");
+
+  const storedState = request.headers
+    .get("cookie")
+    ?.match(/(?:^|;\s*)zoom_oauth_state=([^;]*)/)?.[1];
 
   if (!code) {
     return NextResponse.redirect(
       new URL(
         "/dashboard/settings?error=missing_zoom_code",
+        requestUrl.origin
+      )
+    );
+  }
+
+  if (!state || !storedState || state !== storedState) {
+    return NextResponse.redirect(
+      new URL(
+        "/dashboard/settings?error=invalid_zoom_state",
         requestUrl.origin
       )
     );
@@ -30,8 +44,8 @@ export async function GET(request: Request) {
           Buffer.from(
             `${process.env.ZOOM_CLIENT_ID}:${process.env.ZOOM_CLIENT_SECRET}`
           ).toString("base64"),
-          "Content-Type":
-            "application/x-www-form-urlencoded",
+        "Content-Type":
+          "application/x-www-form-urlencoded",
       },
       body: new URLSearchParams({
         code,
@@ -44,7 +58,10 @@ export async function GET(request: Request) {
   const tokenData = await tokenResponse.json();
 
   if (!tokenResponse.ok) {
-    console.error("Zoom token exchange failed:", tokenData);
+    console.error(
+      "Zoom token exchange failed:",
+      tokenData
+    );
 
     return NextResponse.redirect(
       new URL(
@@ -87,7 +104,10 @@ export async function GET(request: Request) {
   const userInfo = await userInfoResponse.json();
 
   if (!userInfoResponse.ok || !userInfo.id) {
-    console.error("Zoom user info failed:", userInfo);
+    console.error(
+      "Zoom user info failed:",
+      userInfo
+    );
 
     return NextResponse.redirect(
       new URL(
@@ -115,14 +135,18 @@ export async function GET(request: Request) {
   }
 
   // Find the tenant belonging to this logged-in user.
-  const { data: tenant, error: tenantError } = await supabase
-    .from("tenants")
-    .select("id")
-    .eq("owner_user_id", user.id)
-    .single();
+  const { data: tenant, error: tenantError } =
+    await supabase
+      .from("tenants")
+      .select("id")
+      .eq("owner_user_id", user.id)
+      .single();
 
   if (tenantError || !tenant) {
-    console.error("Tenant lookup failed:", tenantError);
+    console.error(
+      "Tenant lookup failed:",
+      tenantError
+    );
 
     return NextResponse.redirect(
       new URL(
@@ -146,18 +170,22 @@ export async function GET(request: Request) {
     tenant_id: tenant.id,
     zoom_user_id: userInfo.id,
     zoom_email: userInfo.email ?? null,
-    access_token_encrypted: encryptedAccessToken,
-    refresh_token_encrypted: encryptedRefreshToken,
+    access_token_encrypted:
+      encryptedAccessToken,
+    refresh_token_encrypted:
+      encryptedRefreshToken,
     token_expiry: tokenExpiry,
-    connected_at: new Date().toISOString(),
+    connected_at:
+      new Date().toISOString(),
   };
 
   // Check whether this tenant already has a Zoom connection.
-  const { data: existingConnection } = await supabase
-    .from("zoom_connections")
-    .select("id")
-    .eq("tenant_id", tenant.id)
-    .maybeSingle();
+  const { data: existingConnection } =
+    await supabase
+      .from("zoom_connections")
+      .select("id")
+      .eq("tenant_id", tenant.id)
+      .maybeSingle();
 
   let saveError;
 
@@ -190,10 +218,21 @@ export async function GET(request: Request) {
     );
   }
 
-  return NextResponse.redirect(
+  const response = NextResponse.redirect(
     new URL(
       "/dashboard/settings?zoom_connected=true",
       requestUrl.origin
     )
   );
+
+  // Delete the OAuth state cookie after successful use.
+  response.cookies.set("zoom_oauth_state", "", {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    maxAge: 0,
+    path: "/",
+  });
+
+  return response;
 }

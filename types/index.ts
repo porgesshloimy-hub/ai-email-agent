@@ -1,10 +1,27 @@
-export type PermissionLevel = "denied" | "approval_required" | "allowed";
+export type PermissionLevel =
+  "denied" |
+  "approval_required" |
+  "allowed";
 
-export type GmailAction = "gmail.read" | "gmail.draft" | "gmail.send" | "gmail.archive" | "gmail.delete";
+export type GmailAction =
+  | "gmail.read"
+  | "gmail.draft"
+  | "gmail.send"
+  | "gmail.archive"
+  | "gmail.delete";
 
-export type CalendarAction = "calendar.read" | "calendar.write"  | "calendar.meet";
+export type CalendarAction =
+  | "calendar.read"
+  | "calendar.write"
+  | "calendar.meet";
 
-export type AgentAction = GmailAction | CalendarAction;
+export type ZoomAction =
+  | "calendar.zoom";
+
+export type AgentAction =
+  | GmailAction
+  | CalendarAction
+  | ZoomAction;
 
 export interface AgentPermission {
   action: AgentAction;

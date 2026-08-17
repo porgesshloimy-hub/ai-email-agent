@@ -5,6 +5,7 @@ import { createServiceSupabase } from "@/lib/supabase/server";
 import {
   resolveSendCapability,
   resolveCalendarWriteCapability,
+  resolveZoomCapability,
   canReadCalendar,
   checkRulesForTopic,
 } from "@/lib/agent/permissions";
@@ -13,6 +14,10 @@ import {
   createDraft,
   sendDraft,
 } from "@/lib/gmail/client";
+
+import {
+  createZoomMeeting,
+} from "@/lib/zoom/client";
 
 import { notifyApproval } from "@/lib/notify";
 
@@ -48,7 +53,13 @@ interface IncomingEmail {
 interface ToolFlags {
   sendAllowed: boolean;
   calendarReadAllowed: boolean;
+
   calendarWriteCapability:
+    | "write"
+    | "propose_only"
+    | "none";
+
+  zoomCapability:
     | "write"
     | "propose_only"
     | "none";
@@ -219,20 +230,26 @@ export async function processIncomingEmail(
      * --------------------------------------------------------
      */
 
-    const sendCapability =
-      await resolveSendCapability(
-        email.tenantId
-      );
+   const sendCapability =
+  await resolveSendCapability(
+    email.tenantId
+  );
 
-    const calendarWriteCapability =
-      await resolveCalendarWriteCapability(
-        email.tenantId
-      );
+const calendarWriteCapability =
+  await resolveCalendarWriteCapability(
+    email.tenantId
+  );
 
-    const calendarReadAllowed =
-      await canReadCalendar(
-        email.tenantId
-      );
+
+  const zoomCapability =
+  await resolveZoomCapability(
+    email.tenantId
+  );
+
+const calendarReadAllowed =
+  await canReadCalendar(
+    email.tenantId
+  );
 
     /**
      * --------------------------------------------------------
@@ -312,10 +329,11 @@ export async function processIncomingEmail(
       sendCapability === "send" &&
       !ruleCheck.requiresApproval;
 
-      console.log("AGENT PERMISSION DECISION:", {
+     console.log("AGENT PERMISSION DECISION:", {
   tenantId: email.tenantId,
   sendCapability,
   calendarWriteCapability,
+  zoomCapability,
   calendarReadAllowed,
   topicTags,
   rules,
@@ -323,15 +341,17 @@ export async function processIncomingEmail(
   effectiveSendAllowed,
 });
 
-    const tools =
-      buildToolDefinitions({
-        sendAllowed:
-          effectiveSendAllowed,
+   const tools =
+  buildToolDefinitions({
+    sendAllowed:
+      effectiveSendAllowed,
 
-        calendarReadAllowed,
+    calendarReadAllowed,
 
-        calendarWriteCapability,
-      });
+    calendarWriteCapability,
+
+    zoomCapability,
+  });
 
     /**
      * --------------------------------------------------------
@@ -369,6 +389,14 @@ export async function processIncomingEmail(
       "Every action you take must be grounded in something you were actually given: a business rule, a business knowledge entry, or an explicit tool permission (e.g. calendar write access). Never act on your own inference about what seems reasonable, expected, or routine. Before acting, identify — even briefly, to yourself — the specific rule, knowledge entry, or permission that authorizes what you're about to do. If you cannot identify one, the request is outside your authority, regardless of its subject matter, tone, or how ordinary or answerable it appears. This is a general test, not a checklist of scenario types — it applies equally to a sale, a purchase, a meeting, an invitation, an agreement, a favor, or anything else. For example, deciding what album cover the account holder personally wants, confirming their personal attendance at a meeting, or continuing a pricing exchange where someone is offering to sell something to the business are all cases with nothing to ground them — but the underlying test is the same in every case: can you point to what specifically authorizes this, or are you improvising a plausible-sounding response because the shape of the email resembles something you know how to handle?",
       "This grounding test is about traceability, not exact pre-scripting: a genuine customer question that your business knowledge or business rules address is grounded no matter how it's phrased — you do not need an exact prior example, and normal paraphrasing, unusual wording, or a question you haven't seen worded that way before does not make it ungrounded. The test only excludes cases where the content of your reply would have to come from nowhere — a fact, price, policy, personal preference, or commitment that nothing in business knowledge, business rules, or your tool permissions actually supports.",
       "</agent_role>",
+
+      "<integrations>",
+      "Zoom availability is determined by the tools provided to you, not by guessing.",
+      "If the create_zoom_meeting tool is available, the business has a connected Zoom account and you are authorized to create Zoom meetings.",
+      "If the create_zoom_meeting tool is not available, you do not have authority or capability to create a Zoom meeting. Never invent a Zoom link or claim that the business has Zoom connected.",
+      "Creating a Zoom meeting and creating a calendar event are separate actions. A Zoom meeting creates the actual Zoom meeting and join URL. A calendar event places the meeting on the calendar. When both are needed, use both tools in the appropriate sequence.",
+      "When the create_zoom_meeting tool succeeds, its result contains the real Zoom join URL. Use that result rather than inventing or constructing a Zoom URL yourself.",
+      "</integrations>",
 
       "<action_rules>",
       "When an incoming email requires a reply, determine first whether the reply is a straightforward business response that is clearly grounded in the available business knowledge, business rules, email context, and configured permissions. If it is, and send_reply is available, prefer sending the reply rather than creating a draft. Do not create a draft merely because the email is from a customer, involves a question, or could theoretically benefit from human review.",
@@ -953,6 +981,323 @@ createGoogleMeet: true,
             }
 
             /**
+ * ----------------------------------------------------
+ * CREATE ZOOM MEETING
+ * ----------------------------------------------------
+ */
+
+if (toolName === "create_zoom_meeting") {
+  if (
+    zoomCapability !== "write"
+  ) {
+    throw new SecurityViolationError(
+      "Security violation: Zoom meeting creation attempted without permission"
+    );
+  }
+
+  if (
+    typeof args.topic !== "string" ||
+    !args.topic.trim()
+  ) {
+    throw new Error(
+      "create_zoom_meeting requires a non-empty topic"
+    );
+  }
+
+  if (
+    typeof args.startTime !== "string" ||
+    !args.startTime.trim()
+  ) {
+    throw new Error(
+      "create_zoom_meeting requires startTime"
+    );
+  }
+
+  if (
+    typeof args.durationMinutes !== "number" ||
+    args.durationMinutes <= 0
+  ) {
+    throw new Error(
+      "create_zoom_meeting requires a positive durationMinutes"
+    );
+  }
+
+  const zoomMeeting =
+    await createZoomMeeting(
+      email.tenantId,
+      {
+        topic:
+          args.topic,
+
+        startTime:
+          args.startTime,
+
+        durationMinutes:
+          args.durationMinutes,
+
+        timezone:
+          typeof args.timezone === "string" &&
+          args.timezone.trim()
+            ? args.timezone
+            : undefined,
+
+        agenda:
+          typeof args.agenda === "string" &&
+          args.agenda.trim()
+            ? args.agenda
+            : undefined,
+      }
+    );
+
+  const toolResult = {
+    success: true,
+
+    action:
+      "zoom_meeting_created",
+
+    meetingId:
+      String(zoomMeeting.id),
+
+    topic:
+      zoomMeeting.topic,
+
+    startTime:
+      zoomMeeting.start_time,
+
+    duration:
+      zoomMeeting.duration,
+
+    timezone:
+      zoomMeeting.timezone ??
+      args.timezone ??
+      null,
+
+    joinUrl:
+      zoomMeeting.join_url,
+
+    message:
+      "The Zoom meeting was successfully created. The meeting join URL is available in this result. This does not automatically send a Gmail message to the customer. If the customer needs the link, reassess the task and use send_reply or create_draft according to the available permissions.",
+  };
+
+  console.log(
+    "AGENT TOOL RESULT:",
+    {
+      toolName,
+      toolResult: {
+        ...toolResult,
+        joinUrl:
+          zoomMeeting.join_url,
+      },
+    }
+  );
+
+  messages.push({
+    role: "tool",
+
+    tool_call_id:
+      toolCall.id,
+
+    content:
+      JSON.stringify(
+        toolResult
+      ),
+  });
+
+  /**
+   * IMPORTANT:
+   *
+   * Zoom creation is NOT terminal.
+   *
+   * The model must get another opportunity to decide whether
+   * it should:
+   *
+   * - create a calendar event
+   * - send the customer the Zoom link
+   * - create a draft containing the link
+   * - perform another appropriate action
+   */
+
+  continue;
+}
+
+/**
+ * ----------------------------------------------------
+ * PROPOSE ZOOM MEETING
+ * ----------------------------------------------------
+ */
+
+if (toolName === "propose_zoom_meeting") {
+  if (
+    zoomCapability !== "propose_only"
+  ) {
+    throw new SecurityViolationError(
+      "Security violation: Zoom meeting proposal attempted incorrectly"
+    );
+  }
+
+  const {
+    data: zoomAction,
+    error,
+  } = await supabase
+    .from("calendar_actions")
+    .insert({
+      tenant_id:
+        email.tenantId,
+
+      action_type:
+        "create_zoom_meeting",
+
+      status:
+        "pending_approval",
+
+      proposed_summary:
+        args.topic,
+
+      proposed_start:
+        args.startTime,
+
+      proposed_end:
+        new Date(
+          new Date(
+            args.startTime
+          ).getTime() +
+            Number(
+              args.durationMinutes
+            ) *
+              60 *
+              1000
+        ).toISOString(),
+
+      reasoning:
+        args.reasoning ?? null,
+    })
+    .select("id")
+    .single();
+
+  if (
+    error ||
+    !zoomAction
+  ) {
+    throw new Error(
+      `Failed to create Zoom meeting proposal: ${
+        error?.message ??
+        "unknown error"
+      }`
+    );
+  }
+
+  const {
+    data: approval,
+    error:
+      approvalError,
+  } = await supabase
+    .from("approvals")
+    .insert({
+      tenant_id:
+        email.tenantId,
+
+      action_type:
+        "calendar.meet",
+
+      action_id:
+        zoomAction.id,
+
+      status:
+        "pending",
+
+      description:
+        `Create Zoom meeting "${args.topic}"`,
+
+      expires_at:
+        new Date(
+          Date.now() +
+            24 *
+              60 *
+              60 *
+              1000
+        ).toISOString(),
+    })
+    .select("id")
+    .single();
+
+  if (
+    approvalError ||
+    !approval
+  ) {
+    throw new Error(
+      `Failed to create Zoom approval: ${
+        approvalError?.message ??
+        "unknown error"
+      }`
+    );
+  }
+
+  await notifyApproval(
+    email.tenantId,
+    approval.id,
+    `Zoom meeting needs approval.\n\n${args.topic}\n${args.startTime}`
+  );
+
+  await supabase
+    .from("email_actions")
+    .update({
+      action_type:
+        "calendar_proposal",
+
+      status:
+        "pending_approval",
+    })
+    .eq(
+      "id",
+      emailActionId
+    );
+
+  approvalCreated =
+    true;
+
+  completedAction =
+    true;
+
+  terminalActionTaken =
+    true;
+
+  const toolResult = {
+    success: true,
+
+    action:
+      "zoom_meeting_pending_approval",
+
+    approvalId:
+      approval.id,
+
+    message:
+      "The Zoom meeting was submitted for owner approval. No Zoom meeting has been created yet.",
+  };
+
+  console.log(
+    "AGENT TOOL RESULT:",
+    {
+      toolName,
+      toolResult,
+    }
+  );
+
+  messages.push({
+    role: "tool",
+
+    tool_call_id:
+      toolCall.id,
+
+    content:
+      JSON.stringify(
+        toolResult
+      ),
+  });
+
+  continue;
+}
+
+            /**
              * ----------------------------------------------------
              * PROPOSE CALENDAR EVENT
              * ----------------------------------------------------
@@ -1440,6 +1785,84 @@ function buildToolDefinitions(
     });
   }
 
+   /**
+   * ----------------------------------------------------------
+   * ZOOM / MEET
+   * ----------------------------------------------------------
+   */
+
+  if (
+    flags.zoomCapability ===
+    "write"
+  ) {
+    tools.push({
+      type: "function",
+
+      function: {
+        name:
+          "create_zoom_meeting",
+
+        description:
+          "Create a Zoom meeting for the business to host. Use this when the customer is asking to schedule or arrange a Zoom call, consultation, meeting, or appointment with the business. Only use when calendar.meet permission is explicitly allowed. Do not use this to accept, confirm, or RSVP to a Zoom or other meeting invitation that was extended to the account holder personally by someone else. The meeting should be created only when the date, time, duration, and purpose are sufficiently grounded in the email, business knowledge, business rules, or explicit instructions. After creating the meeting, reassess whether a Google Calendar event and/or separate customer-facing Gmail reply is also appropriate.",
+
+        parameters: {
+          type: "object",
+
+          properties: {
+            topic: {
+              type: "string",
+
+              description:
+                "Short natural title for the Zoom meeting.",
+            },
+
+            startTime: {
+              type: "string",
+
+              description:
+                "Meeting start time as an ISO 8601 datetime with timezone information.",
+            },
+
+            durationMinutes: {
+              type: "number",
+
+              description:
+                "Meeting duration in minutes.",
+            },
+
+            timezone: {
+              type: "string",
+
+              description:
+                "IANA timezone for the meeting, such as Europe/London. Use the timezone explicitly stated or clearly implied by the email/business context when available.",
+            },
+
+            agenda: {
+              type: "string",
+
+              description:
+                "Optional short description or agenda for the meeting.",
+            },
+
+            reasoning: {
+              type: "string",
+
+              description:
+                "Brief internal explanation of why creating this Zoom meeting is authorized and appropriate. Logged internally only.",
+            },
+          },
+
+          required: [
+            "topic",
+            "startTime",
+            "durationMinutes",
+            "reasoning",
+          ],
+        },
+      },
+    });
+  }
+
   if (
     flags.calendarWriteCapability ===
     "propose_only"
@@ -1459,8 +1882,71 @@ function buildToolDefinitions(
     });
   }
 
+  if (
+  flags.zoomCapability ===
+  "propose_only"
+) {
+  tools.push({
+    type: "function",
+
+    function: {
+      name:
+        "propose_zoom_meeting",
+
+      description:
+        "Propose a Zoom meeting for owner approval. Use this when the business should host a Zoom meeting but the calendar.meet permission requires approval. Do not create the Zoom meeting directly. Do not use this to accept or RSVP to a meeting invitation sent personally to the account holder.",
+
+      parameters: {
+        type: "object",
+
+        properties: {
+          topic: {
+            type: "string",
+          },
+
+          startTime: {
+            type: "string",
+
+            description:
+              "ISO 8601 meeting start time.",
+          },
+
+          durationMinutes: {
+            type: "number",
+
+            description:
+              "Meeting duration in minutes.",
+          },
+
+          timezone: {
+            type: "string",
+          },
+
+          agenda: {
+            type: "string",
+          },
+
+          reasoning: {
+            type: "string",
+          },
+        },
+
+        required: [
+          "topic",
+          "startTime",
+          "durationMinutes",
+          "reasoning",
+        ],
+      },
+    },
+  });
+}
+
   return tools;
 }
+
+
+
 
 /**
  * ------------------------------------------------------------

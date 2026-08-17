@@ -33,6 +33,7 @@ export async function handleChatMessage(tenantId: string, messageText: string): 
 
   const calendarReadAllowed = await canReadCalendar(tenantId);
   const calendarWriteCapability = await resolveCalendarWriteCapability(tenantId);
+  
 
   // Pull a quick snapshot of recent activity so "what's pending" type
   // questions can be answered without extra tool round trips.

@@ -1,12 +1,22 @@
 import { createServiceSupabase } from "@/lib/supabase/server";
-import type { AgentAction, GmailAction, PermissionLevel } from "@/types";
+import type {
+  AgentAction,
+  GmailAction,
+  PermissionLevel,
+} from "@/types";
 
 /**
  * The permission engine is the enforcement point — never the model.
  * The OpenAI call is only ever given tool definitions for actions this
- * function has already cleared. The model cannot request a tool it wasn't
- * offered, and "send" is structurally unavailable whenever it requires
- * approval — the agent's only option in that case is "create draft."
+ * function has already cleared.
+ *
+ * The model cannot request a tool it wasn't offered.
+ *
+ * All permissions fail closed.
+ */
+
+/**
+ * Get the configured permission level for an action.
  */
 export async function getPermissionLevel(
   tenantId: string,
@@ -14,30 +24,46 @@ export async function getPermissionLevel(
 ): Promise<PermissionLevel> {
   const supabase = createServiceSupabase();
 
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("agent_permissions")
     .select("level")
     .eq("tenant_id", tenantId)
     .eq("action", action)
     .single();
 
-  // Fail closed: an unconfigured permission defaults to requiring approval,
-  // never to "allowed".
+  if (error && error.code !== "PGRST116") {
+    console.error("PERMISSION LOOKUP FAILED:", {
+      tenantId,
+      action,
+      error,
+    });
+  }
+
+  // Fail closed.
   return data?.level ?? "approval_required";
 }
 
 /**
- * Given the tenant's permissions, returns the set of Gmail actions the
- * agent may take autonomously right now. "approval_required" actions are
- * deliberately excluded — for those, only drafting is ever exposed to the
- * model (see resolveSendCapability below).
+ * Return all actions the tenant may perform autonomously.
  */
-export async function getAutonomousActions(tenantId: string): Promise<AgentAction[]> {
+export async function getAutonomousActions(
+  tenantId: string
+): Promise<AgentAction[]> {
   const supabase = createServiceSupabase();
-  const { data } = await supabase
+
+  const { data, error } = await supabase
     .from("agent_permissions")
     .select("action, level")
     .eq("tenant_id", tenantId);
+
+  if (error) {
+    console.error("AUTONOMOUS ACTION LOOKUP FAILED:", {
+      tenantId,
+      error,
+    });
+
+    return [];
+  }
 
   return (data ?? [])
     .filter((row) => row.level === "allowed")
@@ -45,63 +71,161 @@ export async function getAutonomousActions(tenantId: string): Promise<AgentActio
 }
 
 /**
- * "Send" is a special case per the product rule: if send requires approval,
- * the agent is only ever given a "draft" tool, never a "send" tool — so
- * there's no path where the model can send by mistake or by being talked
- * into it. This function decides which tool to expose.
+ * Resolve Gmail sending capability.
+ *
+ * If sending is allowed, the send_reply tool may be exposed.
+ *
+ * If sending requires approval, the model only gets create_draft.
  */
 export async function resolveSendCapability(
   tenantId: string
 ): Promise<"send" | "draft_only" | "none"> {
-  const sendLevel = await getPermissionLevel(tenantId, "gmail.send");
-  const draftLevel = await getPermissionLevel(tenantId, "gmail.draft");
+  const sendLevel = await getPermissionLevel(
+    tenantId,
+    "gmail.send"
+  );
 
-  if (sendLevel === "allowed") return "send";
-  if (draftLevel === "allowed" || draftLevel === "approval_required") return "draft_only";
+  const draftLevel = await getPermissionLevel(
+    tenantId,
+    "gmail.draft"
+  );
+
+  if (sendLevel === "allowed") {
+    return "send";
+  }
+
+  if (
+    draftLevel === "allowed" ||
+    draftLevel === "approval_required"
+  ) {
+    return "draft_only";
+  }
+
   return "none";
 }
 
 /**
- * Same pattern as resolveSendCapability, applied to calendar writes: if
- * calendar.write requires approval, the model never gets a "create_event"
- * tool that actually creates anything — it only gets a "propose_event" tool
- * that logs a suggestion for the owner to confirm in-app. There's no Gmail-
- * draft equivalent for calendar (you can't "draft" an event the same way),
- * so approval-required calendar actions become an approval-queue entry
- * instead, resolved by the owner clicking Confirm.
+ * Resolve calendar write capability.
+ *
+ * allowed            -> agent may create events directly
+ * approval_required  -> agent may propose an event for approval
+ * none               -> no calendar-writing tool is exposed
  */
 export async function resolveCalendarWriteCapability(
   tenantId: string
 ): Promise<"write" | "propose_only" | "none"> {
-  const writeLevel = await getPermissionLevel(tenantId, "calendar.write");
-  if (writeLevel === "allowed") return "write";
-  if (writeLevel === "approval_required") return "propose_only";
+  const writeLevel = await getPermissionLevel(
+    tenantId,
+    "calendar.write"
+  );
+
+  if (writeLevel === "allowed") {
+    return "write";
+  }
+
+  if (writeLevel === "approval_required") {
+    return "propose_only";
+  }
+
   return "none";
-}
-
-export async function resolveMeetCapability(
-  tenantId: string
-): Promise<"write" | "propose_only" | "none"> {
-  const meetLevel = await getPermissionLevel(tenantId, "calendar.meet");
-
-  if (meetLevel === "allowed") return "write";
-  if (meetLevel === "approval_required") return "propose_only";
-
-  return "none";
-}
-
-export async function canReadCalendar(tenantId: string): Promise<boolean> {
-  const level = await getPermissionLevel(tenantId, "calendar.read");
-  return level === "allowed" || level === "approval_required"; // reading is never gated behind approval, only writes are
 }
 
 /**
- * Rule check: scans the tenant's plain-language rules for anything that
- * should force approval regardless of the general permission matrix
- * (e.g. "Refund requests always require approval"). This is intentionally
- * simple keyword/topic matching done server-side before the model acts —
- * for v1, treat this as a second gate, not a substitute for the model's
- * own classification of the email.
+ * Resolve Zoom capability.
+ *
+ * IMPORTANT:
+ * A Zoom permission by itself is not enough.
+ *
+ * The tenant must ALSO have an actual connected Zoom account
+ * in zoom_connections.
+ *
+ * Therefore:
+ *
+ * no Zoom connection -> none
+ * Zoom connection + permission allowed -> write
+ * Zoom connection + approval required -> propose_only
+ *
+ * This prevents the model from ever being told it can create
+ * Zoom meetings when the business has no connected Zoom account.
+ */
+export async function resolveZoomCapability(
+  tenantId: string
+): Promise<"write" | "propose_only" | "none"> {
+  const supabase = createServiceSupabase();
+
+  const { data: connection, error } = await supabase
+    .from("zoom_connections")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("ZOOM CONNECTION CHECK FAILED:", {
+      tenantId,
+      error,
+    });
+
+    // Fail closed.
+    return "none";
+  }
+
+  if (!connection) {
+    console.log("ZOOM NOT CONNECTED:", {
+      tenantId,
+    });
+
+    return "none";
+  }
+
+  const permissionLevel =
+    await getPermissionLevel(
+      tenantId,
+      "calendar.zoom"
+    );
+
+  if (permissionLevel === "allowed") {
+    return "write";
+  }
+
+  if (permissionLevel === "approval_required") {
+    return "propose_only";
+  }
+
+  return "none";
+}
+
+/**
+ * Calendar read access.
+ *
+ * Reading calendar information is not itself an approval-gated
+ * action. Only calendar writes are.
+ */
+export async function canReadCalendar(
+  tenantId: string
+): Promise<boolean> {
+  const level = await getPermissionLevel(
+    tenantId,
+    "calendar.read"
+  );
+
+  return (
+    level === "allowed" ||
+    level === "approval_required"
+  );
+}
+
+/**
+ * Rule check.
+ *
+ * Scans the tenant's plain-language rules for anything that
+ * should force approval regardless of the general permission
+ * matrix.
+ *
+ * Example:
+ *
+ * "Refund requests always require approval."
+ *
+ * If the email receives the "refund" topic tag, the rule matches.
  */
 export interface RuleCheckResult {
   requiresApproval: boolean;
@@ -112,12 +236,29 @@ export function checkRulesForTopic(
   rules: { description: string }[],
   topicTags: string[]
 ): RuleCheckResult {
-  const lowerTags = topicTags.map((t) => t.toLowerCase());
+  const lowerTags =
+    topicTags.map((tag) =>
+      tag.toLowerCase()
+    );
+
   for (const rule of rules) {
-    const lowerRule = rule.description.toLowerCase();
-    if (lowerTags.some((tag) => lowerRule.includes(tag))) {
-      return { requiresApproval: true, matchedRule: rule.description };
+    const lowerRule =
+      rule.description.toLowerCase();
+
+    if (
+      lowerTags.some((tag) =>
+        lowerRule.includes(tag)
+      )
+    ) {
+      return {
+        requiresApproval: true,
+        matchedRule:
+          rule.description,
+      };
     }
   }
-  return { requiresApproval: false };
+
+  return {
+    requiresApproval: false,
+  };
 }

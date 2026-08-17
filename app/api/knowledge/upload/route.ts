@@ -33,22 +33,86 @@ function chunkText(text: string, maxChars = 2500): string[] {
     .map((p) => p.trim())
     .filter(Boolean);
 
+  /**
+   * Split a single paragraph that's larger than maxChars into smaller
+   * pieces, preferring line breaks, then sentence boundaries, then a
+   * hard character cut as a last resort.
+   *
+   * Without this, a paragraph with no internal blank lines — which is
+   * exactly what PDF-extracted tables, price grids, and other
+   * columnar content often produce (pdf-parse frequently collapses
+   * table layouts into single-newline text with no paragraph breaks)
+   * — becomes one giant chunk with no upper bound. A chunk that large
+   * covers so much unrelated content that its embedding gets diluted,
+   * causing it to fall below the similarity threshold for specific
+   * queries even though the relevant text is technically in there.
+   */
+  function splitOversizedParagraph(paragraph: string): string[] {
+    if (paragraph.length <= maxChars) {
+      return [paragraph];
+    }
+
+    const lines = paragraph.split("\n").filter(Boolean);
+
+    // If splitting on lines doesn't actually break anything up
+    // (e.g. it's genuinely one long line), fall back to sentences.
+    const units =
+      lines.length > 1
+        ? lines
+        : paragraph.split(/(?<=[.!?])\s+/).filter(Boolean);
+
+    const pieces: string[] = [];
+    let current = "";
+
+    for (const unit of units) {
+      const candidate = current ? `${current}\n${unit}` : unit;
+
+      if (candidate.length <= maxChars) {
+        current = candidate;
+        continue;
+      }
+
+      if (current) {
+        pieces.push(current);
+      }
+
+      if (unit.length > maxChars) {
+        // A single line/sentence is itself too long (rare, but
+        // possible with dense tabular data) — hard-cut it.
+        for (let i = 0; i < unit.length; i += maxChars) {
+          pieces.push(unit.slice(i, i + maxChars));
+        }
+        current = "";
+      } else {
+        current = unit;
+      }
+    }
+
+    if (current) {
+      pieces.push(current);
+    }
+
+    return pieces;
+  }
+
   const chunks: string[] = [];
   let current = "";
 
-  for (const paragraph of paragraphs) {
-    if (!current) {
-      current = paragraph;
-      continue;
-    }
+  for (const rawParagraph of paragraphs) {
+    for (const paragraph of splitOversizedParagraph(rawParagraph)) {
+      if (!current) {
+        current = paragraph;
+        continue;
+      }
 
-    const combined = `${current}\n\n${paragraph}`;
+      const combined = `${current}\n\n${paragraph}`;
 
-    if (combined.length <= maxChars) {
-      current = combined;
-    } else {
-      chunks.push(current);
-      current = paragraph;
+      if (combined.length <= maxChars) {
+        current = combined;
+      } else {
+        chunks.push(current);
+        current = paragraph;
+      }
     }
   }
 

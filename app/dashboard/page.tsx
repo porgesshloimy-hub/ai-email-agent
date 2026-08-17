@@ -22,8 +22,8 @@ export default async function DashboardPage() {
         <Link href="/dashboard/approvals">{pendingCount ?? 0} drafts waiting for your review</Link>
       </p>
       <nav style={{ display: "flex", gap: 16 }}>
-        <Link href="/dashboard/settings">Business & Gmail settings</Link>
-        <Link href="/dashboard/agent">Agent instructions & permissions</Link>
+        <Link href="/dashboard/settings">Connections</Link>
+        <Link href="/dashboard/agent">Agent Instructions & Permissions</Link>
         <Link href="/dashboard/approvals">Approvals</Link>
         <Link href="/dashboard/billing">Usage & billing</Link>
       </nav>

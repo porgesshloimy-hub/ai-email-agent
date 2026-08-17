@@ -16,10 +16,23 @@ export async function createServerSupabase() {
           return cookieStore.get(name)?.value;
         },
         set(name: string, value: string, options: CookieOptions) {
-          cookieStore.set({ name, value, ...options });
+          try {
+            cookieStore.set({ name, value, ...options });
+          } catch {
+            // Called during a Server Component render (e.g. an auth
+            // token refresh triggered mid-page-load), where Next.js
+            // forbids writing cookies. Safe to ignore here as long as
+            // middleware.ts is refreshing the session on every request
+            // — that's the only place cookies can actually be written
+            // outside a Server Action / Route Handler.
+          }
         },
         remove(name: string, options: CookieOptions) {
-          cookieStore.set({ name, value: "", ...options });
+          try {
+            cookieStore.set({ name, value: "", ...options });
+          } catch {
+            // Same as above.
+          }
         },
       },
     }

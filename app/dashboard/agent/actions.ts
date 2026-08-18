@@ -77,6 +77,7 @@ export async function savePermission(formData: FormData) {
     "calendar.read",
     "calendar.write",
     "calendar.meet",
+    "zoom.meet",
   ];
 
   const validLevels: PermissionLevel[] = [

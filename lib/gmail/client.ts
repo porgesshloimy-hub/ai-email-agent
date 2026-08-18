@@ -166,6 +166,14 @@ export async function readMessage(
  *
  * This function should return only genuine incoming customer-style
  * messages for the agent to process.
+ *
+ * ALSO returns draftEvents: real-time signals that a draft the app is
+ * tracking was sent or deleted directly in Gmail (outside the app's
+ * approve/reject buttons), detected from the same history diff via
+ * the broadened watch scope (INBOX + SENT + DRAFT). This lets the
+ * webhook path resolve those rows immediately instead of waiting on
+ * the reconcilePendingDrafts cron, which remains as a safety net for
+ * anything this path misses.
  */
 export async function getHistoryChanges(
   tenantId: string,
@@ -179,6 +187,11 @@ export async function getHistoryChanges(
     from: string;
     subject: string;
     bodyText: string;
+  }> = [];
+
+  const draftEvents: Array<{
+    messageId: string;
+    event: "sent" | "deleted";
   }> = [];
 
   let pageToken: string | undefined;
@@ -209,7 +222,7 @@ export async function getHistoryChanges(
       response = await gmail.users.history.list({
         userId: "me",
         startHistoryId,
-        historyTypes: ["messageAdded"],
+        historyTypes: ["messageAdded", "messageDeleted", "labelAdded"],
         pageToken,
       });
     } catch (error: any) {
@@ -558,6 +571,46 @@ export async function getHistoryChanges(
           bodyText,
         });
       }
+
+      /**
+       * A message was permanently deleted. If it's a Gmail draft's
+       * underlying message that email_actions is tracking, this
+       * means the owner deleted the draft directly in Gmail.
+       */
+      for (const messageDeleted of history.messagesDeleted ?? []) {
+        const messageId = messageDeleted.message?.id;
+
+        if (!messageId) continue;
+
+        console.log("GMAIL HISTORY MESSAGE DELETED:", {
+          tenantId,
+          messageId,
+        });
+
+        draftEvents.push({ messageId, event: "deleted" });
+      }
+
+      /**
+       * A message gained a label. If that label is SENT, and the
+       * message is a Gmail draft's underlying message that
+       * email_actions is tracking, this means the owner sent the
+       * draft directly in Gmail.
+       */
+      for (const labelAdded of history.labelsAdded ?? []) {
+        const messageId = labelAdded.message?.id;
+        const labelIds = labelAdded.labelIds ?? [];
+
+        if (!messageId) continue;
+
+        if (labelIds.includes("SENT")) {
+          console.log("GMAIL HISTORY MESSAGE SENT (LABEL ADDED):", {
+            tenantId,
+            messageId,
+          });
+
+          draftEvents.push({ messageId, event: "sent" });
+        }
+      }
     }
 
     pageToken =
@@ -583,6 +636,9 @@ export async function getHistoryChanges(
       messagesFound:
         messages.length,
 
+      draftEventsFound:
+        draftEvents.length,
+
       messageIds:
         messages.map(
           (message) => message.messageId
@@ -593,6 +649,7 @@ export async function getHistoryChanges(
   return {
     historyId: latestHistoryId,
     messages,
+    draftEvents,
   };
 }
 
@@ -635,7 +692,13 @@ export async function watchGmail(
         userId: "me",
         requestBody: {
           topicName,
-          labelIds: ["INBOX"],
+          // Broadened from ["INBOX"] so push notifications also fire
+          // when the owner sends or deletes a draft directly in
+          // Gmail (SENT/DRAFT label changes), not just new inbox
+          // mail. Existing tenants keep their old watch scope until
+          // it's next renewed (see renewGmailWatches) — this only
+          // applies to new/renewed watches going forward.
+          labelIds: ["INBOX", "SENT", "DRAFT"],
           labelFilterAction:
             "include",
         },

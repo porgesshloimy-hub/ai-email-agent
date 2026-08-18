@@ -24,7 +24,9 @@ import { reconcileUnreportedUsage } from "@/lib/billing/meter";
  * 2. Compare Gmail history against our stored history_id.
  * 3. Retrieve newly-added messages.
  * 4. Send each message through the AI agent.
- * 5. Save the newest historyId.
+ * 5. Resolve any draft-sent/draft-deleted events found in the same
+ *    history diff, in real time.
+ * 6. Save the newest historyId.
  *
  * IMPORTANT:
  *
@@ -250,6 +252,64 @@ export const handleGmailHistoryChanged =
 
       /**
        * --------------------------------------------------------
+       * RESOLVE DRAFT EVENTS IN REAL TIME
+       * --------------------------------------------------------
+       *
+       * Draft events detected in this same history diff (sent via
+       * SENT label added, or deleted) are resolved immediately,
+       * instead of waiting for reconcilePendingDrafts' 10-minute
+       * cron.
+       *
+       * The .eq("status", "pending_approval") guard makes this safe
+       * against a race with approveAndSend/rejectDraft: if the owner
+       * used the in-app buttons, the row is already "sent"/"rejected"
+       * by the time this runs, so the update below matches zero rows
+       * and is a harmless no-op. reconcilePendingDrafts remains as a
+       * safety net for any event this push notification path misses
+       * (e.g. a watch that hasn't yet been renewed to the broadened
+       * label scope).
+       */
+
+      const draftEvents =
+        historyResult.draftEvents ?? [];
+
+      for (const draftEvent of draftEvents) {
+        await step.run(
+          `resolve-draft-event-${draftEvent.messageId}`,
+          async () => {
+            const newStatus =
+              draftEvent.event === "sent" ? "sent" : "rejected";
+
+            const { data: updated, error } = await supabase
+              .from("email_actions")
+              .update({
+                status: newStatus,
+                resolved_at: new Date().toISOString(),
+              })
+              .eq("tenant_id", tenantId)
+              .eq("gmail_draft_message_id", draftEvent.messageId)
+              .eq("status", "pending_approval")
+              .select("id");
+
+            if (error) {
+              throw new Error(
+                `Failed to resolve draft event for message ${draftEvent.messageId}: ${error.message}`
+              );
+            }
+
+            console.log("REALTIME DRAFT EVENT RESOLVED:", {
+              tenantId,
+              messageId: draftEvent.messageId,
+              event: draftEvent.event,
+              newStatus,
+              rowsUpdated: updated?.length ?? 0,
+            });
+          }
+        );
+      }
+
+      /**
+       * --------------------------------------------------------
        * UPDATE HISTORY CURSOR
        * --------------------------------------------------------
        *
@@ -300,6 +360,9 @@ export const handleGmailHistoryChanged =
       return {
         processed:
           newMessages.length,
+
+        draftEventsResolved:
+          draftEvents.length,
 
         historyId:
           historyResult.historyId,
@@ -543,11 +606,15 @@ export const reconcileUsageReporting =
  * Catches drafts that the business owner sent or deleted directly in
  * Gmail instead of using the in-app approve/reject buttons.
  *
+ * This is now a SAFETY NET rather than the primary detection path —
+ * handleGmailHistoryChanged resolves most of these in real time via
+ * the broadened Gmail watch (INBOX + SENT + DRAFT). This job remains
+ * to catch anything that path misses (e.g. a tenant whose watch
+ * hasn't yet been renewed to the new label scope, a missed push
+ * notification, etc).
+ *
  * approveAndSend/rejectDraft (the in-app path) already update
  * email_actions.status correctly when the owner uses the dashboard.
- * This job exists only for the out-of-band case: the owner opened
- * Gmail itself and acted on the draft there, which the app has no
- * other way of learning about.
  *
  * Runs every 10 minutes. Mirrors the exact status/resolved_at shape
  * that approveAndSend/rejectDraft already write, so the approvals

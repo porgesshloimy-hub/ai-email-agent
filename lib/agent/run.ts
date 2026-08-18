@@ -25,9 +25,17 @@ import { recordUsage } from "@/lib/billing/meter";
 
 import { calculateModelCost } from "@/lib/billing/pricing";
 
-import { runChatCompletion } from "@/lib/agent/llm";
+import {
+  runChatCompletion,
+  isProviderConfigured,
+  getRequiredEnvVarName,
+} from "@/lib/agent/llm";
 import type { LlmMessage, LlmToolDefinition, LlmUsage } from "@/lib/agent/llm";
-import { resolveModelSelection } from "@/lib/agent/models";
+import {
+  resolveModelSelection,
+  DEFAULT_AI_PROVIDER,
+  DEFAULT_AI_MODEL,
+} from "@/lib/agent/models";
 import type { AIProvider } from "@/lib/agent/models";
 
 /**
@@ -288,11 +296,39 @@ const calendarReadAllowed =
      * dashboard, falling back to the catalog default if unset or no
      * longer valid (e.g. a model was retired from the catalog).
      */
-    const { provider: aiProvider, model: aiModel } =
+    let { provider: aiProvider, model: aiModel } =
       resolveModelSelection(
         agentConfig?.ai_provider,
         agentConfig?.ai_model
       );
+
+    /**
+     * Defensive fallback: the tenant's selection is a valid catalog
+     * entry, but this deployment's environment might not actually have
+     * that provider's API key set (e.g. ANTHROPIC_API_KEY was never
+     * added to production). app/dashboard/agent/actions.ts's
+     * saveModelSelection already blocks saving an unconfigured
+     * provider up front, but a key can be removed from the environment
+     * *after* a tenant saved that selection — this is the safety net
+     * for that case, so a missing key degrades to the default provider
+     * instead of failing every single incoming email outright.
+     */
+    if (!isProviderConfigured(aiProvider)) {
+      console.error(
+        "AI PROVIDER NOT CONFIGURED, FALLING BACK TO DEFAULT:",
+        {
+          tenantId: email.tenantId,
+          attemptedProvider: aiProvider,
+          attemptedModel: aiModel,
+          missingEnvVar: getRequiredEnvVarName(aiProvider),
+          fallbackProvider: DEFAULT_AI_PROVIDER,
+          fallbackModel: DEFAULT_AI_MODEL,
+        }
+      );
+
+      aiProvider = DEFAULT_AI_PROVIDER;
+      aiModel = DEFAULT_AI_MODEL;
+    }
 
     const rules =
       (agentConfig?.rules ?? []) as {

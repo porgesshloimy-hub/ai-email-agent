@@ -2,8 +2,20 @@ import { createServiceSupabase } from "@/lib/supabase/server";
 import { resolveCalendarWriteCapability, canReadCalendar } from "@/lib/agent/permissions";
 import { recordUsage } from "@/lib/billing/meter";
 import { calculateModelCost } from "@/lib/billing/pricing";
-import { runChatCompletion, type LlmMessage, type LlmToolDefinition, type LlmUsage } from "@/lib/agent/llm";
-import { resolveModelSelection, type AIProvider } from "@/lib/agent/models";
+import {
+  runChatCompletion,
+  isProviderConfigured,
+  getRequiredEnvVarName,
+  type LlmMessage,
+  type LlmToolDefinition,
+  type LlmUsage,
+} from "@/lib/agent/llm";
+import {
+  resolveModelSelection,
+  DEFAULT_AI_PROVIDER,
+  DEFAULT_AI_MODEL,
+  type AIProvider,
+} from "@/lib/agent/models";
 
 /**
  * Handles a single message from the business owner via Google Chat. This is
@@ -33,10 +45,31 @@ export async function handleChatMessage(tenantId: string, messageText: string): 
     .eq("tenant_id", tenantId)
     .single();
 
-  const { provider: aiProvider, model: aiModel } = resolveModelSelection(
+  let { provider: aiProvider, model: aiModel } = resolveModelSelection(
     agentConfig?.ai_provider,
     agentConfig?.ai_model
   );
+
+  /**
+   * See lib/agent/run.ts's identical check for why this exists: a
+   * saved selection can be a valid catalog entry while the provider's
+   * API key is missing from this deployment's environment (removed,
+   * or never added in the first place). Degrade to the default
+   * provider rather than failing every Google Chat message outright.
+   */
+  if (!isProviderConfigured(aiProvider)) {
+    console.error("AI PROVIDER NOT CONFIGURED, FALLING BACK TO DEFAULT:", {
+      tenantId,
+      attemptedProvider: aiProvider,
+      attemptedModel: aiModel,
+      missingEnvVar: getRequiredEnvVarName(aiProvider),
+      fallbackProvider: DEFAULT_AI_PROVIDER,
+      fallbackModel: DEFAULT_AI_MODEL,
+    });
+
+    aiProvider = DEFAULT_AI_PROVIDER;
+    aiModel = DEFAULT_AI_MODEL;
+  }
 
   const calendarReadAllowed = await canReadCalendar(tenantId);
   const calendarWriteCapability = await resolveCalendarWriteCapability(tenantId);

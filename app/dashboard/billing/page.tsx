@@ -4,6 +4,13 @@ import {
 } from "@/lib/supabase/server";
 
 import MonthSelector from "./MonthSelector";
+import { getModelDisplayLabel } from "@/lib/agent/models";
+
+interface CostBreakdownRow {
+  key: string;
+  label: string;
+  billedCostUsd: number;
+}
 
 interface BillingMonth {
   key: string;
@@ -238,7 +245,7 @@ export default async function BillingPage({
     supabase
       .from("usage_events")
       .select(
-        "service, billed_cost_usd, quantity, unit, occurred_at"
+        "service, description, billed_cost_usd, quantity, unit, occurred_at"
       )
       .eq("tenant_id", tenant.id)
       .gte(
@@ -278,6 +285,86 @@ export default async function BillingPage({
       (Number(event.billed_cost_usd) || 0),
     0
   );
+
+  /*
+   * --------------------------------------------------------
+   * COST BREAKDOWN
+   * --------------------------------------------------------
+   *
+   * Group usage_events by AI provider + model (openai/anthropic/mistral
+   * — see lib/agent/models.ts) or by service for everything else
+   * (twilio_sms, storage, other), so a tenant can see which model
+   * actually drove their charges this month rather than only a single
+   * combined total.
+   *
+   * The AI provider services don't have a separate "model" column on
+   * usage_events — the model id is the first word of the description
+   * lib/agent/run.ts / lib/agent/chat.ts write (e.g. "claude-sonnet-4-6
+   * completion, thread abc123"), since model ids never contain spaces.
+   */
+
+  const AI_SERVICES = new Set([
+    "openai",
+    "anthropic",
+    "mistral",
+  ]);
+
+  const SERVICE_LABELS: Record<string, string> = {
+    twilio_sms: "Text notifications (SMS)",
+    storage: "File storage",
+    other: "Other",
+  };
+
+  const breakdownTotals = new Map<
+    string,
+    CostBreakdownRow
+  >();
+
+  for (const event of events ?? []) {
+    const billedCostUsd =
+      Number(event.billed_cost_usd) || 0;
+
+    let key: string;
+    let label: string;
+
+    if (
+      event.service &&
+      AI_SERVICES.has(event.service)
+    ) {
+      const modelId =
+        (event.description ?? "")
+          .trim()
+          .split(/\s+/)[0] || event.service;
+
+      key = `${event.service}:${modelId}`;
+      label = getModelDisplayLabel(modelId);
+    } else {
+      key = event.service ?? "other";
+      label =
+        SERVICE_LABELS[event.service ?? "other"] ??
+        (event.service ?? "Other");
+    }
+
+    const existing = breakdownTotals.get(key);
+
+    if (existing) {
+      existing.billedCostUsd += billedCostUsd;
+    } else {
+      breakdownTotals.set(key, {
+        key,
+        label,
+        billedCostUsd,
+      });
+    }
+  }
+
+  const costBreakdown: CostBreakdownRow[] = Array.from(
+    breakdownTotals.values()
+  )
+    .filter((row) => row.billedCostUsd > 0)
+    .sort(
+      (a, b) => b.billedCostUsd - a.billedCostUsd
+    );
 
   /*
    * --------------------------------------------------------
@@ -530,6 +617,53 @@ export default async function BillingPage({
           )}
         </section>
 
+        {/* Cost breakdown */}
+
+        {costBreakdown.length > 0 && (
+          <section style={styles.card}>
+            <div style={styles.activityHeader}>
+              <div>
+                <div style={styles.cardEyebrow}>
+                  BREAKDOWN
+                </div>
+
+                <h2 style={styles.activityTitle}>
+                  Where this month's charges came from
+                </h2>
+              </div>
+            </div>
+
+            <div>
+              {costBreakdown.map((row, index) => (
+                <div
+                  key={row.key}
+                  style={{
+                    ...styles.activityRow,
+                    borderBottom:
+                      index === costBreakdown.length - 1
+                        ? "none"
+                        : "1px solid #f1f5f9",
+                  }}
+                >
+                  <div style={styles.activityLeft}>
+                    <div style={styles.activityIcon}>
+                      {renderActivityIcon("model")}
+                    </div>
+
+                    <span style={styles.activityLabel}>
+                      {row.label}
+                    </span>
+                  </div>
+
+                  <span style={styles.activityValue}>
+                    {formatCurrency(row.billedCostUsd)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
         {/* Activity */}
 
         <section style={styles.card}>
@@ -711,7 +845,35 @@ function renderActivityIcon(
     | "draft"
     | "send"
     | "sms"
+    | "model"
 ) {
+  if (icon === "model") {
+    return (
+      <svg
+        width="18"
+        height="18"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+      >
+        <rect
+          x="6"
+          y="6"
+          width="12"
+          height="12"
+          rx="2"
+        />
+
+        <path
+          strokeLinecap="round"
+          d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"
+        />
+      </svg>
+    );
+  }
+
+
   if (icon === "email") {
     return (
       <svg

@@ -6,7 +6,8 @@ import {
   createServiceSupabase,
 } from "@/lib/supabase/server";
 import type { AgentAction, PermissionLevel } from "@/types";
-import { isValidModelSelection } from "@/lib/agent/models";
+import { isValidModelSelection, type AIProvider } from "@/lib/agent/models";
+import { isProviderConfigured } from "@/lib/agent/llm";
 
 async function getAuthenticatedTenantId(): Promise<string> {
   const userSupabase = await createServerSupabase();
@@ -77,6 +78,22 @@ export async function saveModelSelection(formData: FormData) {
 
   if (!isValidModelSelection(provider, model)) {
     throw new Error("Invalid model selection");
+  }
+
+  /**
+   * Catalog membership alone isn't enough — this deployment's
+   * environment might not actually have that provider's API key set
+   * yet (see lib/agent/llm/index.ts's isProviderConfigured for the
+   * production incident this guards against: a tenant selected
+   * Claude Haiku 4.5 before ANTHROPIC_API_KEY existed in the
+   * environment, and every email they received failed outright).
+   * Reject the save here with a clear message instead of letting it
+   * fail silently the next time an email comes in.
+   */
+  if (!isProviderConfigured(provider as AIProvider)) {
+    throw new Error(
+      "This model isn't available yet — it hasn't been fully configured on this deployment. Please choose a different model, or contact support."
+    );
   }
 
   const supabase = createServiceSupabase();

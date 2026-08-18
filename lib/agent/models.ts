@@ -140,6 +140,22 @@ export const MODEL_OPTIONS_IN_DISPLAY_ORDER: Array<
 export const DEFAULT_AI_PROVIDER: AIProvider = "openai";
 export const DEFAULT_AI_MODEL = "gpt-5-nano";
 
+/**
+ * Look up a model's dashboard label + tier by its id, regardless of
+ * provider. Used by the billing page (app/dashboard/billing/page.tsx)
+ * to show a friendly name ("Claude Haiku 4.5") instead of a raw model
+ * id ("claude-haiku-4-5") next to a cost breakdown line.
+ */
+export function getModelDisplayLabel(
+  modelId: string
+): string {
+  const match = MODEL_OPTIONS_IN_DISPLAY_ORDER.find(
+    (option) => option.id === modelId
+  );
+
+  return match ? match.label : modelId;
+}
+
 export function isValidProvider(
   provider: string
 ): provider is AIProvider {

@@ -41,6 +41,57 @@ export function getLlmAdapter(
 }
 
 /**
+ * Which environment variable each provider's adapter actually reads its
+ * API key from (see lib/agent/llm/{openai,anthropic,mistral}.ts).
+ *
+ * Kept here rather than duplicated at every call site, so
+ * isProviderConfigured() is the one place that knows the mapping.
+ */
+const REQUIRED_ENV_VAR_BY_PROVIDER: Record<AIProvider, string> = {
+  openai: "OPENAI_API_KEY",
+  anthropic: "ANTHROPIC_API_KEY",
+  mistral: "MISTRAL_API_KEY",
+};
+
+/**
+ * Whether the given provider's API key is actually present in this
+ * deployment's environment.
+ *
+ * This exists because of a real incident: a tenant selected Claude
+ * Haiku 4.5 on the Agent dashboard before ANTHROPIC_API_KEY had been
+ * added to the production environment. lib/agent/models.ts's
+ * resolveModelSelection() only validates that a (provider, model) pair
+ * is a real catalog entry — it has no way to know whether that
+ * provider's key is actually configured in this environment, and
+ * intentionally doesn't import env/credential concerns (see that
+ * file's module comment). Every email that tenant received failed
+ * outright: the Anthropic SDK threw "Could not resolve authentication
+ * method" mid-run, which the outer catch in lib/agent/run.ts recorded
+ * as a failed email_actions row — no reply, no draft, no visible
+ * explanation to the tenant.
+ *
+ * Called from two places: app/dashboard/agent/actions.ts's
+ * saveModelSelection (reject the save up front with a clear error) and
+ * lib/agent/run.ts / lib/agent/chat.ts (defensive fallback in case a
+ * key is later removed from the environment after a tenant already
+ * saved that selection).
+ */
+export function isProviderConfigured(
+  provider: AIProvider
+): boolean {
+  const envVarName = REQUIRED_ENV_VAR_BY_PROVIDER[provider];
+  const value = process.env[envVarName];
+
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+export function getRequiredEnvVarName(
+  provider: AIProvider
+): string {
+  return REQUIRED_ENV_VAR_BY_PROVIDER[provider];
+}
+
+/**
  * Convenience wrapper: run a single completion against whichever
  * provider/model the caller resolved (see lib/agent/models.ts's
  * resolveModelSelection). This is the one function lib/agent/run.ts and

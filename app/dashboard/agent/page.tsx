@@ -5,8 +5,15 @@ import {
   addRule,
   deleteRule,
   saveInstructions,
+  saveModelSelection,
   savePermission,
 } from "./actions";
+import {
+  MODEL_OPTIONS_IN_DISPLAY_ORDER,
+  DEFAULT_AI_PROVIDER,
+  DEFAULT_AI_MODEL,
+  type AIProvider,
+} from "@/lib/agent/models";
 
 type PermissionLevel =
   | "denied"
@@ -350,6 +357,14 @@ export default function AgentPage() {
   const [permissions, setPermissions] =
     useState<Permission[]>([]);
 
+  const [aiProvider, setAiProvider] =
+    useState<AIProvider>(DEFAULT_AI_PROVIDER);
+
+  const [aiModel, setAiModel] =
+    useState<string>(DEFAULT_AI_MODEL);
+
+  const [savingModel, setSavingModel] = useState(false);
+
   const [loading, setLoading] = useState(true);
 
   const [newRule, setNewRule] = useState("");
@@ -404,6 +419,8 @@ export default function AgentPage() {
         setInstructions(data.customInstructions ?? "");
         setRules(data.rules ?? []);
         setPermissions(data.permissions ?? []);
+        setAiProvider(data.aiProvider ?? DEFAULT_AI_PROVIDER);
+        setAiModel(data.aiModel ?? DEFAULT_AI_MODEL);
       } catch (error) {
         console.error(error);
         setMessage(
@@ -536,6 +553,43 @@ export default function AgentPage() {
           ? error.message
           : "Failed to save instructions."
       );
+    }
+  }
+
+  async function handleModelChange(
+    event: React.ChangeEvent<HTMLSelectElement>
+  ) {
+    const [nextProvider, nextModel] = event.target.value.split(
+      "::"
+    ) as [AIProvider, string];
+
+    const previousProvider = aiProvider;
+    const previousModel = aiModel;
+
+    setAiProvider(nextProvider);
+    setAiModel(nextModel);
+    setSavingModel(true);
+
+    try {
+      const formData = new FormData();
+
+      formData.append("aiProvider", nextProvider);
+      formData.append("aiModel", nextModel);
+
+      await saveModelSelection(formData);
+
+      setMessage("Model updated.");
+    } catch (error) {
+      setAiProvider(previousProvider);
+      setAiModel(previousModel);
+
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Failed to update model."
+      );
+    } finally {
+      setSavingModel(false);
     }
   }
 
@@ -1015,6 +1069,107 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
               </button>
             </div>
           </form>
+        </section>
+
+        {/* AI model */}
+        <section
+          style={{
+            background: "#fff",
+            border: "1px solid #e4e4e7",
+            borderRadius: 16,
+            padding: 26,
+            marginBottom: 20,
+            boxShadow:
+              "0 1px 2px rgba(0,0,0,0.03)",
+          }}
+        >
+          <SectionHeader
+            eyebrow="Behavior"
+            title="AI model"
+            description="Choose which AI model powers your agent. Faster, cheaper models are a good fit for routine email; more advanced models handle complex or nuanced conversations better."
+          />
+
+          <select
+            value={`${aiProvider}::${aiModel}`}
+            onChange={handleModelChange}
+            disabled={savingModel}
+            style={{
+              width: "100%",
+              boxSizing: "border-box",
+              padding: "11px 13px",
+              border: "1px solid #d4d4d8",
+              borderRadius: 9,
+              fontFamily: "inherit",
+              fontSize: 14,
+              fontWeight: 500,
+              background: savingModel ? "#f4f4f5" : "#fff",
+              color: "#18181b",
+              cursor: savingModel ? "wait" : "pointer",
+            }}
+          >
+            {MODEL_OPTIONS_IN_DISPLAY_ORDER.map((option) => (
+              <option
+                key={`${option.provider}::${option.id}`}
+                value={`${option.provider}::${option.id}`}
+              >
+                {option.tier}
+                {option.recommended ? " ⭐ Recommended" : ""} —{" "}
+                {option.label}
+              </option>
+            ))}
+          </select>
+
+          {(() => {
+            const selected = MODEL_OPTIONS_IN_DISPLAY_ORDER.find(
+              (option) =>
+                option.provider === aiProvider &&
+                option.id === aiModel
+            );
+
+            if (!selected) {
+              return null;
+            }
+
+            return (
+              <div
+                style={{
+                  marginTop: 12,
+                  padding: 13,
+                  borderRadius: 10,
+                  background: "#fafafa",
+                  fontSize: 13,
+                  lineHeight: 1.55,
+                }}
+              >
+                <div
+                  style={{
+                    fontWeight: 700,
+                    color: "#18181b",
+                    marginBottom: 3,
+                  }}
+                >
+                  {selected.tier}
+                  {selected.recommended ? " ⭐ Recommended" : ""}
+                </div>
+
+                <div style={{ color: "#52525b" }}>
+                  {selected.tierDescription}
+                </div>
+              </div>
+            );
+          })()}
+
+          {savingModel && (
+            <div
+              style={{
+                marginTop: 10,
+                fontSize: 12,
+                color: "#71717a",
+              }}
+            >
+              Saving...
+            </div>
+          )}
         </section>
 
         {/* Email permissions */}

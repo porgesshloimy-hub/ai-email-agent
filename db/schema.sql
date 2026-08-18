@@ -42,6 +42,12 @@ create table agent_configs (
   tenant_id uuid not null references tenants(id) on delete cascade,
   custom_instructions text,              -- "Automatically answer basic pricing questions."
   rules jsonb not null default '[]',     -- [{ "description": "Refund requests always require approval" }]
+  -- Which AI provider/model powers this tenant's agent (lib/agent/run.ts,
+  -- lib/agent/chat.ts). Selectable on the Agent dashboard; validated
+  -- against the catalog in lib/agent/models.ts. See migration 005.
+  ai_provider text not null default 'openai'
+    check (ai_provider in ('openai', 'anthropic', 'mistral')),
+  ai_model text not null default 'gpt-5-nano',
   updated_at timestamptz not null default now(),
   unique (tenant_id)
 );

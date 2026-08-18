@@ -23,12 +23,15 @@ import { notifyApproval } from "@/lib/notify";
 
 import { recordUsage } from "@/lib/billing/meter";
 
-import { calculateOpenAICost } from "@/lib/billing/pricing";
+import { calculateModelCost } from "@/lib/billing/pricing";
 
-const OPENAI_MODEL = "gpt-5-nano";
+import { runChatCompletion } from "@/lib/agent/llm";
+import type { LlmMessage, LlmToolDefinition, LlmUsage } from "@/lib/agent/llm";
+import { resolveModelSelection } from "@/lib/agent/models";
+import type { AIProvider } from "@/lib/agent/models";
 
 /**
- * Maximum number of OpenAI round trips (tool call -> tool result ->
+ * Maximum number of model round trips (tool call -> tool result ->
  * reassess) allowed for a single incoming email. This is the only
  * definition of this constant in the file — a previous version of this
  * file accidentally had two (5 and 8), with the 8 silently winning
@@ -37,6 +40,16 @@ const OPENAI_MODEL = "gpt-5-nano";
  */
 const MAX_AGENT_STEPS = 15;
 
+/**
+ * The chat model itself is tenant-configurable (agent_configs.ai_provider
+ * / ai_model, selected on the Agent dashboard — see lib/agent/models.ts
+ * and lib/agent/llm/). OpenAI is still used directly here for the
+ * knowledge-base embeddings call (searchKnowledge, below) regardless of
+ * which chat provider/model the tenant selected — the stored embeddings
+ * are a fixed-size vector tied to one specific embedding model, and
+ * switching that independently of chat provider is a separate, bigger
+ * migration (re-embedding every existing knowledge_chunks row).
+ */
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -262,13 +275,24 @@ const calendarReadAllowed =
     } = await supabase
       .from("agent_configs")
       .select(
-        "custom_instructions, rules"
+        "custom_instructions, rules, ai_provider, ai_model"
       )
       .eq(
         "tenant_id",
         email.tenantId
       )
       .single();
+
+    /**
+     * Resolve which AI provider/model this tenant selected on the Agent
+     * dashboard, falling back to the catalog default if unset or no
+     * longer valid (e.g. a model was retired from the catalog).
+     */
+    const { provider: aiProvider, model: aiModel } =
+      resolveModelSelection(
+        agentConfig?.ai_provider,
+        agentConfig?.ai_model
+      );
 
     const rules =
       (agentConfig?.rules ?? []) as {
@@ -341,17 +365,19 @@ const calendarReadAllowed =
   effectiveSendAllowed,
 });
 
-   const tools =
-  buildToolDefinitions({
-    sendAllowed:
-      effectiveSendAllowed,
+   const tools: LlmToolDefinition[] =
+  toLlmToolDefinitions(
+    buildToolDefinitions({
+      sendAllowed:
+        effectiveSendAllowed,
 
-    calendarReadAllowed,
+      calendarReadAllowed,
 
-    calendarWriteCapability,
+      calendarWriteCapability,
 
-    zoomCapability,
-  });
+      zoomCapability,
+    })
+  );
 
     /**
      * --------------------------------------------------------
@@ -359,7 +385,7 @@ const calendarReadAllowed =
      * --------------------------------------------------------
      */
 
-   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+   const messages: LlmMessage[] = [
   {
     role: "system",
 
@@ -502,27 +528,25 @@ const calendarReadAllowed =
         maxSteps: MAX_AGENT_STEPS,
       });
 
-      let completion:
-        OpenAI.Chat.Completions.ChatCompletion;
+      let result: Awaited<ReturnType<typeof runChatCompletion>>;
 
       try {
-        completion =
-          await openai.chat.completions.create({
-            model: OPENAI_MODEL,
+        result = await runChatCompletion(aiProvider, {
+          model: aiModel,
 
-            messages,
+          messages,
 
-            tools,
-
-            tool_choice: "auto",
-          });
+          tools,
+        });
       } catch (error) {
         console.error(
-          "OPENAI AGENT STEP ERROR:",
+          "AGENT STEP ERROR:",
           {
             tenantId: email.tenantId,
             emailActionId,
             step: step + 1,
+            aiProvider,
+            aiModel,
             error,
           }
         );
@@ -530,46 +554,32 @@ const calendarReadAllowed =
         throw error;
       }
 
-      await meterOpenAIUsage(
+      await meterModelUsage(
         email.tenantId,
         email.threadId,
-        completion
+        aiProvider,
+        aiModel,
+        result.usage
       );
 
-      const assistantMessage =
-        completion.choices[0]?.message;
-
-      if (!assistantMessage) {
-        throw new Error(
-          "OpenAI returned no assistant message"
-        );
-      }
-
-      const toolCalls =
-        assistantMessage.tool_calls ?? [];
+      const toolCalls = result.toolCalls;
 
       console.log("AGENT STEP RESULT:", {
         tenantId: email.tenantId,
         emailActionId,
         step: step + 1,
 
-        finishReason:
-          completion.choices[0]?.finish_reason,
+        aiProvider,
+        aiModel,
 
         responseText:
-          assistantMessage.content,
+          result.content,
 
         toolCalls:
           toolCalls.map((call) => ({
             id: call.id,
-            name:
-              call.type === "function"
-                ? call.function.name
-                : call.type,
-            arguments:
-              call.type === "function"
-                ? call.function.arguments
-                : undefined,
+            name: call.name,
+            arguments: call.arguments,
           })),
       });
 
@@ -580,48 +590,38 @@ const calendarReadAllowed =
        *
        * Append the assistant message first.
        *
-       * OpenAI requires the assistant tool-call message to be
+       * Every provider requires the assistant tool-call message to be
        * included before the corresponding tool results.
        */
 
-      messages.push(assistantMessage);
+      messages.push({
+        role: "assistant",
+        content: result.content,
+        toolCalls:
+          toolCalls.length > 0 ? toolCalls : undefined,
+      });
 
       if (toolCalls.length > 0) {
         /**
          * Once a terminal action (send, draft, or approval proposal)
          * has been taken, any *other* tool calls that arrived in the
          * SAME batch are not executed — but they must still get a
-         * "tool" response, or the next OpenAI call will error out
-         * because a tool_call_id was left unanswered. This is the fix
+         * "tool" response, or the next model call will error out
+         * because a tool call was left unanswered. This is the fix
          * for the bug where the loop used to `break` immediately on a
          * terminal action and silently abandon sibling tool calls.
          */
         let terminalActionTaken = false;
 
         for (const toolCall of toolCalls) {
-          if (toolCall.type !== "function") {
-            console.warn(
-              "Unsupported tool call type:",
-              toolCall.type
-            );
-
-            messages.push({
-              role: "tool",
-              tool_call_id: toolCall.id,
-              content:
-                `Unsupported tool call type "${toolCall.type}". Ignored.`,
-            });
-
-            continue;
-          }
-
           const toolName =
-            toolCall.function.name;
+            toolCall.name;
 
           if (terminalActionTaken) {
             messages.push({
               role: "tool",
-              tool_call_id: toolCall.id,
+              toolCallId: toolCall.id,
+              name: toolName,
               content:
                 "Skipped: a terminal action (send, draft, or approval) already completed during this processing run. This action was not executed.",
             });
@@ -633,7 +633,7 @@ const calendarReadAllowed =
 
           try {
             args = JSON.parse(
-              toolCall.function.arguments || "{}"
+              toolCall.arguments || "{}"
             );
           } catch (error) {
             console.error(
@@ -641,14 +641,15 @@ const calendarReadAllowed =
               {
                 toolName,
                 arguments:
-                  toolCall.function.arguments,
+                  toolCall.arguments,
                 error,
               }
             );
 
             messages.push({
               role: "tool",
-              tool_call_id: toolCall.id,
+              toolCallId: toolCall.id,
+              name: toolName,
               content:
                 "Tool arguments were invalid JSON. Do not repeat the same malformed call. Reassess the task.",
             });
@@ -790,7 +791,8 @@ const calendarReadAllowed =
 
               messages.push({
                 role: "tool",
-                tool_call_id: toolCall.id,
+                toolCallId: toolCall.id,
+                name: toolName,
                 content: JSON.stringify(toolResult),
               });
 
@@ -874,7 +876,8 @@ const calendarReadAllowed =
 
               messages.push({
                 role: "tool",
-                tool_call_id: toolCall.id,
+                toolCallId: toolCall.id,
+                name: toolName,
                 content: JSON.stringify(toolResult),
               });
 
@@ -966,7 +969,8 @@ createGoogleMeet: true,
 
               messages.push({
                 role: "tool",
-                tool_call_id: toolCall.id,
+                toolCallId: toolCall.id,
+                name: toolName,
                 content: JSON.stringify(toolResult),
               });
 
@@ -1094,8 +1098,10 @@ if (toolName === "create_zoom_meeting") {
   messages.push({
     role: "tool",
 
-    tool_call_id:
+    toolCallId:
       toolCall.id,
+
+    name: toolName,
 
     content:
       JSON.stringify(
@@ -1285,8 +1291,10 @@ if (toolName === "propose_zoom_meeting") {
   messages.push({
     role: "tool",
 
-    tool_call_id:
+    toolCallId:
       toolCall.id,
+
+    name: toolName,
 
     content:
       JSON.stringify(
@@ -1395,7 +1403,8 @@ if (toolName === "propose_zoom_meeting") {
 
               messages.push({
                 role: "tool",
-                tool_call_id: toolCall.id,
+                toolCallId: toolCall.id,
+                name: toolName,
                 content: JSON.stringify(toolResult),
               });
 
@@ -1415,7 +1424,8 @@ if (toolName === "propose_zoom_meeting") {
 
             messages.push({
               role: "tool",
-              tool_call_id: toolCall.id,
+              toolCallId: toolCall.id,
+              name: toolName,
               content:
                 `Unknown tool "${toolName}". Do not call this tool again. Reassess the task using the available tools.`,
             });
@@ -1440,7 +1450,8 @@ if (toolName === "propose_zoom_meeting") {
 
             messages.push({
               role: "tool",
-              tool_call_id: toolCall.id,
+              toolCallId: toolCall.id,
+              name: toolName,
               content: JSON.stringify({
                 success: false,
                 error:
@@ -1487,8 +1498,8 @@ if (toolName === "propose_zoom_meeting") {
        */
 
       const responseText =
-        typeof assistantMessage.content === "string"
-          ? assistantMessage.content
+        typeof result.content === "string"
+          ? result.content
           : "";
 
       /**
@@ -1618,9 +1629,32 @@ if (toolName === "propose_zoom_meeting") {
 
 /**
  * ------------------------------------------------------------
- * OpenAI tool definitions
+ * OpenAI-shaped tool definitions
  * ------------------------------------------------------------
+ *
+ * buildToolDefinitions() below is unchanged from before multi-LLM
+ * support was added — it still builds tool definitions in OpenAI's
+ * nested { type: "function", function: { name, description,
+ * parameters } } shape. toLlmToolDefinitions() flattens that into the
+ * provider-agnostic LlmToolDefinition[] shape lib/agent/llm/'s adapters
+ * expect, so every one of these ~10 tool definitions didn't need to be
+ * rewritten by hand.
  */
+
+function toLlmToolDefinitions(
+  tools: OpenAI.Chat.Completions.ChatCompletionTool[]
+): LlmToolDefinition[] {
+  return tools
+    .filter((tool) => tool.type === "function")
+    .map((tool) => ({
+      name: tool.function.name,
+      description: tool.function.description ?? "",
+      parameters: (tool.function.parameters ?? {}) as Record<
+        string,
+        any
+      >,
+    }));
+}
 
 function buildToolDefinitions(
   flags: ToolFlags
@@ -2083,41 +2117,45 @@ async function searchKnowledge(
 
 /**
  * ------------------------------------------------------------
- * OpenAI usage metering
+ * AI model usage metering
  * ------------------------------------------------------------
+ *
+ * Provider-agnostic replacement for the old meterOpenAIUsage(): the
+ * chat model is now tenant-selectable (see lib/agent/models.ts), so
+ * both the pricing lookup and the recorded "service" bucket need to
+ * reflect whichever provider actually served this completion.
  */
 
-async function meterOpenAIUsage(
+async function meterModelUsage(
   tenantId: string,
   threadId: string,
-  completion:
-    OpenAI.Chat.Completions.ChatCompletion
+  aiProvider: AIProvider,
+  aiModel: string,
+  usage: LlmUsage | null
 ) {
-  const usage =
-    completion.usage;
-
   if (!usage) {
     return;
   }
 
   const rawCost =
-    calculateOpenAICost(
-      OPENAI_MODEL,
-      usage.prompt_tokens,
-      usage.completion_tokens
+    calculateModelCost(
+      aiProvider,
+      aiModel,
+      usage.promptTokens,
+      usage.completionTokens
     );
 
   await recordUsage({
     tenantId,
 
     service:
-      "openai",
+      aiProvider,
 
     description:
-      `${OPENAI_MODEL} completion, thread ${threadId}`,
+      `${aiModel} completion, thread ${threadId}`,
 
     quantity:
-      usage.total_tokens,
+      usage.totalTokens,
 
     unit:
       "tokens",

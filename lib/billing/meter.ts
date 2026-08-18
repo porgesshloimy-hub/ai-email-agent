@@ -1,8 +1,17 @@
 import { createServiceSupabase } from "@/lib/supabase/server";
 import { stripe } from "@/lib/billing/stripe";
 
+/**
+ * "openai" | "anthropic" | "mistral" cover the AI providers selectable
+ * on the Agent dashboard (see lib/agent/models.ts's AIProvider) — kept
+ * as separate string literals here, rather than importing AIProvider
+ * directly, so this billing module has no dependency on the model
+ * catalog's shape.
+ */
 type UsageService =
   | "openai"
+  | "anthropic"
+  | "mistral"
   | "twilio_sms"
   | "storage"
   | "other";

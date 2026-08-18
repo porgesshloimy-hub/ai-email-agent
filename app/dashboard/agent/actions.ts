@@ -6,6 +6,7 @@ import {
   createServiceSupabase,
 } from "@/lib/supabase/server";
 import type { AgentAction, PermissionLevel } from "@/types";
+import { isValidModelSelection } from "@/lib/agent/models";
 
 async function getAuthenticatedTenantId(): Promise<string> {
   const userSupabase = await createServerSupabase();
@@ -57,6 +58,46 @@ export async function saveInstructions(formData: FormData) {
   if (error) {
     console.error("Failed to save agent instructions:", error);
     throw new Error("Failed to save agent instructions");
+  }
+
+  revalidatePath("/dashboard/agent");
+}
+
+/**
+ * Save which AI provider/model powers this tenant's agent (both the
+ * email pipeline in lib/agent/run.ts and the Google Chat handler in
+ * lib/agent/chat.ts read this same selection — see
+ * lib/agent/models.ts).
+ */
+export async function saveModelSelection(formData: FormData) {
+  const tenantId = await getAuthenticatedTenantId();
+
+  const provider = String(formData.get("aiProvider") ?? "");
+  const model = String(formData.get("aiModel") ?? "");
+
+  if (!isValidModelSelection(provider, model)) {
+    throw new Error("Invalid model selection");
+  }
+
+  const supabase = createServiceSupabase();
+
+  const { error } = await supabase
+    .from("agent_configs")
+    .upsert(
+      {
+        tenant_id: tenantId,
+        ai_provider: provider,
+        ai_model: model,
+        updated_at: new Date().toISOString(),
+      },
+      {
+        onConflict: "tenant_id",
+      }
+    );
+
+  if (error) {
+    console.error("Failed to save model selection:", error);
+    throw new Error("Failed to save model selection");
   }
 
   revalidatePath("/dashboard/agent");

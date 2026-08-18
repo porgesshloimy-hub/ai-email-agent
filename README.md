@@ -108,10 +108,29 @@ Agent Pipeline
 
 ## AI
 
-- OpenAI API
-- `gpt-5-nano` currently used for agent processing
+- Multi-provider: OpenAI, Mistral, and Anthropic, selectable per tenant
+  on the Agent dashboard (`app/dashboard/agent/page.tsx`) as a single
+  "AI model" dropdown with four tiers:
+  - Cheapest — GPT-5 nano (OpenAI)
+  - Economy — Mistral Small 4 (Mistral)
+  - Balanced (recommended) — Claude Haiku 4.5 (Anthropic)
+  - Advanced — Claude Sonnet 4.6 (Anthropic)
+- The model catalog lives in `lib/agent/models.ts`; each provider has a
+  thin adapter in `lib/agent/llm/` that speaks that provider's native
+  tool-calling format, behind one shared interface
+  (`lib/agent/llm/index.ts`'s `runChatCompletion`). `lib/agent/run.ts`
+  (email pipeline) and `lib/agent/chat.ts` (Google Chat) both read the
+  tenant's saved selection and call through that shared interface —
+  neither is written against any one provider's SDK.
 - Tool/function calling
 - Tenant-specific instructions and business context
+- Per-provider usage/cost tracking (`lib/billing/pricing.ts`) feeds the
+  same Stripe metering pipeline regardless of which provider served a
+  given completion.
+- Knowledge-base embeddings (semantic search over uploaded business
+  documents) always use OpenAI's `text-embedding-3-small`, independent
+  of the tenant's selected chat provider — switching that would require
+  re-embedding all existing knowledge.
 
 ## Google
 
@@ -403,15 +422,22 @@ Even when a tool is presented to the model, the backend performs a second permis
 
 ---
 
-# OpenAI
+# AI providers
 
-OpenAI is integrated into the live agent pipeline.
+The agent supports multiple AI providers — OpenAI, Mistral, and
+Anthropic — and each tenant selects which one powers their agent from
+the Agent dashboard (see the "AI" section above and
+`lib/agent/models.ts`). The default for new tenants is OpenAI's
+`gpt-5-nano`.
 
-The agent uses function/tool calling to determine what action should be taken.
+The agent uses function/tool calling to determine what action should be
+taken, regardless of which provider is selected — each provider's
+native tool-calling format is translated at the adapter boundary
+(`lib/agent/llm/`).
 
-The current production configuration uses `gpt-5-nano`.
-
-OpenAI usage is also incorporated into the application's usage-metering system.
+Usage across every provider is incorporated into the application's
+usage-metering system, priced per-provider via
+`lib/billing/pricing.ts`.
 
 Earlier testing exposed the organization's GPT-4o token-per-minute limit:
 

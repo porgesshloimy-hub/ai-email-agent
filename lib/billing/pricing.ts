@@ -22,19 +22,66 @@ export const OPENAI_PRICING_PER_1M_TOKENS: Record<
     input: 0.05,
     output: 0.4,
   },
+};
 
-  /**
-   * Legacy models still supported by the application.
-   */
-  "gpt-4o": {
-    input: 2.5,
-    output: 10.0,
+/**
+ * Anthropic (Claude) pricing.
+ *
+ * Sourced from Anthropic's own launch posts:
+ * - Claude Haiku 4.5: $1 / $5 per 1M input/output tokens
+ *   (https://www.anthropic.com/news/claude-haiku-4-5)
+ * - Claude Sonnet 4.6: unchanged from Sonnet 4.5, $3 / $15 per 1M
+ *   input/output tokens (https://www.anthropic.com/news/claude-sonnet-4-6)
+ *
+ * Keep synchronized with https://www.anthropic.com/pricing.
+ */
+export const ANTHROPIC_PRICING_PER_1M_TOKENS: Record<
+  string,
+  { input: number; output: number }
+> = {
+  "claude-haiku-4-5": {
+    input: 1.0,
+    output: 5.0,
   },
 
-  "gpt-4o-mini": {
+  "claude-sonnet-4-6": {
+    input: 3.0,
+    output: 15.0,
+  },
+};
+
+/**
+ * Mistral pricing.
+ *
+ * Mistral Small 4 (model id "mistral-small-2603"): $0.15 / $0.60 per 1M
+ * input/output tokens, per Mistral's own model card
+ * (https://docs.mistral.ai/models/model-cards/mistral-small-4-0-26-03).
+ *
+ * Keep synchronized with https://mistral.ai/pricing/.
+ */
+export const MISTRAL_PRICING_PER_1M_TOKENS: Record<
+  string,
+  { input: number; output: number }
+> = {
+  "mistral-small-2603": {
     input: 0.15,
     output: 0.6,
   },
+};
+
+/**
+ * Per-provider pricing tables, keyed the same way as
+ * lib/agent/models.ts's AIProvider type. Kept as a lookup here (rather
+ * than importing AIProvider from models.ts) so this module has no
+ * dependency direction requirements on the model catalog.
+ */
+const PRICING_TABLES_BY_PROVIDER: Record<
+  string,
+  Record<string, { input: number; output: number }>
+> = {
+  openai: OPENAI_PRICING_PER_1M_TOKENS,
+  anthropic: ANTHROPIC_PRICING_PER_1M_TOKENS,
+  mistral: MISTRAL_PRICING_PER_1M_TOKENS,
 };
 
 /**
@@ -42,17 +89,46 @@ export const OPENAI_PRICING_PER_1M_TOKENS: Record<
  *
  * Returns the raw provider cost only.
  * The customer markup is applied separately by meter.ts.
+ *
+ * @deprecated Prefer calculateModelCost(), which works across every
+ * supported provider. Kept because it's still a convenient direct call
+ * for the two OpenAI-only embedding routes
+ * (app/api/knowledge/upload/route.ts, app/api/knowledge/manual/route.ts)
+ * that will never call a non-OpenAI model.
  */
 export function calculateOpenAICost(
   model: string,
   inputTokens: number,
   outputTokens: number
 ): number {
-  const pricing = OPENAI_PRICING_PER_1M_TOKENS[model];
+  return calculateModelCost("openai", model, inputTokens, outputTokens);
+}
+
+/**
+ * Calculate the actual provider cost for a chat completion, across any
+ * supported AI provider (OpenAI, Anthropic, Google). Returns the raw
+ * provider cost only — the customer markup is applied separately by
+ * meter.ts.
+ */
+export function calculateModelCost(
+  provider: string,
+  model: string,
+  inputTokens: number,
+  outputTokens: number
+): number {
+  const table = PRICING_TABLES_BY_PROVIDER[provider];
+
+  if (!table) {
+    throw new Error(
+      `Unknown AI provider "${provider}". Add its pricing table to lib/billing/pricing.ts before recording usage.`
+    );
+  }
+
+  const pricing = table[model];
 
   if (!pricing) {
     throw new Error(
-      `Unknown OpenAI model "${model}". Add its pricing to OPENAI_PRICING_PER_1M_TOKENS before recording usage.`
+      `Unknown ${provider} model "${model}". Add its pricing to lib/billing/pricing.ts before recording usage.`
     );
   }
 

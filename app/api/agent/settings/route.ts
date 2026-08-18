@@ -3,6 +3,10 @@ import {
   createServerSupabase,
   createServiceSupabase,
 } from "@/lib/supabase/server";
+import {
+  DEFAULT_AI_MODEL,
+  DEFAULT_AI_PROVIDER,
+} from "@/lib/agent/models";
 
 export const dynamic = "force-dynamic";
 
@@ -42,7 +46,7 @@ export async function GET() {
     // Load the agent configuration.
     const { data: config, error: configError } = await supabase
       .from("agent_configs")
-      .select("custom_instructions, rules")
+      .select("custom_instructions, rules, ai_provider, ai_model")
       .eq("tenant_id", tenant.id)
       .maybeSingle();
 
@@ -75,6 +79,8 @@ export async function GET() {
       customInstructions: config?.custom_instructions ?? "",
       rules: Array.isArray(config?.rules) ? config.rules : [],
       permissions: permissions ?? [],
+      aiProvider: config?.ai_provider ?? DEFAULT_AI_PROVIDER,
+      aiModel: config?.ai_model ?? DEFAULT_AI_MODEL,
     });
   } catch (error) {
     console.error("Unexpected error loading agent settings:", error);

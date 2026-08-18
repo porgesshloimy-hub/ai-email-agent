@@ -10,7 +10,7 @@
 | Database          | Supabase Postgres               | Row-Level Security (RLS) scoped by `tenant_id` for isolation |
 | Vector search      | pgvector (Supabase extension)   | One namespace per customer for uploaded docs/knowledge |
 | File storage      | Supabase Storage                | Uploaded PDFs/knowledge docs |
-| AI                | OpenAI API                      | Reasoning + drafting; called only with the context/tools the permission layer allows |
+| AI                | OpenAI, Mistral, Anthropic (tenant-selectable, `lib/agent/models.ts` + `lib/agent/llm/`) | Reasoning + drafting; called only with the context/tools the permission layer allows |
 | Email data access  | Gmail API (OAuth2, separate consent from account login) | Push notifications via Google Cloud Pub/Sub (watch/history), not polling |
 | Notifications      | Twilio SMS                      | Agent pings the owner; no reply-to-approve — approval happens in-app (see below) |
 | Background jobs    | Inngest                         | Event-driven: `email.received`, `draft.created`, `approval.requested`, etc. |

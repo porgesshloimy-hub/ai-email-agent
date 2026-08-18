@@ -147,6 +147,13 @@ export async function resolveCalendarWriteCapability(
  *
  * This prevents the model from ever being told it can create
  * Zoom meetings when the business has no connected Zoom account.
+ *
+ * NOTE: this previously read the permission key "calendar.zoom",
+ * which nothing in the app ever wrote to — the settings UI writes
+ * "zoom.meet". That meant getPermissionLevel always fell through to
+ * its fail-closed default ("approval_required"), so this function
+ * always returned "propose_only" no matter what was configured.
+ * Fixed by reading the same key the settings page actually saves.
  */
 export async function resolveZoomCapability(
   tenantId: string
@@ -180,7 +187,7 @@ export async function resolveZoomCapability(
   const permissionLevel =
     await getPermissionLevel(
       tenantId,
-      "calendar.zoom"
+      "zoom.meet"
     );
 
   if (permissionLevel === "allowed") {

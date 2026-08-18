@@ -16,7 +16,7 @@ export type CalendarAction =
   | "calendar.meet";
 
 export type ZoomAction =
-  | "calendar.zoom";
+  | "zoom.meet";
 
 export type AgentAction =
   | GmailAction

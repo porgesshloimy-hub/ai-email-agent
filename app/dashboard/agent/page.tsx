@@ -94,6 +94,15 @@ const CALENDAR_ACTIONS = [
   },
 ];
 
+const ZOOM_ACTIONS = [
+  {
+    key: "zoom.meet",
+    label: "Create Zoom meetings",
+    description:
+      "Allow the agent to create Zoom meetings on your behalf. When set to approval required, the agent will propose a meeting for you to confirm instead of creating it directly.",
+  },
+];
+
 function PermissionBadge({
   level,
 }: {
@@ -349,9 +358,7 @@ export default function AgentPage() {
   const [selectedRule, setSelectedRule] =
     useState<Rule | null>(null);
 
-  const [documents, setDocuments] = useState<
-    KnowledgeDocument[]
-  >([]);
+  const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
 
   const [knowledgeLoading, setKnowledgeLoading] =
     useState(true);
@@ -449,6 +456,11 @@ export default function AgentPage() {
    * that don't yet have a row in the database.
    *
    * Existing saved permissions always take priority.
+   *
+   * zoom.meet defaults to "approval_required" (falls through to the
+   * final return below) to match the current backend behavior of
+   * always treating Zoom as propose-only until this is explicitly
+   * changed.
    */
   function getPermission(
     action: string
@@ -1200,6 +1212,108 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
             </strong>{" "}
             controls whether the agent may add a Google
             Meet conference when creating a calendar event.
+          </div>
+        </section>
+
+        {/* Zoom */}
+        <section
+          style={{
+            background: "#fff",
+            border: "1px solid #e4e4e7",
+            borderRadius: 16,
+            padding: 26,
+            marginBottom: 20,
+            boxShadow:
+              "0 1px 2px rgba(0,0,0,0.03)",
+          }}
+        >
+          <SectionHeader
+            eyebrow="Permissions"
+            title="Zoom"
+            description="Choose whether your agent can create Zoom meetings directly or must ask for your approval first."
+          />
+
+          <div
+            style={{
+              border: "1px solid #e4e4e7",
+              borderRadius: 12,
+              overflow: "hidden",
+            }}
+          >
+            {ZOOM_ACTIONS.map((action, index) => {
+              const level = getPermission(action.key);
+
+              return (
+                <div
+                  key={action.key}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 24,
+                    padding: "17px 18px",
+                    borderTop:
+                      index === 0
+                        ? "none"
+                        : "1px solid #f0f0f1",
+                  }}
+                >
+                  <div style={{ minWidth: 0 }}>
+                    <div
+                      style={{
+                        fontSize: 14,
+                        fontWeight: 600,
+                        marginBottom: 4,
+                      }}
+                    >
+                      {action.label}
+                    </div>
+
+                    <div
+                      style={{
+                        fontSize: 13,
+                        color: "#71717a",
+                        lineHeight: 1.45,
+                      }}
+                    >
+                      {action.description}
+                    </div>
+
+                    <div style={{ marginTop: 8 }}>
+                      <PermissionBadge level={level} />
+                    </div>
+                  </div>
+
+                  <PermissionSelect
+                    action={action.key}
+                    level={level}
+                    onSaved={handlePermissionSaved}
+                    onError={handlePermissionError}
+                  />
+                </div>
+              );
+            })}
+          </div>
+
+          <div
+            style={{
+              marginTop: 15,
+              padding: 13,
+              borderRadius: 10,
+              background: "#fafafa",
+              color: "#71717a",
+              fontSize: 12,
+              lineHeight: 1.55,
+            }}
+          >
+            <strong style={{ color: "#52525b" }}>
+              Automatic
+            </strong>{" "}
+            lets the agent create Zoom meetings directly.{" "}
+            <strong style={{ color: "#52525b" }}>
+              Approval required
+            </strong>{" "}
+            has it propose a meeting for you to confirm first. This requires a connected Zoom account.
           </div>
         </section>
 

@@ -162,6 +162,14 @@ export async function confirmZoomMeeting(formData: FormData) {
     throw new Error("This is not a Zoom meeting proposal — use confirmCalendarEvent instead.");
   }
 
+  // Idempotency guard — mirrors the pattern in processIncomingEmail.
+  // Without this, a silently-failed update below could let a second
+  // click create a second, duplicate Zoom meeting for the same proposal.
+  if (action.status === "sent") {
+    console.log("ZOOM MEETING ALREADY CONFIRMED:", { actionId });
+    return;
+  }
+
   const durationMinutes = Math.round(
     (new Date(action.proposed_end).getTime() - new Date(action.proposed_start).getTime()) / 60000
   );
@@ -175,12 +183,9 @@ export async function confirmZoomMeeting(formData: FormData) {
     topic: action.proposed_summary,
     startTime: action.proposed_start,
     durationMinutes,
-    // Note: timezone and agenda were not captured at proposal time
-    // (propose_zoom_meeting doesn't store them on calendar_actions),
-    // so Zoom will fall back to its account default timezone here.
   });
 
-  await supabase
+  const { error: updateError } = await supabase
     .from("calendar_actions")
     .update({
       status: "sent",
@@ -190,9 +195,22 @@ export async function confirmZoomMeeting(formData: FormData) {
     })
     .eq("id", actionId);
 
+  if (updateError) {
+    console.error("FAILED TO RECORD ZOOM MEETING — MEETING WAS CREATED BUT DB UPDATE FAILED:", {
+      actionId,
+      tenantId: action.tenant_id,
+      zoomMeetingId: zoomMeeting.id,
+      zoomJoinUrl: zoomMeeting.join_url,
+      error: updateError,
+    });
+
+    throw new Error(
+      `Zoom meeting was created (ID: ${zoomMeeting.id}) but could not be saved: ${updateError.message}`
+    );
+  }
+
   revalidatePath("/dashboard/approvals");
 }
-
 export async function dismissCalendarEvent(formData: FormData) {
   const actionId = formData.get("actionId") as string;
 

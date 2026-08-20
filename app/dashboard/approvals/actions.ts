@@ -306,12 +306,54 @@ export async function confirmZoomMeeting(formData: FormData) {
     durationMinutes,
   });
 
+  /**
+   * Approving a Zoom proposal also places it on Google Calendar.
+   *
+   * The account holder has just explicitly approved this specific time
+   * by clicking Approve, so there's no remaining judgment call about
+   * whether a calendar event is warranted — unlike the live agent path
+   * (create_zoom_meeting during processIncomingEmail), which still has
+   * to decide that for itself.
+   *
+   * A failure here does NOT fail the whole approval — the Zoom meeting
+   * already exists and the customer will still get their confirmation
+   * email either way. It's logged loudly instead so it can be added to
+   * the calendar manually if needed.
+   */
+  let googleEventId: string | null = null;
+
+  try {
+    const { createEvent } = await import("@/lib/calendar/client");
+
+    const calendarEvent = await createEvent(action.tenant_id, {
+      summary: action.proposed_summary,
+      description: `Zoom meeting: ${zoomMeeting.join_url}`,
+      startTime: action.proposed_start,
+      endTime: action.proposed_end,
+      attendeeEmails: action.customer_email ? [action.customer_email] : [],
+      createGoogleMeet: false,
+    });
+
+    googleEventId = calendarEvent.id ?? null;
+  } catch (calendarError) {
+    console.error(
+      "FAILED TO CREATE MATCHING CALENDAR EVENT — ZOOM MEETING WAS STILL CREATED:",
+      {
+        actionId,
+        tenantId: action.tenant_id,
+        zoomMeetingId: zoomMeeting.id,
+        error: calendarError,
+      }
+    );
+  }
+
   const { error: updateError } = await supabase
     .from("calendar_actions")
     .update({
       status: "sent",
       zoom_meeting_id: String(zoomMeeting.id),
       zoom_join_url: zoomMeeting.join_url,
+      google_event_id: googleEventId,
       resolved_at: new Date().toISOString(),
     })
     .eq("id", actionId);

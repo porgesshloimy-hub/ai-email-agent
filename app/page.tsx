@@ -126,7 +126,7 @@ export default function LandingPage() {
         >
           Connect Gmail and give your AI agent the context it needs to run
           your inbox. Decide exactly what it can handle automatically — and
-          what requires your approval. This is a test for VS Code
+          what requires your approval.
         </p>
 
         {/* Google Sign-In */}

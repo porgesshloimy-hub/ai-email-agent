@@ -628,7 +628,7 @@ export default async function BillingPage({
                 </div>
 
                 <h2 style={styles.activityTitle}>
-                  Where this month's charges came from
+                  Model usage
                 </h2>
               </div>
             </div>

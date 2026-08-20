@@ -79,6 +79,95 @@ export async function rejectDraft(formData: FormData) {
 }
 
 /**
+ * Sends the agent's pre-written confirmation email for an approved
+ * Zoom meeting or calendar event.
+ *
+ * IMPORTANT: this does NOT call the AI agent live. The confirmation
+ * text was already written by the model back when it proposed the
+ * meeting (see propose_zoom_meeting / propose_calendar_event in
+ * lib/agent/run.ts) and stored verbatim in
+ * calendar_actions.draft_confirmation_body. Approving here only
+ * substitutes the real meeting link into the {{meeting_link}}
+ * placeholder and sends it — no new model call, no new AI cost, and no
+ * risk of the agent "acting live" at approval time.
+ *
+ * A failure to send this confirmation email does NOT roll back or fail
+ * the approval — the Zoom meeting / calendar event has already been
+ * created for real by this point, so the meeting itself must not be
+ * lost just because the follow-up email failed. The failure is logged
+ * loudly instead.
+ */
+async function sendStoredConfirmation(
+  action: {
+    tenant_id: string;
+    customer_email: string | null;
+    gmail_thread_id: string | null;
+    gmail_message_id: string | null;
+    gmail_subject: string | null;
+    proposed_summary: string | null;
+    draft_confirmation_body: string | null;
+  },
+  meetingLink: string | null,
+  actionId: string
+) {
+  if (
+    !action.customer_email ||
+    !action.gmail_thread_id ||
+    !action.draft_confirmation_body
+  ) {
+    console.error(
+      "SKIPPING CONFIRMATION EMAIL — MISSING DATA ON calendar_actions ROW:",
+      {
+        actionId,
+        tenantId: action.tenant_id,
+        hasCustomerEmail: Boolean(action.customer_email),
+        hasThreadId: Boolean(action.gmail_thread_id),
+        hasConfirmationBody: Boolean(action.draft_confirmation_body),
+      }
+    );
+
+    return;
+  }
+
+  try {
+    const { createDraft, sendDraft } = await import("@/lib/gmail/client");
+
+    const finalBody = meetingLink
+      ? action.draft_confirmation_body.replace(
+          /\{\{meeting_link\}\}/g,
+          meetingLink
+        )
+      : action.draft_confirmation_body;
+
+    const draft = await createDraft(
+  action.tenant_id,
+  action.gmail_thread_id,
+  action.customer_email,
+  `Re: ${action.gmail_subject ?? action.proposed_summary ?? "Your meeting"}`,
+  finalBody,
+  action.gmail_message_id ?? undefined
+);
+
+    if (!draft.id) {
+      throw new Error("Gmail did not return a draft ID for the confirmation email");
+    }
+
+    await sendDraft(action.tenant_id, draft.id);
+  } catch (notifyError) {
+    // The meeting/event is already created and saved — a failed
+    // customer notification must not undo or fail the approval.
+    console.error(
+      "CONFIRMATION EMAIL FAILED — MEETING/EVENT WAS STILL CREATED:",
+      {
+        actionId,
+        tenantId: action.tenant_id,
+        error: notifyError,
+      }
+    );
+  }
+}
+
+/**
  * The calendar equivalent of approveAndSend — this is the ONLY place that
  * actually calls Google Calendar's create-event endpoint for a
  * proposal that required approval. Same ownership-check pattern as email.
@@ -111,17 +200,53 @@ export async function confirmCalendarEvent(formData: FormData) {
     throw new Error("This is a Zoom meeting proposal — use confirmZoomMeeting, not confirmCalendarEvent.");
   }
 
-  const { createEvent } = await import("@/lib/calendar/client");
+  // Idempotency guard — mirrors the pattern in processIncomingEmail.
+  // Without this, a silently-failed update below could let a second
+  // click create a second, duplicate Calendar event for the same
+  // proposal, and send a second confirmation email.
+  if (action.status === "sent") {
+    console.log("CALENDAR EVENT ALREADY CONFIRMED:", { actionId });
+    return;
+  }
+
+  const { createEvent, getGoogleMeetUrl } = await import("@/lib/calendar/client");
   const event = await createEvent(action.tenant_id, {
     summary: action.proposed_summary,
     startTime: action.proposed_start,
     endTime: action.proposed_end,
+    attendeeEmails: action.attendee_emails ?? [],
   });
 
-  await supabase
+  const { error: updateError } = await supabase
     .from("calendar_actions")
-    .update({ status: "sent", google_event_id: event.id, resolved_at: new Date().toISOString() })
+    .update({
+      status: "sent",
+      google_event_id: event.id,
+      resolved_at: new Date().toISOString(),
+    })
     .eq("id", actionId);
+
+  if (updateError) {
+    console.error(
+      "FAILED TO RECORD CALENDAR EVENT — EVENT WAS CREATED BUT DB UPDATE FAILED:",
+      {
+        actionId,
+        tenantId: action.tenant_id,
+        googleEventId: event.id,
+        error: updateError,
+      }
+    );
+
+    throw new Error(
+      `Calendar event was created (ID: ${event.id}) but could not be saved: ${updateError.message}`
+    );
+  }
+
+  await sendStoredConfirmation(
+    action,
+    getGoogleMeetUrl(event),
+    actionId
+  );
 
   revalidatePath("/dashboard/approvals");
 }
@@ -132,11 +257,6 @@ export async function confirmCalendarEvent(formData: FormData) {
  * required approval (i.e. calendar_actions rows with
  * action_type "create_zoom_meeting", inserted by propose_zoom_meeting in
  * the agent pipeline). Same ownership-check pattern as the other two.
- *
- * ASSUMPTION FLAGGED: this writes zoom_meeting_id and zoom_join_url onto
- * the calendar_actions row. If those columns don't exist yet on your
- * table, this insert/update will fail — you'll need a migration adding
- * them (both nullable text columns) before this works.
  */
 export async function confirmZoomMeeting(formData: FormData) {
   const actionId = formData.get("actionId") as string;
@@ -164,7 +284,8 @@ export async function confirmZoomMeeting(formData: FormData) {
 
   // Idempotency guard — mirrors the pattern in processIncomingEmail.
   // Without this, a silently-failed update below could let a second
-  // click create a second, duplicate Zoom meeting for the same proposal.
+  // click create a second, duplicate Zoom meeting for the same
+  // proposal, and send a second confirmation email.
   if (action.status === "sent") {
     console.log("ZOOM MEETING ALREADY CONFIRMED:", { actionId });
     return;
@@ -209,8 +330,15 @@ export async function confirmZoomMeeting(formData: FormData) {
     );
   }
 
+  await sendStoredConfirmation(
+    action,
+    zoomMeeting.join_url,
+    actionId
+  );
+
   revalidatePath("/dashboard/approvals");
 }
+
 export async function dismissCalendarEvent(formData: FormData) {
   const actionId = formData.get("actionId") as string;
 

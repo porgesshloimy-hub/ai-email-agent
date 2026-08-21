@@ -16,6 +16,8 @@ import {
   DEFAULT_AI_MODEL,
   type AIProvider,
 } from "@/lib/agent/models";
+import { getToolsForSurface, findToolForSurface } from "@/lib/agent/tools";
+import type { ToolContext } from "@/lib/agent/tools";
 
 /**
  * Handles a single message from the business owner via Google Chat. This is
@@ -84,7 +86,31 @@ export async function handleChatMessage(tenantId: string, messageText: string): 
     .eq("status", "pending_approval")
     .limit(5);
 
-  const tools = buildChatToolDefinitions(calendarWriteCapability);
+  const toolContext: ToolContext = {
+    tenantId,
+    supabase,
+
+    permissions: {
+      sendAllowed: false,
+      calendarReadAllowed,
+      calendarWriteCapability,
+      zoomCapability: "none",
+    },
+
+    chat: {
+      pendingEmails,
+      pendingEmailCount,
+    },
+  };
+
+  const tools: LlmToolDefinition[] = getToolsForSurface(
+    "chat",
+    toolContext
+  ).map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters,
+  }));
 
   const messages: LlmMessage[] = [
     {
@@ -119,35 +145,13 @@ export async function handleChatMessage(tenantId: string, messageText: string): 
 
   const args = JSON.parse(toolCall.arguments || "{}");
 
-  if (toolCall.name === "create_calendar_event") {
-    const { createEvent } = await import("@/lib/calendar/client");
-    const event = await createEvent(tenantId, {
-      summary: args.summary,
-      startTime: args.startTime,
-      endTime: args.endTime,
-    });
-    await supabase.from("calendar_actions").insert({
-      tenant_id: tenantId,
-      action_type: "create_event",
-      status: "sent",
-      proposed_summary: args.summary,
-      proposed_start: args.startTime,
-      proposed_end: args.endTime,
-      google_event_id: event.id,
-      reasoning: "Requested directly via Google Chat",
-    });
-    return `Done — booked "${args.summary}" on your calendar.`;
+  const toolDef = findToolForSurface(toolCall.name, "chat", toolContext);
+
+  if (!toolDef) {
+    return result.content ?? "Done.";
   }
 
-  if (toolCall.name === "check_pending_approvals") {
-    if (!pendingEmails || pendingEmails.length === 0) {
-      return "Nothing waiting on you right now — you're all caught up.";
-    }
-    const list = pendingEmails.map((a) => `• ${a.draft_content?.slice(0, 60)}...`).join("\n");
-    return `You have ${pendingEmailCount} draft(s) waiting:\n${list}\n\nReview them at ${process.env.NEXT_PUBLIC_APP_URL}/dashboard/approvals`;
-  }
-
-  return result.content ?? "Done.";
+  return await toolDef.execute(args, toolContext);
 }
 
 async function meterChatUsage(
@@ -168,38 +172,4 @@ async function meterChatUsage(
     unit: "tokens",
     rawCostUsd: rawCost,
   });
-}
-
-function buildChatToolDefinitions(
-  calendarWriteCapability: "write" | "propose_only" | "none"
-): LlmToolDefinition[] {
-  const tools: LlmToolDefinition[] = [
-    {
-      name: "check_pending_approvals",
-      description: "Look up how many email drafts are currently waiting for the owner's review, and list them.",
-      parameters: { type: "object", properties: {} },
-    },
-  ];
-
-  // Chatting directly with the owner counts as the owner's own instruction —
-  // "write" capability is offered even when calendar.write is set to
-  // approval_required for the email pipeline, since here the owner IS the
-  // approver, in real time, by virtue of typing the request themselves.
-  if (calendarWriteCapability !== "none") {
-    tools.push({
-      name: "create_calendar_event",
-      description: "Book a calendar event as requested by the owner in this chat.",
-      parameters: {
-        type: "object",
-        properties: {
-          summary: { type: "string" },
-          startTime: { type: "string", description: "ISO 8601 start datetime." },
-          endTime: { type: "string", description: "ISO 8601 end datetime." },
-        },
-        required: ["summary", "startTime", "endTime"],
-      },
-    });
-  }
-
-  return tools;
 }

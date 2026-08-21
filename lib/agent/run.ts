@@ -1,5 +1,3 @@
-import OpenAI from "openai";
-
 import { createServiceSupabase } from "@/lib/supabase/server";
 
 import {
@@ -9,17 +7,6 @@ import {
   canReadCalendar,
   checkRulesForTopic,
 } from "@/lib/agent/permissions";
-
-import {
-  createDraft,
-  sendDraft,
-} from "@/lib/gmail/client";
-
-import {
-  createZoomMeeting,
-} from "@/lib/zoom/client";
-
-import { notifyApproval } from "@/lib/notify";
 
 import { recordUsage } from "@/lib/billing/meter";
 
@@ -37,6 +24,13 @@ import {
   DEFAULT_AI_MODEL,
 } from "@/lib/agent/models";
 import type { AIProvider } from "@/lib/agent/models";
+import { getToolsForSurface, findToolForSurface, SecurityViolationError } from "@/lib/agent/tools";
+import type { ToolContext } from "@/lib/agent/tools";
+import {
+  selectRelevantCapabilities,
+  getAvailableCapabilitiesCached,
+} from "@/lib/agent/router";
+import OpenAI from "openai";
 
 /**
  * Maximum number of model round trips (tool call -> tool result ->
@@ -71,33 +65,12 @@ interface IncomingEmail {
   bodyText: string;
 }
 
-interface ToolFlags {
-  sendAllowed: boolean;
-  calendarReadAllowed: boolean;
-
-  calendarWriteCapability:
-    | "write"
-    | "propose_only"
-    | "none";
-
-  zoomCapability:
-    | "write"
-    | "propose_only"
-    | "none";
-}
-
 /**
- * Thrown when a tool handler detects that the model attempted an action
- * the current permission configuration does not allow. This should be
- * structurally impossible (the model is never given a tool it isn't
- * permitted to use), so if it happens it indicates a bug in tool
- * exposure rather than an ordinary external-API failure. Unlike ordinary
- * tool failures (a Gmail/Calendar API error, a transient DB error), this
- * is never reported back to the model as "try something else" — it
- * aborts the whole run so it surfaces loudly instead of being quietly
- * routed around.
+ * SecurityViolationError is now defined in lib/agent/tools/security.ts
+ * and re-exported from lib/agent/tools/index.ts, so this file's catch
+ * block and every tool module's execute() share the exact same class
+ * for `instanceof` checks.
  */
-class SecurityViolationError extends Error {}
 
 /**
  * Main email-agent pipeline.
@@ -399,19 +372,112 @@ export async function processIncomingEmail(
       effectiveSendAllowed,
     });
 
-    const tools: LlmToolDefinition[] =
-      toLlmToolDefinitions(
-        buildToolDefinitions({
-          sendAllowed:
-            effectiveSendAllowed,
+    /**
+     * Shared context every tool's isAvailable()/execute() is evaluated
+     * against — see lib/agent/tools/types.ts. Built once per run since
+     * none of it changes across agent steps.
+     */
+    const toolContext: ToolContext = {
+      tenantId: email.tenantId,
+      supabase,
 
-          calendarReadAllowed,
+      permissions: {
+        sendAllowed: effectiveSendAllowed,
+        calendarReadAllowed,
+        calendarWriteCapability,
+        zoomCapability,
+      },
 
-          calendarWriteCapability,
+      email: {
+        threadId: email.threadId,
+        messageId: email.messageId,
+        from: email.from,
+        subject: email.subject,
+        emailActionId,
+      },
+    };
 
-          zoomCapability,
-        })
+    /**
+     * --------------------------------------------------------
+     * CAPABILITY PRE-ROUTER
+     * --------------------------------------------------------
+     *
+     * A cheap layer in front of the tool list this specific email gets
+     * handed: given what's already permission-available (unchanged
+     * above), decide which of the optional/domain-specific capabilities
+     * (calendar, zoom, future connectors) this particular email's
+     * content actually calls for, so a routine support email isn't
+     * handed the full calendar+Zoom toolset. This can only ever narrow
+     * within what isAvailable()/the permission functions above already
+     * allow — see lib/agent/router/index.ts's module comment for the
+     * exact invariant and where it's enforced.
+     *
+     * availableCapabilities itself makes no DB/network call — it's a
+     * synchronous read of the ToolPermissions object already resolved
+     * above. getAvailableCapabilitiesCached just avoids recomputing
+     * that trivial derivation on every single email within a 60s
+     * window; see its doc comment for the important caveat about this
+     * being a per-process cache on a Vercel/serverless deployment.
+     */
+
+    const availableCapabilities = getAvailableCapabilitiesCached(
+      email.tenantId,
+      toolContext.permissions
+    );
+
+    const routerDecision = await selectRelevantCapabilities({
+      tenantId: email.tenantId,
+      subject: email.subject,
+      bodyText: email.bodyText,
+      availableCapabilities,
+    });
+
+    console.log("AGENT CAPABILITY ROUTER DECISION:", {
+      tenantId: email.tenantId,
+      emailActionId,
+      availableCapabilities,
+      selectedCapabilities: routerDecision.capabilities,
+      heuristics: routerDecision.reasoning.heuristics,
+      classifier: routerDecision.reasoning.classifier,
+    });
+
+    /**
+     * The set of capabilities actually offered to the model right now.
+     * Starts as the router's decision, but can grow during the agent
+     * loop below via the request_additional_capability escape hatch —
+     * see the special-cased handling of that tool's result further
+     * down, which is the ONLY place this set is ever added to, and only
+     * after re-checking real permission-availability, never trusting
+     * the model's request directly.
+     */
+    const activeCapabilities = new Set<string>(routerDecision.capabilities);
+
+    /**
+     * Rebuilds the LLM-facing tool list from the current
+     * activeCapabilities set. request_additional_capability itself is
+     * only included when at least one permission-available capability
+     * is currently excluded — offering it when nothing is excluded
+     * would just invite a pointless tool call.
+     */
+    function buildToolsForActiveCapabilities(): LlmToolDefinition[] {
+      const showEscapeHatch = availableCapabilities.some(
+        (capability) => !activeCapabilities.has(capability)
       );
+
+      return getToolsForSurface("email", toolContext)
+        .filter((tool) =>
+          tool.name === "request_additional_capability"
+            ? showEscapeHatch
+            : activeCapabilities.has(tool.capability)
+        )
+        .map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters,
+        }));
+    }
+
+    let tools: LlmToolDefinition[] = buildToolsForActiveCapabilities();
 
     /**
      * --------------------------------------------------------
@@ -733,790 +799,92 @@ export async function processIncomingEmail(
           );
 
           try {
-            /**
-             * ----------------------------------------------------
-             * CREATE DRAFT
-             * ----------------------------------------------------
-             */
-
-            if (toolName === "create_draft") {
-              if (
-                typeof args.body !== "string" ||
-                !args.body.trim()
-              ) {
-                throw new Error(
-                  "create_draft requires a non-empty body"
-                );
-              }
-
-              const draft = await createDraft(
-                email.tenantId,
-                email.threadId,
-                email.from,
-                `Re: ${email.subject}`,
-                args.body,
-                email.messageId
-              );
-
-              if (!draft.id) {
-                throw new Error(
-                  "Gmail did not return a draft ID"
-                );
-              }
-
-              const { error: actionUpdateError } =
-                await supabase
-                  .from("email_actions")
-                  .update({
-                    action_type: "draft_reply",
-                    status: "pending_approval",
-                    gmail_draft_id: draft.id,
-                    gmail_draft_message_id: draft.message?.id ?? null,
-                    draft_content: args.body,
-                    reasoning: args.reasoning ?? null,
-                  })
-                  .eq("id", emailActionId);
-
-              if (actionUpdateError) {
-                throw new Error(
-                  `Failed to update email action: ${actionUpdateError.message}`
-                );
-              }
-
-              const {
-                data: approval,
-                error: approvalError,
-              } = await supabase
-                .from("approvals")
-                .insert({
-                  tenant_id: email.tenantId,
-                  action_type: "gmail.send",
-                  action_id: emailActionId,
-                  status: "pending",
-                  description:
-                    `Reply to ${email.from} regarding "${email.subject}"`,
-                  expires_at: new Date(
-                    Date.now() + 24 * 60 * 60 * 1000
-                  ).toISOString(),
-                })
-                .select("id")
-                .single();
-
-              if (approvalError || !approval) {
-                throw new Error(
-                  `Failed to create approval: ${
-                    approvalError?.message ?? "unknown error"
-                  }`
-                );
-              }
-
-              await notifyApproval(
-                email.tenantId,
-                approval.id,
-                `New email reply ready for approval.\n\nFrom: ${email.from}\nSubject: ${email.subject}`
-              );
-
-              approvalCreated = true;
-              completedAction = true;
-              terminalActionTaken = true;
-
-              const toolResult = {
-                success: true,
-                action: "draft_created",
-                draftId: draft.id,
-                approvalId: approval.id,
-                message:
-                  "The reply draft was created and submitted for owner approval. No further Gmail action is required unless the owner later approves it.",
-              };
-
-              console.log("AGENT TOOL RESULT:", {
-                toolName,
-                toolResult,
-              });
-
-              messages.push({
-                role: "tool",
-                toolCallId: toolCall.id,
-                name: toolName,
-                content: JSON.stringify(toolResult),
-              });
-
-              continue;
-            }
-
-            /**
-             * ----------------------------------------------------
-             * SEND REPLY
-             * ----------------------------------------------------
-             */
-
-            if (toolName === "send_reply") {
-              if (!effectiveSendAllowed) {
-                throw new SecurityViolationError(
-                  "Security violation: send_reply was attempted without permission"
-                );
-              }
-
-              if (
-                typeof args.body !== "string" ||
-                !args.body.trim()
-              ) {
-                throw new Error(
-                  "send_reply requires a non-empty body"
-                );
-              }
-
-              const draft = await createDraft(
-                email.tenantId,
-                email.threadId,
-                email.from,
-                `Re: ${email.subject}`,
-                args.body,
-                email.messageId
-              );
-
-              if (!draft.id) {
-                throw new Error(
-                  "Gmail did not return a draft ID"
-                );
-              }
-
-              await sendDraft(email.tenantId, draft.id);
-
-              const { error: sentUpdateError } =
-                await supabase
-                  .from("email_actions")
-                  .update({
-                    action_type: "draft_reply",
-                    status: "sent",
-                    gmail_draft_id: draft.id,
-                    gmail_draft_message_id: draft.message?.id ?? null,
-                    draft_content: args.body,
-                    reasoning: args.reasoning ?? null,
-                    resolved_at: new Date().toISOString(),
-                  })
-                  .eq("id", emailActionId);
-
-              if (sentUpdateError) {
-                throw new Error(
-                  `Failed to update sent email action: ${sentUpdateError.message}`
-                );
-              }
-
-              completedAction = true;
-              terminalActionTaken = true;
-
-              const toolResult = {
-                success: true,
-                action: "sent",
-                draftId: draft.id,
-                message:
-                  "The reply was successfully sent to the customer.",
-              };
-
-              console.log("AGENT TOOL RESULT:", {
-                toolName,
-                toolResult,
-              });
-
-              messages.push({
-                role: "tool",
-                toolCallId: toolCall.id,
-                name: toolName,
-                content: JSON.stringify(toolResult),
-              });
-
-              continue;
-            }
-
-            /**
-             * ----------------------------------------------------
-             * CREATE CALENDAR EVENT
-             * ----------------------------------------------------
-             */
-
-            if (toolName === "create_calendar_event") {
-              if (calendarWriteCapability !== "write") {
-                throw new SecurityViolationError(
-                  "Security violation: calendar write attempted without permission"
-                );
-              }
-
-              const { createEvent } = await import(
-                "@/lib/calendar/client"
-              );
-
-              const event = await createEvent(
-                email.tenantId,
-                {
-                  summary: args.summary,
-                  description: args.description,
-                  startTime: args.startTime,
-                  endTime: args.endTime,
-                  attendeeEmails: args.attendeeEmails,
-                  createGoogleMeet: true,
-                }
-              );
-
-              await supabase
-                .from("calendar_actions")
-                .insert({
-                  tenant_id: email.tenantId,
-                  action_type: "create_event",
-                  status: "sent",
-                  proposed_summary: args.summary,
-                  proposed_start: args.startTime,
-                  proposed_end: args.endTime,
-                  google_event_id: event.id,
-                  reasoning: args.reasoning ?? null,
-                });
-
-              await supabase
-                .from("email_actions")
-                .update({
-                  action_type: "calendar_event",
-                  status: "processing",
-                })
-                .eq("id", emailActionId);
-
-              const toolResult = {
-                success: true,
-                action: "calendar_created",
-                googleEventId: event.id,
-                summary: args.summary,
-                startTime: args.startTime,
-                endTime: args.endTime,
-
-                attendeeEmails: args.attendeeEmails ?? [],
-
-                invitation: {
-                  requested: true,
-                  method: "google_calendar",
-                  sendUpdates: "all",
-                },
-
-                googleMeetUrl:
-                  event.hangoutLink ??
-                  event.conferenceData?.entryPoints?.find(
-                    (entryPoint) =>
-                      entryPoint.entryPointType === "video"
-                  )?.uri ??
-                  null,
-
-                message:
-                  "The calendar event was successfully created with the customer as an attendee. Google Calendar was instructed to send the calendar invitation email to the attendee. This calendar invitation is separate from any Gmail reply to the customer. If a separate confirmation email is appropriate, use send_reply or create_draft according to the available permissions.",
-              };
-
-              console.log("AGENT TOOL RESULT:", {
-                toolName,
-                toolResult,
-              });
-
-              messages.push({
-                role: "tool",
-                toolCallId: toolCall.id,
-                name: toolName,
-                content: JSON.stringify(toolResult),
-              });
-
-              /**
-               * IMPORTANT: not terminal. This is exactly why the
-               * multi-step agent loop exists — the model can see that
-               * the calendar event succeeded and decide to send a
-               * confirmation next, in this same batch or the next step.
-               */
-
-              continue;
-            }
-
-            /**
-             * ----------------------------------------------------
-             * CREATE ZOOM MEETING
-             * ----------------------------------------------------
-             */
-
-            if (toolName === "create_zoom_meeting") {
-              if (
-                zoomCapability !== "write"
-              ) {
-                throw new SecurityViolationError(
-                  "Security violation: Zoom meeting creation attempted without permission"
-                );
-              }
-
-              if (
-                typeof args.topic !== "string" ||
-                !args.topic.trim()
-              ) {
-                throw new Error(
-                  "create_zoom_meeting requires a non-empty topic"
-                );
-              }
-
-              if (
-                typeof args.startTime !== "string" ||
-                !args.startTime.trim()
-              ) {
-                throw new Error(
-                  "create_zoom_meeting requires startTime"
-                );
-              }
-
-              if (
-                typeof args.durationMinutes !== "number" ||
-                args.durationMinutes <= 0
-              ) {
-                throw new Error(
-                  "create_zoom_meeting requires a positive durationMinutes"
-                );
-              }
-
-              const zoomMeeting =
-                await createZoomMeeting(
-                  email.tenantId,
-                  {
-                    topic:
-                      args.topic,
-
-                    startTime:
-                      args.startTime,
-
-                    durationMinutes:
-                      args.durationMinutes,
-
-                    timezone:
-                      typeof args.timezone === "string" &&
-                      args.timezone.trim()
-                        ? args.timezone
-                        : undefined,
-
-                    agenda:
-                      typeof args.agenda === "string" &&
-                      args.agenda.trim()
-                        ? args.agenda
-                        : undefined,
-                  }
-                );
-
-              const toolResult = {
-                success: true,
-
-                action:
-                  "zoom_meeting_created",
-
-                meetingId:
-                  String(zoomMeeting.id),
-
-                topic:
-                  zoomMeeting.topic,
-
-                startTime:
-                  zoomMeeting.start_time,
-
-                duration:
-                  zoomMeeting.duration,
-
-                timezone:
-                  zoomMeeting.timezone ??
-                  args.timezone ??
-                  null,
-
-                joinUrl:
-                  zoomMeeting.join_url,
-
-                message:
-                  "The Zoom meeting was successfully created. The meeting join URL is available in this result. This does not automatically send a Gmail message to the customer. If the customer needs the link, reassess the task and use send_reply or create_draft according to the available permissions.",
-              };
-
-              console.log(
-                "AGENT TOOL RESULT:",
-                {
-                  toolName,
-                  toolResult: {
-                    ...toolResult,
-                    joinUrl:
-                      zoomMeeting.join_url,
-                  },
-                }
-              );
-
-              messages.push({
-                role: "tool",
-
-                toolCallId:
-                  toolCall.id,
-
-                name: toolName,
-
-                content:
-                  JSON.stringify(
-                    toolResult
-                  ),
-              });
-
-              /**
-               * IMPORTANT:
-               *
-               * Zoom creation is NOT terminal.
-               *
-               * The model must get another opportunity to decide whether
-               * it should:
-               *
-               * - create a calendar event
-               * - send the customer the Zoom link
-               * - create a draft containing the link
-               * - perform another appropriate action
-               */
-
-              continue;
-            }
-
-            /**
-             * ----------------------------------------------------
-             * PROPOSE ZOOM MEETING
-             * ----------------------------------------------------
-             */
-
-            if (toolName === "propose_zoom_meeting") {
-              if (
-                zoomCapability !== "propose_only" &&
-                zoomCapability !== "write"
-              ) {
-                throw new SecurityViolationError(
-                  "Security violation: Zoom meeting proposal attempted incorrectly"
-                );
-              }
-
-              if (
-                typeof args.confirmationMessage !== "string" ||
-                !args.confirmationMessage.trim()
-              ) {
-                throw new Error(
-                  "propose_zoom_meeting requires a non-empty confirmationMessage"
-                );
-              }
-
-              const {
-                data: zoomAction,
-                error,
-              } = await supabase
-                .from("calendar_actions")
-                .insert({
-                  tenant_id:
-                    email.tenantId,
-
-                  action_type:
-                    "create_zoom_meeting",
-
-                  status:
-                    "pending_approval",
-
-                  proposed_summary:
-                    args.topic,
-
-                  proposed_start:
-                    args.startTime,
-
-                  proposed_end:
-                    new Date(
-                      new Date(
-                        args.startTime
-                      ).getTime() +
-                        Number(
-                          args.durationMinutes
-                        ) *
-                          60 *
-                          1000
-                    ).toISOString(),
-
-                  reasoning:
-                    args.reasoning ?? null,
-
-                  customer_email:
-                    email.from,
-
-                  gmail_thread_id:
-                    email.threadId,
-
-                  gmail_message_id:
-                    email.messageId,
-
-                  gmail_subject:
-                    email.subject,
-
-                  draft_confirmation_body:
-                    args.confirmationMessage,
-                })
-                .select("id")
-                .single();
-
-              if (
-                error ||
-                !zoomAction
-              ) {
-                throw new Error(
-                  `Failed to create Zoom meeting proposal: ${
-                    error?.message ??
-                    "unknown error"
-                  }`
-                );
-              }
-
-              const {
-                data: approval,
-                error:
-                  approvalError,
-              } = await supabase
-                .from("approvals")
-                .insert({
-                  tenant_id:
-                    email.tenantId,
-
-                  action_type:
-                    "calendar.meet",
-
-                  action_id:
-                    zoomAction.id,
-
-                  status:
-                    "pending",
-
-                  description:
-                    `Create Zoom meeting "${args.topic}"`,
-
-                  expires_at:
-                    new Date(
-                      Date.now() +
-                        24 *
-                          60 *
-                          60 *
-                          1000
-                    ).toISOString(),
-                })
-                .select("id")
-                .single();
-
-              if (
-                approvalError ||
-                !approval
-              ) {
-                throw new Error(
-                  `Failed to create Zoom approval: ${
-                    approvalError?.message ??
-                    "unknown error"
-                  }`
-                );
-              }
-
-              await notifyApproval(
-                email.tenantId,
-                approval.id,
-                `Zoom meeting needs approval.\n\n${args.topic}\n${args.startTime}`
-              );
-
-              await supabase
-                .from("email_actions")
-                .update({
-                  action_type:
-                    "calendar_proposal",
-
-                  status:
-                    "pending_approval",
-                })
-                .eq(
-                  "id",
-                  emailActionId
-                );
-
-              approvalCreated =
-                true;
-
-              completedAction =
-                true;
-
-              terminalActionTaken =
-                true;
-
-              const toolResult = {
-                success: true,
-
-                action:
-                  "zoom_meeting_pending_approval",
-
-                approvalId:
-                  approval.id,
-
-                message:
-                  "The Zoom meeting was submitted for owner approval, along with the confirmation email that will be sent automatically if approved. No Zoom meeting has been created yet.",
-              };
-
-              console.log(
-                "AGENT TOOL RESULT:",
-                {
-                  toolName,
-                  toolResult,
-                }
-              );
-
-              messages.push({
-                role: "tool",
-
-                toolCallId:
-                  toolCall.id,
-
-                name: toolName,
-
-                content:
-                  JSON.stringify(
-                    toolResult
-                  ),
-              });
-
-              continue;
-            }
-
-            /**
-             * ----------------------------------------------------
-             * PROPOSE CALENDAR EVENT
-             * ----------------------------------------------------
-             */
-
-            if (toolName === "propose_calendar_event") {
-              if (
-                calendarWriteCapability !== "propose_only" &&
-                calendarWriteCapability !== "write"
-              ) {
-                throw new SecurityViolationError(
-                  "Security violation: calendar proposal attempted incorrectly"
-                );
-              }
-
-              if (
-                typeof args.confirmationMessage !== "string" ||
-                !args.confirmationMessage.trim()
-              ) {
-                throw new Error(
-                  "propose_calendar_event requires a non-empty confirmationMessage"
-                );
-              }
-
-              const {
-                data: calendarAction,
-                error,
-              } = await supabase
-                .from("calendar_actions")
-                .insert({
-                  tenant_id: email.tenantId,
-                  action_type: "create_event",
-                  status: "pending_approval",
-                  proposed_summary: args.summary,
-                  proposed_start: args.startTime,
-                  proposed_end: args.endTime,
-                  reasoning: args.reasoning ?? null,
-                  customer_email: email.from,
-                  gmail_thread_id: email.threadId,
-                  gmail_message_id: email.messageId,
-                  gmail_subject: email.subject,
-                  attendee_emails: args.attendeeEmails ?? [],
-                  draft_confirmation_body: args.confirmationMessage,
-                })
-                .select("id")
-                .single();
-
-              if (error || !calendarAction) {
-                throw new Error(
-                  `Failed to create calendar action: ${
-                    error?.message ?? "unknown error"
-                  }`
-                );
-              }
-
-              const {
-                data: approval,
-                error: approvalError,
-              } = await supabase
-                .from("approvals")
-                .insert({
-                  tenant_id: email.tenantId,
-                  action_type: "calendar.create",
-                  action_id: calendarAction.id,
-                  status: "pending",
-                  description:
-                    `Create calendar event "${args.summary}"`,
-                  expires_at: new Date(
-                    Date.now() + 24 * 60 * 60 * 1000
-                  ).toISOString(),
-                })
-                .select("id")
-                .single();
-
-              if (approvalError || !approval) {
-                throw new Error(
-                  `Failed to create calendar approval: ${
-                    approvalError?.message ?? "unknown error"
-                  }`
-                );
-              }
-
-              await notifyApproval(
-                email.tenantId,
-                approval.id,
-                `Calendar event needs approval.\n\n${args.summary}\n${args.startTime}`
-              );
-
-              await supabase
-                .from("email_actions")
-                .update({
-                  action_type: "calendar_proposal",
-                  status: "pending_approval",
-                })
-                .eq("id", emailActionId);
-
-              approvalCreated = true;
-              completedAction = true;
-              terminalActionTaken = true;
-
-              const toolResult = {
-                success: true,
-                action: "calendar_pending_approval",
-                approvalId: approval.id,
-                message:
-                  "The calendar event was submitted for owner approval, along with the confirmation email that will be sent automatically if approved. No further action is required during this run.",
-              };
-
-              console.log("AGENT TOOL RESULT:", {
-                toolName,
-                toolResult,
-              });
-
-              messages.push({
-                role: "tool",
-                toolCallId: toolCall.id,
-                name: toolName,
-                content: JSON.stringify(toolResult),
-              });
-
-              continue;
-            }
-
-            /**
-             * ----------------------------------------------------
-             * UNKNOWN TOOL
-             * ----------------------------------------------------
-             */
-
-            console.error("UNKNOWN AGENT TOOL:", {
+            const toolDef = findToolForSurface(
               toolName,
-              emailActionId,
-            });
+              "email",
+              toolContext
+            );
 
-            messages.push({
-              role: "tool",
-              toolCallId: toolCall.id,
-              name: toolName,
-              content:
-                `Unknown tool "${toolName}". Do not call this tool again. Reassess the task using the available tools.`,
-            });
+            if (!toolDef) {
+              /**
+               * ----------------------------------------------------
+               * UNKNOWN TOOL
+               * ----------------------------------------------------
+               */
+
+              console.error("UNKNOWN AGENT TOOL:", {
+                toolName,
+                emailActionId,
+              });
+
+              messages.push({
+                role: "tool",
+                toolCallId: toolCall.id,
+                name: toolName,
+                content:
+                  `Unknown tool "${toolName}". Do not call this tool again. Reassess the task using the available tools.`,
+              });
+            } else {
+              const toolResult = await toolDef.execute(
+                args,
+                toolContext
+              );
+
+              if (toolDef.terminal) {
+                completedAction = true;
+                terminalActionTaken = true;
+              }
+
+              if (toolDef.createsApproval) {
+                approvalCreated = true;
+              }
+
+              console.log("AGENT TOOL RESULT:", {
+                toolName,
+                toolResult,
+              });
+
+              /**
+               * Special-cased handling for the capability router's
+               * escape hatch. request_additional_capability's own
+               * execute() (lib/agent/tools/request-additional-capability.ts)
+               * never mutates anything — it only re-runs the same
+               * deterministic, permission-derived availability check
+               * the router itself used and reports back whether the
+               * requested capability is genuinely permitted. THIS is
+               * the only place that signal is acted on: only when
+               * `granted` is true (i.e. real permissions already
+               * allowed it, and it was merely excluded by routing) does
+               * that capability's tools get added to `tools` for the
+               * next loop iteration.
+               */
+              if (
+                toolName === "request_additional_capability" &&
+                toolResult &&
+                typeof toolResult === "object" &&
+                toolResult.granted &&
+                typeof toolResult.capability === "string" &&
+                !activeCapabilities.has(toolResult.capability)
+              ) {
+                activeCapabilities.add(toolResult.capability);
+                tools = buildToolsForActiveCapabilities();
+
+                console.log("AGENT CAPABILITY GRANTED VIA ESCAPE HATCH:", {
+                  tenantId: email.tenantId,
+                  emailActionId,
+                  step: step + 1,
+                  grantedCapability: toolResult.capability,
+                  activeCapabilities: Array.from(activeCapabilities),
+                });
+              }
+
+              messages.push({
+                role: "tool",
+                toolCallId: toolCall.id,
+                name: toolName,
+                content: JSON.stringify(toolResult),
+              });
+            }
           } catch (toolError) {
             if (toolError instanceof SecurityViolationError) {
               /**
@@ -1715,467 +1083,6 @@ export async function processIncomingEmail(
   }
 }
 
-/**
- * ------------------------------------------------------------
- * OpenAI-shaped tool definitions
- * ------------------------------------------------------------
- *
- * buildToolDefinitions() below is unchanged from before multi-LLM
- * support was added — it still builds tool definitions in OpenAI's
- * nested { type: "function", function: { name, description,
- * parameters } } shape. toLlmToolDefinitions() flattens that into the
- * provider-agnostic LlmToolDefinition[] shape lib/agent/llm/'s adapters
- * expect, so every one of these ~12 tool definitions didn't need to be
- * rewritten by hand.
- */
-
-function toLlmToolDefinitions(
-  tools: OpenAI.Chat.Completions.ChatCompletionTool[]
-): LlmToolDefinition[] {
-  return tools
-    .filter((tool) => tool.type === "function")
-    .map((tool) => ({
-      name: tool.function.name,
-      description: tool.function.description ?? "",
-      parameters: (tool.function.parameters ?? {}) as Record<
-        string,
-        any
-      >,
-    }));
-}
-
-function buildToolDefinitions(
-  flags: ToolFlags
-): OpenAI.Chat.Completions.ChatCompletionTool[] {
-  const tools:
-    OpenAI.Chat.Completions.ChatCompletionTool[] =
-    [
-      {
-        type: "function",
-
-        function: {
-          name: "create_draft",
-
-          description:
-            "Create a Gmail draft reply for human approval. Use this whenever the requested response requires information, judgment, authorization, or a business decision that is not explicitly supported by the configured business rules or knowledge. Also use this for sensitive topics such as refunds, complaints, pricing exceptions, legal matters, cancellations, commitments, or exceptions.",
-
-          parameters: {
-            type: "object",
-
-            properties: {
-              body: {
-                type: "string",
-
-                description:
-                  "The complete reply body.",
-              },
-
-              reasoning: {
-                type: "string",
-
-                description:
-                  "Brief internal explanation (1-2 sentences) of why this response is appropriate and why it required approval rather than being sent directly. Logged internally only — never shown to the customer or referenced in the email body.",
-              },
-            },
-
-            required: [
-              "body",
-              "reasoning",
-            ],
-          },
-        },
-      },
-    ];
-
-  if (
-    flags.sendAllowed
-  ) {
-    tools.push({
-      type: "function",
-
-      function: {
-        name:
-          "send_reply",
-
-        description:
-          "Send a reply immediately. Only use this when the exact response is clearly supported by the configured business rules or business knowledge AND the business owner's permission settings explicitly allow sending. Never use this to make a new business decision, invent a policy, or assume authorization.",
-
-        parameters: {
-          type: "object",
-
-          properties: {
-            body: {
-              type: "string",
-
-              description:
-                "The complete reply body.",
-            },
-
-            reasoning: {
-              type: "string",
-
-              description:
-                "Brief internal explanation (1-2 sentences) of why this reply is authorized and appropriate. Logged internally only — never shown to the customer or referenced in the email body.",
-            },
-          },
-
-          required: [
-            "body",
-            "reasoning",
-          ],
-        },
-      },
-    });
-  }
-
-  const calendarEventParams = {
-    type: "object" as const,
-
-    properties: {
-      summary: {
-        type: "string",
-
-        description:
-          "Short event title.",
-      },
-
-      description: {
-        type: "string",
-
-        description:
-          "Optional event description.",
-      },
-
-      startTime: {
-        type: "string",
-
-        description:
-          "ISO 8601 start datetime.",
-      },
-
-      endTime: {
-        type: "string",
-
-        description:
-          "ISO 8601 end datetime.",
-      },
-
-      attendeeEmails: {
-        type: "array",
-
-        items: {
-          type: "string",
-        },
-
-        description:
-          "Optional attendee email addresses.",
-      },
-
-      reasoning: {
-        type: "string",
-
-        description:
-          "Brief internal explanation (1-2 sentences) of why the event should be created. Logged internally only.",
-      },
-    },
-
-    required: [
-      "summary",
-      "startTime",
-      "endTime",
-      "reasoning",
-    ],
-  };
-
-  /**
-   * Same shape as calendarEventParams, plus a required
-   * confirmationMessage field — used only by propose_calendar_event,
-   * since a proposal (unlike an immediate create) needs a pre-written
-   * customer confirmation ready to send automatically on approval.
-   */
-  const proposeCalendarEventParams = {
-    type: "object" as const,
-
-    properties: {
-      ...calendarEventParams.properties,
-
-      confirmationMessage: {
-        type: "string",
-
-        description:
-          "The complete customer-facing confirmation email to send automatically if the account holder approves this proposal. Write it now, in the same natural tone as your other replies, as if the meeting time is confirmed. Include the exact placeholder {{meeting_link}} on its own wherever a meeting link should appear, if a link is expected; it will be replaced with the real link before sending.",
-      },
-    },
-
-    required: [
-      ...calendarEventParams.required,
-      "confirmationMessage",
-    ],
-  };
-
-  if (
-    flags.calendarWriteCapability ===
-    "write"
-  ) {
-    tools.push({
-      type: "function",
-
-      function: {
-        name:
-          "create_calendar_event",
-
-        description:
-          "Create a calendar event directly, with no approval step, to schedule a meeting between the business and the sender (or another party) — for example, booking a consultation, appointment, or call that the business is hosting or organizing. Use this ONLY when the date, time, and purpose are fully grounded AND creating the event does not require confirming the account holder's own personal availability. Do NOT use this to accept, confirm, or RSVP to a meeting invitation that was extended to the account holder personally by someone else — that is outside your authority regardless of calendar permissions. If confirming the event depends on the account holder's personal availability, use propose_calendar_event instead. Include the customer's email in attendeeEmails when the customer should receive a calendar invitation. The Calendar API will send the calendar invitation automatically using sendUpdates=all. A calendar invitation is separate from a Gmail confirmation reply. After creating the event, reassess whether a separate customer-facing Gmail reply is also appropriate.",
-        parameters:
-          calendarEventParams,
-      },
-    });
-
-    tools.push({
-      type: "function",
-
-      function: {
-        name:
-          "propose_calendar_event",
-
-        description:
-          "Propose a calendar event for the account holder's approval, rather than creating it immediately. Use this when the event is otherwise grounded and reasonable, but confirming it would require the account holder's own personal availability, judgment, or preference — for example, when a customer proposes a specific time and whether the business is actually free then is not something you can verify or assume. This creates a pending proposal the account holder can approve or reject; a confirmation email is sent automatically to the customer once approved, using the confirmationMessage you provide. Do NOT use this to accept, confirm, or RSVP to a meeting invitation extended to the account holder personally by someone else. Do not send or draft a separate customer-facing reply promising a specific time until this proposal has been approved.",
-        parameters:
-          proposeCalendarEventParams,
-      },
-    });
-  }
-
-  /**
-   * ----------------------------------------------------------
-   * ZOOM / MEET
-   * ----------------------------------------------------------
-   */
-
-  if (
-    flags.zoomCapability ===
-    "write"
-  ) {
-    tools.push({
-      type: "function",
-
-      function: {
-        name:
-          "create_zoom_meeting",
-
-        description:
-          "Create a Zoom meeting for the business to host immediately, with no approval step. Use this ONLY when the date, time, duration, and purpose are fully grounded in the email, business knowledge, business rules, or explicit instructions, AND creating the meeting does not require confirming the account holder's own personal availability. Do not use this to accept, confirm, or RSVP to a Zoom or other meeting invitation that was extended to the account holder personally by someone else. If confirming the meeting depends on whether the account holder personally is free at that time, use propose_zoom_meeting instead so the account holder can approve it themselves. After creating the meeting, reassess whether a Google Calendar event and/or separate customer-facing Gmail reply is also appropriate.",
-
-        parameters: {
-          type: "object",
-
-          properties: {
-            topic: {
-              type: "string",
-
-              description:
-                "Short natural title for the Zoom meeting.",
-            },
-
-            startTime: {
-              type: "string",
-
-              description:
-                "Meeting start time as an ISO 8601 datetime with timezone information.",
-            },
-
-            durationMinutes: {
-              type: "number",
-
-              description:
-                "Meeting duration in minutes.",
-            },
-
-            timezone: {
-              type: "string",
-
-              description:
-                "IANA timezone for the meeting, such as Europe/London. Use the timezone explicitly stated or clearly implied by the email/business context when available.",
-            },
-
-            agenda: {
-              type: "string",
-
-              description:
-                "Optional short description or agenda for the meeting.",
-            },
-
-            reasoning: {
-              type: "string",
-
-              description:
-                "Brief internal explanation of why creating this Zoom meeting is authorized and appropriate. Logged internally only.",
-            },
-          },
-
-          required: [
-            "topic",
-            "startTime",
-            "durationMinutes",
-            "reasoning",
-          ],
-        },
-      },
-    });
-
-    tools.push({
-      type: "function",
-
-      function: {
-        name:
-          "propose_zoom_meeting",
-
-        description:
-          "Propose a Zoom meeting for the account holder's approval, rather than creating it immediately. Use this when the meeting time, date, or purpose is otherwise grounded and reasonable, but confirming it would require the account holder's own personal availability, judgment, or preference — for example, when a customer proposes a specific time and the business's actual availability at that time is not something you can verify or assume. This creates a pending proposal the account holder can approve or reject; a confirmation email is sent automatically to the customer once approved, using the confirmationMessage you provide. It does not create the actual Zoom meeting immediately. Do not send or draft a separate customer-facing reply promising a specific time until this proposal has been approved.",
-
-        parameters: {
-          type: "object",
-
-          properties: {
-            topic: {
-              type: "string",
-            },
-
-            startTime: {
-              type: "string",
-
-              description:
-                "ISO 8601 meeting start time.",
-            },
-
-            durationMinutes: {
-              type: "number",
-
-              description:
-                "Meeting duration in minutes.",
-            },
-
-            timezone: {
-              type: "string",
-            },
-
-            agenda: {
-              type: "string",
-            },
-
-            reasoning: {
-              type: "string",
-            },
-
-            confirmationMessage: {
-              type: "string",
-
-              description:
-                "The complete customer-facing confirmation email to send automatically if the account holder approves this proposal. Write it now, in the same natural tone as your other replies, as if the meeting is confirmed. Include the exact placeholder {{meeting_link}} on its own wherever the Zoom join link should appear; it will be replaced with the real link before sending.",
-            },
-          },
-
-          required: [
-            "topic",
-            "startTime",
-            "durationMinutes",
-            "reasoning",
-            "confirmationMessage",
-          ],
-        },
-      },
-    });
-  }
-
-  if (
-    flags.calendarWriteCapability ===
-    "propose_only"
-  ) {
-    tools.push({
-      type: "function",
-
-      function: {
-        name:
-          "propose_calendar_event",
-
-        description:
-          "Propose a calendar event for owner approval, to schedule a meeting between the business and the sender (or another party) that the business is hosting or organizing. Do not create the Google Calendar event directly. A confirmation email is sent automatically to the customer once approved, using the confirmationMessage you provide. Do NOT use this to accept, confirm, or RSVP to a meeting invitation extended to the account holder personally by someone else.",
-        parameters:
-          proposeCalendarEventParams,
-      },
-    });
-  }
-
-  if (
-    flags.zoomCapability ===
-    "propose_only"
-  ) {
-    tools.push({
-      type: "function",
-
-      function: {
-        name:
-          "propose_zoom_meeting",
-
-        description:
-          "Propose a Zoom meeting for owner approval. Use this when the business should host a Zoom meeting but the calendar.meet permission requires approval. Do not create the Zoom meeting directly. A confirmation email is sent automatically to the customer once approved, using the confirmationMessage you provide. Do not use this to accept or RSVP to a meeting invitation sent personally to the account holder.",
-
-        parameters: {
-          type: "object",
-
-          properties: {
-            topic: {
-              type: "string",
-            },
-
-            startTime: {
-              type: "string",
-
-              description:
-                "ISO 8601 meeting start time.",
-            },
-
-            durationMinutes: {
-              type: "number",
-
-              description:
-                "Meeting duration in minutes.",
-            },
-
-            timezone: {
-              type: "string",
-            },
-
-            agenda: {
-              type: "string",
-            },
-
-            reasoning: {
-              type: "string",
-            },
-
-            confirmationMessage: {
-              type: "string",
-
-              description:
-                "The complete customer-facing confirmation email to send automatically if the account holder approves this proposal. Write it now, in the same natural tone as your other replies, as if the meeting is confirmed. Include the exact placeholder {{meeting_link}} on its own wherever the Zoom join link should appear; it will be replaced with the real link before sending.",
-            },
-          },
-
-          required: [
-            "topic",
-            "startTime",
-            "durationMinutes",
-            "reasoning",
-            "confirmationMessage",
-          ],
-        },
-      },
-    });
-  }
-
-  return tools;
-}
 
 /**
  * ------------------------------------------------------------

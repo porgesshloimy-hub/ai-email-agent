@@ -15,6 +15,7 @@ import {
 } from "./propose-zoom-meeting";
 import { checkPendingApprovalsTool } from "./check-pending-approvals";
 import { requestAdditionalCapabilityTool } from "./request-additional-capability";
+import { noActionRequiredTool } from "./no-action-required";
 
 import type { ToolContext, ToolDefinition, ToolSurface } from "./types";
 
@@ -43,6 +44,7 @@ export const ALL_TOOLS: ToolDefinition[] = [
   proposeZoomMeetingProposeOnlyTool,
   checkPendingApprovalsTool,
   requestAdditionalCapabilityTool,
+  noActionRequiredTool,
 ];
 
 /**

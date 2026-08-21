@@ -18,6 +18,7 @@ import {
 } from "@/lib/agent/models";
 import { getToolsForSurface, findToolForSurface } from "@/lib/agent/tools";
 import type { ToolContext } from "@/lib/agent/tools";
+import { buildCurrentDateContext } from "@/lib/agent/date-context";
 
 /**
  * Handles a single message from the business owner via Google Chat. This is
@@ -118,6 +119,7 @@ export async function handleChatMessage(tenantId: string, messageText: string): 
       content: [
         `You are the AI assistant for ${tenant?.business_name ?? "this business"}, talking directly with the ` +
           `business owner over Google Chat (not a customer). Be concise — this is a chat conversation, not email.`,
+        buildCurrentDateContext(),
         tenant?.business_description ?? "",
         agentConfig?.custom_instructions ?? "",
         `There are currently ${pendingEmailCount ?? 0} email drafts awaiting the owner's review.`,

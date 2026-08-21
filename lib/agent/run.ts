@@ -30,6 +30,7 @@ import {
   selectRelevantCapabilities,
   getAvailableCapabilitiesCached,
 } from "@/lib/agent/router";
+import { buildCurrentDateContext } from "@/lib/agent/date-context";
 import OpenAI from "openai";
 
 /**
@@ -492,7 +493,7 @@ export async function processIncomingEmail(
         content: [
           "You are the email assistant for this business.",
 
-          `Current date and time: ${new Date().toISOString()} (UTC). Use this to resolve relative dates and times like "today," "tomorrow," or "next Friday" mentioned in the email. Never ask the sender or the account holder what today's date is — you already have it.`,
+          buildCurrentDateContext(),
 
           "<custom_instructions>",
           agentConfig?.custom_instructions ?? "",
@@ -537,7 +538,7 @@ export async function processIncomingEmail(
           "Calendar invitations and Gmail replies are separate actions: creating a calendar event with an attendee sends the invitation through Google Calendar, while send_reply/create_draft creates a separate Gmail message. Use both when both are logically required.",
           "You may use multiple tools in sequence. After each tool result, reassess whether anything else is needed — do not stop merely because you completed one action. Only finish once the overall customer request has been handled.",
           "The goal is to make useful progress, not to maximize conversation. Do not ask questions, request information, request quotes, request timelines, offer to follow up, or invite the sender to continue the conversation unless that information or exchange is genuinely necessary to complete a concrete business task that you are authorized to handle.",
-          "A plain-text assistant response (no tool call) is appropriate when no business action is required, the email is irrelevant, the task is genuinely already complete, or nothing grounds taking action per the rule above. If the email requires a business decision or action that is outside your authority, do not manufacture engagement merely to be helpful — in your plain-text response, briefly state that this requires the account holder's own review.",
+          "When no business action is required — the email is irrelevant, the task is genuinely already complete, the email requires the account holder's own personal input/decision that you have no authority to originate, or nothing grounds taking action per the rule above — call the no_action_required tool with your reasoning. Do not respond with plain text instead: a plain-text response with no tool call is never delivered to anyone and is not a way to finish processing this email. Do not manufacture engagement or fabricate an action merely to have something to call — no_action_required is a normal, successful outcome, not a failure.",
           "Before acting, name what specifically grounds the action: a business rule, a business knowledge entry, or a tool permission. If nothing grounds it, do not improvise a plausible-sounding response, and do not merely ask clarifying questions to keep the exchange going — take no action at all. Ungrounded engagement (asking questions, acknowledging, offering to follow up) is still ungrounded action; the test is whether you have authority for this exchange at all, not whether your specific words commit to anything.",
           "</action_rules>",
 
@@ -982,25 +983,31 @@ export async function processIncomingEmail(
       });
 
       /**
-       * If this is the first occurrence, do NOT immediately finish the
-       * task. Give the model a corrective instruction.
+       * Bug fix (2026-08-21): this corrective message used to say "if no
+       * action is required, explain why" — but plain text was NEVER
+       * actually accepted as a terminal state by the loop (see the "NO
+       * TOOL CALL" branch above: it only breaks when completedAction/
+       * approvalCreated was already true). A model that correctly and
+       * repeatedly explained why no action was needed would just get
+       * this same message again, and again, until it either fabricated
+       * an action under pressure or hit MAX_AGENT_STEPS and the whole
+       * run threw as a failure. Now there's an actual terminal tool for
+       * this (no_action_required) — point the model at it explicitly
+       * instead of leaving "explain why" as a dead end with no real
+       * way to stop.
        */
 
       messages.push({
         role: "user",
 
         content: [
-          "You returned a text response without taking an action.",
+          "You returned a text response without taking an action. A plain-text response is never delivered to anyone — it is not a valid way to finish processing this email.",
 
           "Reassess the incoming email as an action-taking business agent.",
 
-          "The normal assistant response is NOT sent to the customer.",
+          "If the customer or sender expects a reply, use send_reply or create_draft according to the available permissions.",
 
-          "If the customer expects a reply, you must use either send_reply or create_draft according to the available permissions.",
-
-          "If no reply or other business action is actually required, explain why no action is needed.",
-
-          "Do not merely rewrite the email response as plain text.",
+          "If, after genuinely reassessing, you still conclude no business action or reply is required, you MUST call the no_action_required tool with your reasoning. Do not just restate your reasoning as plain text again — that will repeat this same message. Do not fabricate or invent an action just to have something to call instead.",
         ].join("\n"),
       });
 
@@ -1121,6 +1128,20 @@ function extractTopicTags(
  * ------------------------------------------------------------
  */
 
+/**
+ * Minimum cosine similarity a knowledge chunk must score against the
+ * query embedding to be handed to the model. Chunks below this are
+ * silently dropped — "silently" being the problem: there was previously
+ * no logging distinguishing "no knowledge matched" from "knowledge
+ * matched but scored too low to include," which made this threshold
+ * impossible to diagnose against in production. See the logging added
+ * below. Tune this value up/down if real business documents (e.g.
+ * tabular pricing sheets, which often embed with lower similarity to a
+ * conversational customer question than prose documents do) are being
+ * filtered out despite being the right document for the query.
+ */
+const KNOWLEDGE_SIMILARITY_THRESHOLD = 0.65;
+
 async function searchKnowledge(
   tenantId: string,
   queryText: string
@@ -1182,31 +1203,48 @@ async function searchKnowledge(
       return [];
     }
 
-    return (
-      data ?? []
-    )
-      .filter(
-        (chunk: {
-          content?: string | null;
-          similarity?: number | null;
-        }) =>
-          typeof chunk.content ===
-            "string" &&
-          chunk.content
-            .trim()
-            .length > 0 &&
-          typeof chunk.similarity ===
-            "number" &&
-          chunk.similarity >=
-            0.65
-      )
-      .map(
-        (chunk: {
-          content: string;
-          similarity: number;
-        }) =>
-          chunk.content
-      );
+    const candidates = (data ?? []) as {
+      content?: string | null;
+      similarity?: number | null;
+    }[];
+
+    const accepted = candidates.filter(
+      (chunk) =>
+        typeof chunk.content === "string" &&
+        chunk.content.trim().length > 0 &&
+        typeof chunk.similarity === "number" &&
+        chunk.similarity >= KNOWLEDGE_SIMILARITY_THRESHOLD
+    );
+
+    /**
+     * This is the visibility that was previously missing entirely: on a
+     * normal (non-error) run, there was no way to tell "no knowledge
+     * chunks exist for this tenant," "chunks exist but none matched
+     * this query," and "chunks matched but scored below the similarity
+     * threshold" apart from each other — all three looked identical
+     * (an empty <business_knowledge> block) from the outside. Logging
+     * every candidate's similarity score, not just the ones that passed,
+     * makes the threshold itself debuggable.
+     */
+    console.log("KNOWLEDGE SEARCH RESULT:", {
+      tenantId,
+      queryPreview: queryText.slice(0, 200),
+      candidateCount: candidates.length,
+      acceptedCount: accepted.length,
+      threshold: KNOWLEDGE_SIMILARITY_THRESHOLD,
+      candidates: candidates.map((chunk) => ({
+        similarity: chunk.similarity ?? null,
+        passed:
+          typeof chunk.similarity === "number" &&
+          chunk.similarity >= KNOWLEDGE_SIMILARITY_THRESHOLD,
+        contentPreview:
+          typeof chunk.content === "string"
+            ? chunk.content.slice(0, 120)
+            : null,
+      })),
+    });
+
+    return accepted.map((chunk) => chunk.content as string);
   } catch (error) {
     console.error(
       "Knowledge search error:",

@@ -168,6 +168,98 @@ async function sendStoredConfirmation(
 }
 
 /**
+ * Bug fix (2026-08-21): propose_calendar_event and propose_zoom_meeting
+ * (lib/agent/tools/propose-calendar-event.ts,
+ * lib/agent/tools/propose-zoom-meeting.ts) each write a MIRROR row into
+ * email_actions — action_type "calendar_proposal", status
+ * "pending_approval" — alongside the real proposal row in
+ * calendar_actions. That mirror row exists only so the dashboard's
+ * pending count and the email idempotency guard have something to point
+ * at; the actual actionable proposal a human resolves lives entirely in
+ * calendar_actions.
+ *
+ * confirmCalendarEvent/confirmZoomMeeting/dismissCalendarEvent below
+ * only ever updated the calendar_actions row — never this email_actions
+ * mirror. Every single calendar/Zoom proposal ever approved or
+ * dismissed left its mirror row stuck at status "pending_approval"
+ * forever, with no code path that would ever change it again. Those
+ * stuck rows are invisible on the approvals page (it only queries
+ * email_actions rows with action_type "draft_reply" — see
+ * app/dashboard/approvals/page.tsx), but the dashboard's pending count
+ * (app/dashboard/page.tsx) counted ALL "pending_approval" rows
+ * regardless of action_type — hence: dashboard says "8 waiting," the
+ * approvals page shows nothing, because those 8 were never draft
+ * replies at all, just permanently-orphaned mirrors of long-since
+ * resolved calendar/Zoom proposals.
+ *
+ * Fix, two parts:
+ * 1. (this function) — resolve the mirror row alongside the real one,
+ *    every time a proposal is confirmed or dismissed, so this stops
+ *    happening for every future proposal.
+ * 2. (app/dashboard/page.tsx) — count what's actually shown on the
+ *    approvals page (draft_reply pending + calendar_actions pending),
+ *    not "any pending_approval row regardless of type," so an
+ *    already-orphaned row (or any other future mismatch) can never
+ *    inflate the badge again even if something else drifts.
+ * A one-time cleanup for rows already stuck from before this fix still
+ * needs to be run once directly in Supabase — see the accompanying SQL.
+ *
+ * Matches by (tenant_id, gmail_thread_id, gmail_message_id) rather than
+ * a stored foreign key, since calendar_actions has no column linking
+ * back to the email_actions row that spawned it. This is a best-effort
+ * match, not a guaranteed one-to-one link — acceptable here because the
+ * mirror row's only remaining purpose after this fix is to not
+ * permanently inflate a count; a missed match just leaves the old
+ * behavior (harmless once the dashboard also filters by action_type).
+ */
+async function resolveMirroredEmailAction(
+  supabase: ReturnType<typeof createServiceSupabase>,
+  action: {
+    tenant_id: string;
+    gmail_thread_id: string | null;
+    gmail_message_id: string | null;
+  },
+  newStatus: "sent" | "rejected"
+) {
+  if (!action.gmail_thread_id || !action.gmail_message_id) {
+    return;
+  }
+
+  const { data: updated, error } = await supabase
+    .from("email_actions")
+    .update({
+      status: newStatus,
+      resolved_at: new Date().toISOString(),
+    })
+    .eq("tenant_id", action.tenant_id)
+    .eq("gmail_thread_id", action.gmail_thread_id)
+    .eq("gmail_message_id", action.gmail_message_id)
+    .eq("action_type", "calendar_proposal")
+    .eq("status", "pending_approval")
+    .select("id");
+
+  if (error) {
+    // Never fail the real approval/dismissal over this — it's a count
+    // hygiene fix, not the actual business action.
+    console.error("FAILED TO RESOLVE MIRRORED EMAIL ACTION:", {
+      tenantId: action.tenant_id,
+      gmailThreadId: action.gmail_thread_id,
+      gmailMessageId: action.gmail_message_id,
+      error,
+    });
+
+    return;
+  }
+
+  console.log("MIRRORED EMAIL ACTION RESOLVED:", {
+    tenantId: action.tenant_id,
+    gmailThreadId: action.gmail_thread_id,
+    newStatus,
+    rowsUpdated: updated?.length ?? 0,
+  });
+}
+
+/**
  * The calendar equivalent of approveAndSend — this is the ONLY place that
  * actually calls Google Calendar's create-event endpoint for a
  * proposal that required approval. Same ownership-check pattern as email.
@@ -241,6 +333,8 @@ export async function confirmCalendarEvent(formData: FormData) {
       `Calendar event was created (ID: ${event.id}) but could not be saved: ${updateError.message}`
     );
   }
+
+  await resolveMirroredEmailAction(supabase, action, "sent");
 
   await sendStoredConfirmation(
     action,
@@ -372,6 +466,8 @@ export async function confirmZoomMeeting(formData: FormData) {
     );
   }
 
+  await resolveMirroredEmailAction(supabase, action, "sent");
+
   await sendStoredConfirmation(
     action,
     zoomMeeting.join_url,
@@ -405,6 +501,8 @@ export async function dismissCalendarEvent(formData: FormData) {
     .from("calendar_actions")
     .update({ status: "rejected", resolved_at: new Date().toISOString() })
     .eq("id", actionId);
+
+  await resolveMirroredEmailAction(supabase, action, "rejected");
 
   revalidatePath("/dashboard/approvals");
 }

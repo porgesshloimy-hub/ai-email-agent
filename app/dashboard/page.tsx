@@ -7,6 +7,8 @@ export default async function DashboardPage() {
     data: { user },
   } = await supabase.auth.getUser();
 
+  console.log("AUTH USER:", user);
+
   const { data: tenant } = await supabase.from("tenants").select("*").eq("owner_user_id", user?.id).single();
 
   const { count: pendingCount } = await supabase

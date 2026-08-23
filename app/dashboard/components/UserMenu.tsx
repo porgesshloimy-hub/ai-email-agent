@@ -62,38 +62,41 @@ export default function UserMenu({
       ref={menuRef}
       style={{
         position: "fixed",
-        top: 20,
+        top: 18,
         right: 20,
         zIndex: 1000,
       }}
     >
+      {/* Avatar button */}
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}
         aria-label="Open account menu"
         aria-expanded={open}
         style={{
-          width: 40,
-          height: 40,
+          width: 42,
+          height: 42,
           borderRadius: "50%",
-          border: "1px solid #ddd",
+          border: open ? "2px solid #111827" : "2px solid #ffffff",
           padding: 0,
           overflow: "hidden",
           cursor: "pointer",
-          background: "#f1f1f1",
+          background: "#f3f4f6",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
           fontWeight: 600,
-          fontSize: 14,
+          fontSize: 13,
+          boxShadow: "0 2px 8px rgba(0,0,0,0.12)",
+          transition: "all 0.15s ease",
         }}
       >
         {avatarUrl ? (
           <img
             src={avatarUrl}
             alt={name || "Account"}
-            width={40}
-            height={40}
+            width={42}
+            height={42}
             style={{
               width: "100%",
               height: "100%",
@@ -105,81 +108,167 @@ export default function UserMenu({
         )}
       </button>
 
+      {/* Dropdown */}
       {open && (
         <div
           style={{
             position: "absolute",
-            top: 48,
+            top: 52,
             right: 0,
-            width: 240,
-            background: "#fff",
-            border: "1px solid #ddd",
-            borderRadius: 12,
-            boxShadow: "0 8px 24px rgba(0,0,0,0.12)",
+            width: 260,
+            background: "#ffffff",
+            border: "1px solid #e5e7eb",
+            borderRadius: 14,
+            boxShadow:
+              "0 12px 35px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.05)",
             padding: 8,
+            overflow: "hidden",
           }}
         >
+          {/* User information */}
           <div
             style={{
-              padding: "10px 12px 12px",
-              borderBottom: "1px solid #eee",
-              marginBottom: 6,
+              display: "flex",
+              alignItems: "center",
+              gap: 11,
+              padding: "10px 10px 12px",
+              marginBottom: 4,
             }}
           >
             <div
               style={{
+                width: 38,
+                height: 38,
+                borderRadius: "50%",
+                overflow: "hidden",
+                background: "#f3f4f6",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
+                fontSize: 12,
                 fontWeight: 600,
-                fontSize: 14,
-                marginBottom: 3,
               }}
             >
-              {name}
+              {avatarUrl ? (
+                <img
+                  src={avatarUrl}
+                  alt=""
+                  width={38}
+                  height={38}
+                  style={{
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "cover",
+                  }}
+                />
+              ) : (
+                initials
+              )}
             </div>
 
             <div
               style={{
-                fontSize: 12,
-                color: "#666",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
+                minWidth: 0,
+                flex: 1,
               }}
             >
-              {email}
+              <div
+                style={{
+                  fontWeight: 600,
+                  fontSize: 14,
+                  color: "#111827",
+                  marginBottom: 3,
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+              >
+                {name}
+              </div>
+
+              <div
+                style={{
+                  fontSize: 12,
+                  color: "#6b7280",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+              >
+                {email}
+              </div>
             </div>
           </div>
 
+          <div
+            style={{
+              height: 1,
+              background: "#f0f0f0",
+              margin: "2px 4px 6px",
+            }}
+          />
+
+          {/* Settings */}
           <Link
             href="/dashboard/settings"
             onClick={() => setOpen(false)}
             style={{
-              display: "block",
-              padding: "9px 12px",
-              borderRadius: 8,
-              color: "#222",
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              padding: "10px 11px",
+              borderRadius: 9,
+              color: "#374151",
               textDecoration: "none",
               fontSize: 14,
+              fontWeight: 500,
+              transition: "background 0.15s ease",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = "#f5f5f5";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "transparent";
             }}
           >
+            <span style={{ fontSize: 16 }}>⚙</span>
             Settings
           </Link>
 
+          {/* Sign out */}
           <button
             type="button"
             onClick={handleSignOut}
             disabled={signingOut}
             style={{
               width: "100%",
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
               textAlign: "left",
-              padding: "9px 12px",
+              padding: "10px 11px",
               border: 0,
-              borderRadius: 8,
+              borderRadius: 9,
               background: "transparent",
-              color: "#222",
+              color: "#6b7280",
               fontSize: 14,
+              fontWeight: 500,
               cursor: signingOut ? "default" : "pointer",
+              transition: "all 0.15s ease",
+            }}
+            onMouseEnter={(e) => {
+              if (!signingOut) {
+                e.currentTarget.style.background = "#fef2f2";
+                e.currentTarget.style.color = "#dc2626";
+              }
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "transparent";
+              e.currentTarget.style.color = "#6b7280";
             }}
           >
+            <span style={{ fontSize: 16 }}>↪</span>
             {signingOut ? "Signing out..." : "Sign out"}
           </button>
         </div>

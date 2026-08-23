@@ -16,6 +16,7 @@
     "google-auth-library": "^9.14.1",
     "googleapis": "^140.0.1",
     "inngest": "^3.19.10",
+    "lucide-react": "^1.33.0",
     "mammoth": "^1.12.1",
     "next": "14.2.5",
     "openai": "^4.55.0",

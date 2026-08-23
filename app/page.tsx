@@ -84,14 +84,59 @@ useEffect(() => {
         </div>
 
         <div
-          style={{
-            fontSize: 13,
-            color: "#6b7280",
-            fontWeight: 500,
-          }}
-        >
-          AI-powered email management
-        </div>
+  style={{
+    display: "flex",
+    alignItems: "center",
+    gap: 18,
+  }}
+>
+  <div
+    style={{
+      fontSize: 13,
+      color: "#6b7280",
+      fontWeight: 500,
+    }}
+  >
+    AI-powered email management
+  </div>
+
+  {!loading && !user && (
+    <button
+      type="button"
+      onClick={handleGoogleLogin}
+      style={{
+        height: 38,
+        padding: "0 16px",
+        borderRadius: 9,
+        border: "1px solid #d9dce3",
+        background: "#ffffff",
+        color: "#1f2937",
+        fontSize: 13,
+        fontWeight: 600,
+        cursor: "pointer",
+        boxShadow: "0 1px 3px rgba(0,0,0,0.05)",
+      }}
+    >
+      Sign in
+    </button>
+  )}
+
+  {!loading && user && (
+    <UserMenu
+      name={
+        user.user_metadata?.full_name ||
+        user.user_metadata?.name ||
+        "Account"
+      }
+      email={user.email || ""}
+      avatarUrl={
+        user.user_metadata?.avatar_url ||
+        user.user_metadata?.picture ||
+        null
+      }
+    />
+  )}
+</div>
       </header>
 
       {/* Hero */}
@@ -162,87 +207,6 @@ useEffect(() => {
           what requires your approval.
         </p>
 
-        {/* Authentication */}
-  <div style={{ marginTop: 42 }}>
-  {!loading && !user && (
-    <>
-      <button
-        type="button"
-        onClick={handleGoogleLogin}
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 12,
-          height: 54,
-          padding: "0 25px",
-          background: "#ffffff",
-          color: "#1f2937",
-          border: "1px solid #d9dce3",
-          borderRadius: 12,
-          fontSize: 15,
-          fontWeight: 650,
-          cursor: "pointer",
-          boxShadow:
-            "0 1px 2px rgba(0,0,0,0.04), 0 6px 20px rgba(0,0,0,0.06)",
-        }}
-      >
-        {/* Google Logo */}
-        <svg
-          width="20"
-          height="20"
-          viewBox="0 0 24 24"
-          aria-hidden="true"
-        >
-          <path
-            fill="#4285F4"
-            d="M21.35 12.27c0-.79-.07-1.55-.2-2.27H12v4.3h5.24a4.48 4.48 0 0 1-1.94 2.94v2.45h3.14c1.84-1.69 2.91-4.18 2.91-7.42z"
-          />
-          <path
-            fill="#34A853"
-            d="M12 21.7c2.63 0 4.84-.87 6.45-2.35l-3.14-2.45c-.87.58-1.98.92-3.31.92-2.54 0-4.69-1.72-5.46-4.03H3.3v2.53A9.74 9.74 0 0 0 12 21.7z"
-          />
-          <path
-            fill="#FBBC05"
-            d="M6.54 13.79A5.85 5.85 0 0 1 6.23 12c0-.62.11-1.23.31-1.79V7.68H3.3A9.75 9.75 0 0 0 2.25 12c0 1.57.38 3.05 1.05 4.32l3.24-2.53z"
-          />
-          <path
-            fill="#EA4335"
-            d="M12 6.18c1.43 0 2.72.49 3.74 1.45l2.8-2.8C16.84 3.27 14.63 2.3 12 2.3a9.74 9.74 0 0 0-8.7 5.38l3.24 2.53C7.31 7.9 9.46 6.18 12 6.18z"
-          />
-        </svg>
-
-        Continue with Google
-      </button>
-
-      <div
-        style={{
-          marginTop: 14,
-          fontSize: 12,
-          color: "#9ca3af",
-        }}
-      >
-        Securely sign in with your Google account
-      </div>
-    </>
-  )}
-
-  {!loading && user && (
-    <UserMenu
-      name={
-        user.user_metadata?.full_name ||
-        user.user_metadata?.name ||
-        "Account"
-      }
-      email={user.email || ""}
-      avatarUrl={
-        user.user_metadata?.avatar_url ||
-        user.user_metadata?.picture ||
-        null
-      }
-    />
-  )}
-</div>
       </section>
 
       {/* Feature Cards */}

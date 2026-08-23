@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { createBrowserClient } from "@supabase/ssr";
+import { Settings, LogOut } from "lucide-react";
 
 type UserMenuProps = {
   name: string;
@@ -201,6 +202,7 @@ export default function UserMenu({
             </div>
           </div>
 
+          {/* Divider */}
           <div
             style={{
               height: 1,
@@ -232,7 +234,7 @@ export default function UserMenu({
               e.currentTarget.style.background = "transparent";
             }}
           >
-            <span style={{ fontSize: 16 }}>⚙</span>
+            <Settings size={16} strokeWidth={2} />
             Settings
           </Link>
 
@@ -268,7 +270,7 @@ export default function UserMenu({
               e.currentTarget.style.color = "#6b7280";
             }}
           >
-            <span style={{ fontSize: 16 }}>↪</span>
+            <LogOut size={16} strokeWidth={2} />
             {signingOut ? "Signing out..." : "Sign out"}
           </button>
         </div>

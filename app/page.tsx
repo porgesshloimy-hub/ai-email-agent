@@ -61,7 +61,7 @@ export default function LandingPage() {
       {/* Header */}
       <header
         style={{
-          maxWidth: 1180,
+          width: "100%",
           margin: "0 auto",
           padding: "28px",
           display: "flex",

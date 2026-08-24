@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+/*
+ * PrimeAutomatic design system — Cloud White
+ * Every color, radius, shadow and font used by the UI lives here.
+ * Screens reference tokens (bg-surface, text-muted, border-line, ...),
+ * never raw hex values.
+ */
+
+@theme {
+  /* Palette */
+  --color-canvas: #fafbfc;
+  --color-surface: #ffffff;
+  --color-surface-2: #f4f7fa;
+  --color-line: #e8ecf1;
+  --color-line-strong: #d8dee7;
+  --color-ink: #101828;
+  --color-ink-2: #334155;
+  --color-muted: #94a3b8;
+  --color-accent: #3b82f6;
+  --color-accent-soft: #eff6ff;
+  --color-accent-ink: #1d4ed8;
+
+  /* Status */
+  --color-success: #047857;
+  --color-success-soft: #ecfdf5;
+  --color-warning: #b45309;
+  --color-warning-soft: #fffbeb;
+  --color-danger: #dc2626;
+  --color-danger-soft: #fef2f2;
+
+  /* Type */
+  --font-display: var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-dm-sans), ui-sans-serif, system-ui, sans-serif;
+
+  /* Radii */
+  --radius-panel: 18px;
+  --radius-control: 12px;
+
+  /* Shadows — low spread, airy SaaS */
+  --shadow-panel: 0 1px 2px rgba(16, 24, 40, 0.04), 0 8px 24px rgba(16, 24, 40, 0.04);
+  --shadow-pop: 0 12px 32px rgba(16, 24, 40, 0.1), 0 2px 6px rgba(16, 24, 40, 0.04);
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-display);
+    letter-spacing: -0.03em;
+    font-weight: 600;
+  }
+
+  ::selection {
+    background: var(--color-accent-soft);
+  }
+}
+
+/* Focus ring used by every interactive primitive */
+@utility focus-ring {
+  &:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+/* Soft radial wash behind the marketing hero */
+@utility hero-wash {
+  background: radial-gradient(
+    circle at 50% -12%,
+    #eaf1fb 0%,
+    var(--color-canvas) 46%
+  );
+}

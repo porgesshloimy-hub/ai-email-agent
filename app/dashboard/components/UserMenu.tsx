@@ -59,50 +59,24 @@ export default function UserMenu({
       .toUpperCase() || "?";
 
   return (
-    <div
-      ref={menuRef}
-      style={{
-        position: "fixed",
-        top: 18,
-        right: 20,
-        zIndex: 1000,
-      }}
-    >
+    <div ref={menuRef} className="relative">
       {/* Avatar button */}
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}
         aria-label="Open account menu"
         aria-expanded={open}
-        style={{
-          width: 42,
-          height: 42,
-          borderRadius: "50%",
-          border: open ? "2px solid #111827" : "2px solid #ffffff",
-          padding: 0,
-          overflow: "hidden",
-          cursor: "pointer",
-          background: "#f3f4f6",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontWeight: 600,
-          fontSize: 13,
-          boxShadow: "0 2px 8px rgba(0,0,0,0.12)",
-          transition: "all 0.15s ease",
-        }}
+        className={`focus-ring flex size-10 items-center justify-center overflow-hidden rounded-full border-2 bg-surface-2 font-display text-[13px] font-semibold text-ink-2 transition-colors ${
+          open ? "border-accent" : "border-line-strong hover:border-muted"
+        }`}
       >
         {avatarUrl ? (
           <img
             src={avatarUrl}
             alt={name || "Account"}
-            width={42}
-            height={42}
-            style={{
-              width: "100%",
-              height: "100%",
-              objectFit: "cover",
-            }}
+            width={40}
+            height={40}
+            className="size-full object-cover"
           />
         ) : (
           initials
@@ -111,128 +85,37 @@ export default function UserMenu({
 
       {/* Dropdown */}
       {open && (
-        <div
-          style={{
-            position: "absolute",
-            top: 52,
-            right: 0,
-            width: 260,
-            background: "#ffffff",
-            border: "1px solid #e5e7eb",
-            borderRadius: 14,
-            boxShadow:
-              "0 12px 35px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.05)",
-            padding: 8,
-            overflow: "hidden",
-          }}
-        >
+        <div className="absolute right-0 top-12 w-64 overflow-hidden rounded-panel border border-line bg-surface p-2 shadow-pop">
           {/* User information */}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 11,
-              padding: "10px 10px 12px",
-              marginBottom: 4,
-            }}
-          >
-            <div
-              style={{
-                width: 38,
-                height: 38,
-                borderRadius: "50%",
-                overflow: "hidden",
-                background: "#f3f4f6",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexShrink: 0,
-                fontSize: 12,
-                fontWeight: 600,
-              }}
-            >
+          <div className="mb-1 flex items-center gap-3 p-2.5 pb-3">
+            <div className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-surface-2 text-xs font-semibold text-ink-2">
               {avatarUrl ? (
                 <img
                   src={avatarUrl}
                   alt=""
-                  width={38}
-                  height={38}
-                  style={{
-                    width: "100%",
-                    height: "100%",
-                    objectFit: "cover",
-                  }}
+                  width={36}
+                  height={36}
+                  className="size-full object-cover"
                 />
               ) : (
                 initials
               )}
             </div>
 
-            <div
-              style={{
-                minWidth: 0,
-                flex: 1,
-              }}
-            >
-              <div
-                style={{
-                  fontWeight: 600,
-                  fontSize: 14,
-                  color: "#111827",
-                  marginBottom: 3,
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                }}
-              >
-                {name}
-              </div>
-
-              <div
-                style={{
-                  fontSize: 12,
-                  color: "#6b7280",
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                }}
-              >
-                {email}
-              </div>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-semibold text-ink">{name}</div>
+              <div className="truncate text-xs text-muted">{email}</div>
             </div>
           </div>
 
           {/* Divider */}
-          <div
-            style={{
-              height: 1,
-              background: "#f0f0f0",
-              margin: "2px 4px 6px",
-            }}
-          />
+          <div className="mx-1 mb-1.5 h-px bg-line" />
 
           {/* Settings */}
           <Link
             href="/dashboard/settings"
             onClick={() => setOpen(false)}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              padding: "10px 11px",
-              borderRadius: 9,
-              color: "#374151",
-              textDecoration: "none",
-              fontSize: 14,
-              fontWeight: 500,
-              transition: "background 0.15s ease",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = "#f5f5f5";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = "transparent";
-            }}
+            className="focus-ring flex items-center gap-2.5 rounded-control px-3 py-2.5 text-sm font-medium text-ink-2 transition-colors hover:bg-surface-2"
           >
             <Settings size={16} strokeWidth={2} />
             Settings
@@ -243,32 +126,7 @@ export default function UserMenu({
             type="button"
             onClick={handleSignOut}
             disabled={signingOut}
-            style={{
-              width: "100%",
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              textAlign: "left",
-              padding: "10px 11px",
-              border: 0,
-              borderRadius: 9,
-              background: "transparent",
-              color: "#6b7280",
-              fontSize: 14,
-              fontWeight: 500,
-              cursor: signingOut ? "default" : "pointer",
-              transition: "all 0.15s ease",
-            }}
-            onMouseEnter={(e) => {
-              if (!signingOut) {
-                e.currentTarget.style.background = "#fef2f2";
-                e.currentTarget.style.color = "#dc2626";
-              }
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = "transparent";
-              e.currentTarget.style.color = "#6b7280";
-            }}
+            className="focus-ring flex w-full items-center gap-2.5 rounded-control px-3 py-2.5 text-left text-sm font-medium text-muted transition-colors hover:bg-danger-soft hover:text-danger disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-muted"
           >
             <LogOut size={16} strokeWidth={2} />
             {signingOut ? "Signing out..." : "Sign out"}

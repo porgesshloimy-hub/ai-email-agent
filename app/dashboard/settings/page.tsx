@@ -1,6 +1,20 @@
 import { createServerSupabase } from "@/lib/supabase/server";
 import { INTEGRATIONS } from "@/lib/integrations/config";
 import { disconnectGoogle, disconnectZoom } from "./actions";
+import {
+  Badge,
+  Bento,
+  BentoItem,
+  Button,
+  ButtonLink,
+  Input,
+  Label,
+  Page,
+  PageHeader,
+  Panel,
+  PanelTitle,
+  SectionHeading,
+} from "@/components/ui";
 
 const DISCONNECT_ACTIONS: Record<string, () => Promise<void>> = {
   google: disconnectGoogle,
@@ -42,22 +56,20 @@ export default async function SettingsPage() {
   };
 
   return (
-    <main style={{ maxWidth: 640, margin: "40px auto", fontFamily: "system-ui" }}>
-      <h1 style={{ marginBottom: 4 }}>Business & connections</h1>
-      <p style={{ fontSize: 14, color: "#6b7280", marginTop: 0, marginBottom: 32 }}>
-        Manage the accounts and services connected to your workspace.
-      </p>
+    <Page width="full">
+      <PageHeader
+        eyebrow="Settings"
+        title="Business & connections"
+        description="Manage the accounts and services connected to your workspace."
+      />
 
-      <section style={{ marginBottom: 32 }}>
-        <h2 style={{ marginBottom: 16 }}>Connections</h2>
-        <div
-          style={{
-            border: "1px solid #e5e7eb",
-            borderRadius: 12,
-            overflow: "hidden",
-            background: "#fff",
-          }}
-        >
+      <section className="mb-12">
+        <SectionHeading
+          title="Connections"
+          description="The agent can only reach services you've connected here."
+        />
+
+        <Panel padding="none" className="overflow-hidden">
           {INTEGRATIONS.map((integration, index) => {
             const status = connectionStatus[integration.id];
             const isConnected = Boolean(status) && !status?.expired;
@@ -65,141 +77,97 @@ export default async function SettingsPage() {
             const Icon = integration.icon;
             const disconnectAction = DISCONNECT_ACTIONS[integration.id];
 
-            let badgeBg = "#f3f4f6";
-            let badgeColor = "#6b7280";
-            let badgeText = "Not connected";
-            if (isConnected) {
-              badgeBg = "#ecfdf5";
-              badgeColor = "#047857";
-              badgeText = "Connected";
-            } else if (needsReconnect) {
-              badgeBg = "#fffbeb";
-              badgeColor = "#b45309";
-              badgeText = "Needs reconnect";
-            }
+            const badgeTone = isConnected ? "success" : needsReconnect ? "warning" : "neutral";
+            const badgeText = isConnected
+              ? "Connected"
+              : needsReconnect
+                ? "Needs reconnect"
+                : "Not connected";
 
             return (
               <div
                 key={integration.id}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 16,
-                  padding: 16,
-                  borderTop: index === 0 ? "none" : "1px solid #e5e7eb",
-                }}
+                className={`flex flex-wrap items-center gap-4 p-5 ${
+                  index === 0 ? "" : "border-t border-line"
+                }`}
               >
                 <Icon size={36} />
 
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ fontWeight: 600 }}>{integration.name}</span>
-                    <span
-                      style={{
-                        fontSize: 12,
-                        fontWeight: 500,
-                        padding: "2px 8px",
-                        borderRadius: 999,
-                        background: badgeBg,
-                        color: badgeColor,
-                      }}
-                    >
-                      {badgeText}
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-display text-[15px] font-semibold text-ink">
+                      {integration.name}
                     </span>
+                    <Badge tone={badgeTone}>{badgeText}</Badge>
                   </div>
-                  <p
-                    style={{
-                      fontSize: 14,
-                      color: "#6b7280",
-                      margin: "2px 0 0",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
+                  <p className="mt-1 truncate text-sm text-muted">
                     {status ? status.label : integration.description}
                   </p>
                 </div>
 
                 {needsReconnect ? (
-                  <a href={integration.connectHref}>
-                    <button
-                      type="button"
-                      style={{
-                        fontSize: 14,
-                        fontWeight: 500,
-                        color: "#fff",
-                        background: "#b45309",
-                        border: "none",
-                        padding: "8px 14px",
-                        borderRadius: 6,
-                        cursor: "pointer",
-                      }}
-                    >
-                      Reconnect
-                    </button>
-                  </a>
+                  <ButtonLink href={integration.connectHref} variant="warning" size="sm">
+                    Reconnect
+                  </ButtonLink>
                 ) : isConnected ? (
                   <form action={disconnectAction}>
-                    <button
-                      type="submit"
-                      style={{
-                        fontSize: 14,
-                        fontWeight: 500,
-                        color: "#dc2626",
-                        background: "none",
-                        border: "none",
-                        padding: "6px 12px",
-                        borderRadius: 6,
-                        cursor: "pointer",
-                      }}
-                    >
+                    <Button type="submit" variant="danger" size="sm">
                       Disconnect
-                    </button>
+                    </Button>
                   </form>
                 ) : (
-                  <a href={integration.connectHref}>
-                    <button
-                      type="button"
-                      style={{
-                        fontSize: 14,
-                        fontWeight: 500,
-                        color: "#fff",
-                        background: "#111827",
-                        border: "none",
-                        padding: "8px 14px",
-                        borderRadius: 6,
-                        cursor: "pointer",
-                      }}
-                    >
-                      Connect
-                    </button>
-                  </a>
+                  <ButtonLink href={integration.connectHref} size="sm">
+                    Connect
+                  </ButtonLink>
                 )}
               </div>
             );
           })}
-        </div>
+        </Panel>
       </section>
 
-      <section style={{ marginBottom: 32 }}>
-        <h2>Google Chat</h2>
-        <p style={{ fontSize: 14 }}>
-          Message the agent directly by finding "{process.env.NEXT_PUBLIC_APP_NAME ?? "your app"}" in Google Chat and
-          starting a DM. It recognizes you automatically if you chat from{" "}
-          {connectionStatus.google?.label ?? "your connected Gmail address"}.
-        </p>
-        <label style={{ fontSize: 13, display: "block", marginBottom: 4 }}>
-          Chatting from a different Google account? Enter it here:
-        </label>
-        <input type="email" defaultValue={tenant?.owner_google_email ?? ""} placeholder="you@gmail.com" />
-      </section>
+      <Bento>
+        <BentoItem span="md">
+          <Panel padding="lg">
+            <PanelTitle>Google Chat</PanelTitle>
+            <p className="text-sm leading-relaxed text-muted">
+              Message the agent directly by finding &quot;{process.env.NEXT_PUBLIC_APP_NAME ?? "your app"}
+              &quot; in Google Chat and starting a DM. It recognizes you automatically if you chat
+              from {connectionStatus.google?.label ?? "your connected Gmail address"}.
+            </p>
 
-      <section>
-        <h2>Business information</h2>
-        <p>Business name: {tenant?.business_name ?? "—"}</p>
-        <p>Description: {tenant?.business_description ?? "—"}</p>
-      </section>
-    </main>
+            <div className="mt-5">
+              <Label>Chatting from a different Google account? Enter it here</Label>
+              <Input
+                type="email"
+                defaultValue={tenant?.owner_google_email ?? ""}
+                placeholder="you@gmail.com"
+              />
+            </div>
+          </Panel>
+        </BentoItem>
+
+        <BentoItem span="md">
+          <Panel padding="lg">
+            <PanelTitle>Business information</PanelTitle>
+
+            <dl className="divide-y divide-line text-sm">
+              <div className="flex items-baseline justify-between gap-6 py-3">
+                <dt className="text-muted">Business name</dt>
+                <dd className="text-right font-medium text-ink">
+                  {tenant?.business_name ?? "—"}
+                </dd>
+              </div>
+              <div className="flex items-baseline justify-between gap-6 py-3">
+                <dt className="shrink-0 text-muted">Description</dt>
+                <dd className="text-right leading-relaxed text-ink-2">
+                  {tenant?.business_description ?? "—"}
+                </dd>
+              </div>
+            </dl>
+          </Panel>
+        </BentoItem>
+      </Bento>
+    </Page>
   );
 }

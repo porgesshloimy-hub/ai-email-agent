@@ -1,6 +1,21 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import {
+  Badge,
+  Bento,
+  BentoItem,
+  Button,
+  EmptyState,
+  Input,
+  Label,
+  Page,
+  PageHeader,
+  Panel,
+  PanelTitle,
+  SectionHeading,
+  Textarea,
+} from "@/components/ui";
 
 interface KnowledgeDocument {
   id: string;
@@ -160,186 +175,128 @@ export default function KnowledgePage() {
   }
 
   return (
-    <main
-      style={{
-        maxWidth: 900,
-        margin: "40px auto",
-        padding: "0 20px",
-        fontFamily: "system-ui",
-      }}
-    >
-      <h1>Business Knowledge</h1>
+    <Page width="full">
+      <PageHeader
+        eyebrow="Knowledge"
+        title="Business knowledge"
+        description="Give your AI agent the information it needs to answer customers accurately."
+      />
 
-      <p style={{ color: "#666", marginBottom: 32 }}>
-        Give your AI agent the information it needs to answer customers
-        accurately.
-      </p>
+      <Bento className="mb-12">
+        <BentoItem span="md">
+          <Panel padding="lg" className="flex h-full flex-col">
+            <PanelTitle hint="PDF · DOCX · TXT">Upload a document</PanelTitle>
 
-      <section
-        style={{
-          border: "1px solid #ddd",
-          borderRadius: 12,
-          padding: 24,
-          marginBottom: 24,
-        }}
-      >
-        <h2>Upload a document</h2>
+            <p className="text-sm leading-relaxed text-muted">
+              Upload a PDF, Word document, or TXT file containing business information, policies,
+              pricing, FAQs, etc.
+            </p>
 
-        <p style={{ color: "#666" }}>
-          Upload a PDF, Word document, or TXT file containing business
-          information, policies, pricing, FAQs, etc.
-        </p>
+            <div className="mt-5 rounded-control border border-dashed border-line-strong bg-surface-2 p-5">
+              <input
+                type="file"
+                accept=".pdf,.docx,.txt"
+                onChange={handleFileUpload}
+                disabled={uploading}
+                className="focus-ring w-full cursor-pointer text-sm text-ink-2 file:mr-3 file:cursor-pointer file:rounded-control file:border-0 file:bg-accent file:px-4 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-accent-ink disabled:opacity-60"
+              />
+            </div>
 
-        <input
-          type="file"
-          accept=".pdf,.docx,.txt"
-          onChange={handleFileUpload}
-          disabled={uploading}
-        />
+            {uploading && <p className="mt-4 text-sm text-muted">Uploading and indexing...</p>}
 
-        {uploading && (
-          <p style={{ marginTop: 12 }}>
-            Uploading and indexing...
-          </p>
-        )}
+            {uploadMessage && <p className="mt-4 text-sm text-ink-2">{uploadMessage}</p>}
+          </Panel>
+        </BentoItem>
 
-        {uploadMessage && (
-          <p style={{ marginTop: 12 }}>
-            {uploadMessage}
-          </p>
-        )}
-      </section>
+        <BentoItem span="md">
+          <Panel padding="lg" className="flex h-full flex-col">
+            <PanelTitle>Add individual knowledge</PanelTitle>
 
-      <section
-        style={{
-          border: "1px solid #ddd",
-          borderRadius: 12,
-          padding: 24,
-          marginBottom: 32,
-        }}
-      >
-        <h2>Add individual knowledge</h2>
+            <p className="text-sm leading-relaxed text-muted">
+              Add one specific fact, policy, price, or instruction at a time.
+            </p>
 
-        <p style={{ color: "#666" }}>
-          Add one specific fact, policy, price, or instruction at a time.
-        </p>
+            <div className="mt-5">
+              <Label htmlFor="knowledge-title">Title</Label>
+              <Input
+                id="knowledge-title"
+                type="text"
+                placeholder="Emergency call-out pricing"
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+              />
+            </div>
 
-        <input
-          type="text"
-          placeholder="Title"
-          value={title}
-          onChange={(event) => setTitle(event.target.value)}
-          style={{
-            width: "100%",
-            padding: 10,
-            marginBottom: 12,
-            border: "1px solid #ccc",
-            borderRadius: 6,
-          }}
-        />
+            <div className="mt-4">
+              <Label htmlFor="knowledge-content">Knowledge</Label>
+              <Textarea
+                id="knowledge-content"
+                placeholder="Example: Emergency plumbing service costs $250 after 6 PM."
+                value={content}
+                onChange={(event) => setContent(event.target.value)}
+                rows={5}
+              />
+            </div>
 
-        <textarea
-          placeholder="Example: Emergency plumbing service costs $250 after 6 PM."
-          value={content}
-          onChange={(event) => setContent(event.target.value)}
-          rows={5}
-          style={{
-            width: "100%",
-            padding: 10,
-            border: "1px solid #ccc",
-            borderRadius: 6,
-            resize: "vertical",
-          }}
-        />
+            <div className="mt-5 flex flex-wrap items-center gap-3">
+              <Button onClick={handleManualEntry} disabled={savingEntry}>
+                {savingEntry ? "Saving..." : "Add Knowledge"}
+              </Button>
 
-        <button
-          onClick={handleManualEntry}
-          disabled={savingEntry}
-          style={{
-            marginTop: 12,
-            padding: "10px 18px",
-            border: "none",
-            borderRadius: 6,
-            cursor: savingEntry ? "default" : "pointer",
-          }}
-        >
-          {savingEntry ? "Saving..." : "Add Knowledge"}
-        </button>
-
-        {entryMessage && (
-          <p style={{ marginTop: 12 }}>
-            {entryMessage}
-          </p>
-        )}
-      </section>
+              {entryMessage && <span className="text-sm text-muted">{entryMessage}</span>}
+            </div>
+          </Panel>
+        </BentoItem>
+      </Bento>
 
       <section>
-        <h2>Current knowledge</h2>
+        <SectionHeading
+          title="Current knowledge"
+          description="Everything the agent can draw on right now."
+          actions={
+            !loading && documents.length > 0 ? (
+              <Badge tone="accent">{documents.length} sources</Badge>
+            ) : null
+          }
+        />
 
         {loading ? (
-          <p>Loading...</p>
+          <Panel padding="lg" tone="quiet" className="text-sm text-muted">
+            Loading...
+          </Panel>
         ) : documents.length === 0 ? (
-          <p style={{ color: "#666" }}>
-            No business knowledge has been added yet.
-          </p>
+          <EmptyState
+            title="No business knowledge yet"
+            description="Upload a document or add a single fact above, and the agent will start using it immediately."
+          />
         ) : (
-          <div>
+          <div className="flex flex-col gap-3">
             {documents.map((document) => (
-              <div
-                key={document.id}
-                style={{
-                  border: "1px solid #ddd",
-                  borderRadius: 10,
-                  padding: 18,
-                  marginBottom: 12,
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  gap: 20,
-                }}
-              >
-                <div>
-                  <strong>{document.file_name}</strong>
+              <Panel key={document.id} padding="sm" className="flex flex-wrap items-center gap-4 p-5">
+                <div className="min-w-0 flex-1">
+                  <strong className="font-display text-[15px] font-semibold text-ink">
+                    {document.file_name}
+                  </strong>
 
-                  <div
-                    style={{
-                      color: "#666",
-                      fontSize: 14,
-                      marginTop: 4,
-                    }}
-                  >
-                    {document.chunk_count} knowledge chunks
-                  </div>
-
-                  <div
-                    style={{
-                      color: "#999",
-                      fontSize: 13,
-                      marginTop: 4,
-                    }}
-                  >
-                    {new Date(
-                      document.uploaded_at
-                    ).toLocaleDateString()}
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[13px] text-muted">
+                    <span>{document.chunk_count} knowledge chunks</span>
+                    <span className="text-line-strong">·</span>
+                    <span>{new Date(document.uploaded_at).toLocaleDateString()}</span>
                   </div>
                 </div>
 
-                <button
+                <Button
                   onClick={() => deleteDocument(document.id)}
-                  style={{
-                    padding: "8px 12px",
-                    border: "1px solid #ccc",
-                    borderRadius: 6,
-                    cursor: "pointer",
-                  }}
+                  variant="secondary"
+                  size="sm"
                 >
                   Delete
-                </button>
-              </div>
+                </Button>
+              </Panel>
             ))}
           </div>
         )}
       </section>
-    </main>
+    </Page>
   );
 }

@@ -14,7 +14,7 @@ import {
   DEFAULT_AI_MODEL,
   type AIProvider,
 } from "@/lib/agent/models";
-import { GmailIcon, CalendarIcon, ZoomIcon } from "@/lib/integrations/icons";
+import { EmailIcon, CalendarIcon, ZoomIcon } from "@/lib/integrations/icons";
 
 type PermissionLevel =
   | "denied"
@@ -458,7 +458,6 @@ function PermissionRow({
 }) {
   return (
     <div
-      title={action.description}
       style={{
         display: "flex",
         alignItems: "center",
@@ -1383,7 +1382,7 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
             {EMAIL_ACTIONS.map((action, index) => (
               <PermissionRow
                 key={action.key}
-                icon={<GmailIcon size={20} />}
+                icon={<EmailIcon size={20} />}
                 action={action}
                 level={getPermission(action.key)}
                 connected={connections.gmail}

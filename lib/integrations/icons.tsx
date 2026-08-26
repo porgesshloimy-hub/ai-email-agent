@@ -20,25 +20,27 @@ export function ZoomIcon({ size = 36 }: { size?: number }) {
 }
 
 /**
- * Gmail — used for the per-action permission rows on the Agent
- * settings page (app/dashboard/agent/page.tsx), which lists
- * gmail.read/draft/send/archive/delete individually. Deliberately
- * distinct from GoogleIcon above (which represents the whole Google
- * account connection on the Settings page) so the Email/Calendar/Zoom
- * permission groups are visually distinguishable at a glance.
+ * Generic email icon — used for the per-action Email permission rows on
+ * the Agent settings page (app/dashboard/agent/page.tsx): gmail.read/
+ * draft/send/archive/delete. Deliberately provider-neutral (a plain
+ * envelope, not Gmail's specific brand colors) since these permissions
+ * are conceptually about "the connected email account," and the app
+ * may support inboxes other than Gmail down the line — a Gmail-branded
+ * icon would be actively wrong once that happens. GoogleIcon (above)
+ * is still the right choice specifically on the Settings page, where
+ * it represents the actual Google OAuth connection.
  */
-export function GmailIcon({ size = 36 }: { size?: number }) {
+export function EmailIcon({ size = 36 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-      <rect width="24" height="24" rx="5" fill="#fff" stroke="#e4e4e7" />
-      <path fill="#EA4335" d="M4 7.2C4 6.1 4.9 5.2 6 5.2h12c1.1 0 2 .9 2 1.9v.4l-8 5-8-5v-.4z" />
-      <path fill="#C5221F" d="M4 7.6l8 5 8-5v9.2c0 1.1-.9 2-2 2H6c-1.1 0-2-.9-2-2V7.6z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none">
+      <rect x="2" y="4.5" width="20" height="15" rx="2.5" fill="#fff" stroke="#52525b" strokeWidth="1.6" />
+      <path d="M3 6 L12 13 L21 6" stroke="#52525b" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
 
 /**
- * Google Calendar — same rationale as GmailIcon above, used on the
+ * Google Calendar — same rationale as EmailIcon above, used on the
  * Agent settings page's Calendar permission rows.
  */
 export function CalendarIcon({ size = 36 }: { size?: number }) {

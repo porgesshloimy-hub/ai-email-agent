@@ -4,6 +4,48 @@ import {
   markGoogleReauthRequired,
 } from "@/lib/google/authClient";
 
+/**
+ * Detect Google's "the refresh token is dead" error. This can arrive in
+ * a few slightly different shapes depending on which layer surfaces it
+ * (a raw OAuth token-endpoint response vs. an error the googleapis
+ * client wraps) — checked defensively across all of them.
+ */
+function isInvalidGrantError(error: any): boolean {
+  return (
+    error?.message === "invalid_grant" ||
+    error?.response?.data?.error === "invalid_grant" ||
+    error?.response?.data?.error_description
+      ?.toLowerCase()
+      ?.includes("expired or revoked")
+  );
+}
+
+/**
+ * Every exported function in this file calls getGmailClient() first, and
+ * the diagnostic getProfile() call below is the very first live API call
+ * made on any freshly-authed client — so it's the single earliest point
+ * an expired/revoked Google grant (invalid_grant) will surface, for
+ * every single caller (readThread, readMessage, getHistoryChanges,
+ * watchGmail, createDraft, sendDraft, deleteDraft, archiveThread,
+ * getDraftResolution).
+ *
+ * BUG FIX: this used to log-and-rethrow the raw error with no
+ * invalid_grant detection at all — markGoogleReauthRequired() only ever
+ * got called from readThread's own catch block further down, which
+ * wraps a *later* API call (thread.get()), not this one. Since
+ * invalid_grant almost always fires right here, on the very first call,
+ * readThread's handling essentially never triggered in practice, and
+ * every other caller (most importantly getHistoryChanges, which is what
+ * the Gmail-push Inngest handler calls on every single notification) had
+ * no handling at all. The result: an already-dead refresh token got
+ * retried against Google's token endpoint on every Gmail push
+ * notification, forever, each attempt logging the full raw gaxios error
+ * (a large stack trace) and never marking the connection for reconnect —
+ * hence a continuously growing wall of identical errors with no
+ * corresponding "Needs reconnect" prompt ever appearing anywhere.
+ *
+ * Fixed by handling it once, here, where it actually occurs.
+ */
 async function getGmailClient(tenantId: string) {
   const auth = await getGoogleAuthedClient(tenantId);
 
@@ -26,6 +68,16 @@ async function getGmailClient(tenantId: string) {
       historyId: profile.data.historyId,
     });
   } catch (error: any) {
+    if (isInvalidGrantError(error)) {
+      await markGoogleReauthRequired(tenantId);
+
+      console.warn("GOOGLE OAUTH GRANT INVALID — REAUTH REQUIRED:", {
+        tenantId,
+      });
+
+      throw new Error("GOOGLE_REAUTH_REQUIRED");
+    }
+
     console.error("GMAIL PROFILE CHECK FAILED:", {
       tenantId,
       errorCode: error?.code,
@@ -68,22 +120,13 @@ export async function readThread(
 
     return thread.data;
   } catch (error: any) {
-  console.error("GMAIL PROFILE CHECK FAILED:", {
-    tenantId,
-    errorCode: error?.code,
-    errorMessage: error?.message,
-    status: error?.response?.status,
-    responseData: error?.response?.data,
-  });
-
-  const isInvalidGrant =
-    error?.message === "invalid_grant" ||
-    error?.response?.data?.error === "invalid_grant" ||
-    error?.response?.data?.error_description
-      ?.toLowerCase()
-      ?.includes("expired or revoked");
-
-  if (isInvalidGrant) {
+  /**
+   * getGmailClient() above already handles the common case (grant
+   * already dead before this function even started). This remains as a
+   * narrower defense: the grant going invalid in the gap between that
+   * check succeeding and this specific call running.
+   */
+  if (isInvalidGrantError(error)) {
     await markGoogleReauthRequired(tenantId);
 
     console.warn(
@@ -95,6 +138,15 @@ export async function readThread(
 
     throw new Error("GOOGLE_REAUTH_REQUIRED");
   }
+
+  console.error("GMAIL READ THREAD FAILED:", {
+    tenantId,
+    threadId,
+    errorCode: error?.code,
+    errorMessage: error?.message,
+    status: error?.response?.status,
+    responseData: error?.response?.data,
+  });
 
   throw error;
 }

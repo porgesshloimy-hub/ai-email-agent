@@ -36,7 +36,7 @@ export default async function SettingsPage() {
   const [{ data: gmailConnection }, { data: zoomConnection }] = await Promise.all([
     supabase
       .from("gmail_connections")
-      .select("gmail_address, connected_at")
+      .select("gmail_address, connected_at, google_reauth_required")
       .eq("tenant_id", tenant?.id)
       .single(),
     supabase
@@ -50,8 +50,21 @@ export default async function SettingsPage() {
     ? new Date(zoomConnection.token_expiry).getTime() < Date.now()
     : false;
 
+  /**
+   * BUG FIX: this previously never selected google_reauth_required at
+   * all, so even once lib/gmail/client.ts correctly marks a dead Google
+   * grant (see getGmailClient's invalid_grant handling), this page had
+   * no way to know and would keep showing Google as plainly "Connected"
+   * indefinitely — the only integration on this page that could
+   * silently be broken with no visible prompt to reconnect.
+   */
   const connectionStatus: Record<string, { label: string; expired?: boolean } | null> = {
-    google: gmailConnection ? { label: gmailConnection.gmail_address } : null,
+    google: gmailConnection
+      ? {
+          label: gmailConnection.gmail_address,
+          expired: Boolean((gmailConnection as any).google_reauth_required),
+        }
+      : null,
     zoom: zoomConnection ? { label: zoomConnection.zoom_email, expired: zoomExpired } : null,
   };
 

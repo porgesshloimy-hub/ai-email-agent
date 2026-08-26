@@ -92,6 +92,10 @@ export const createCalendarEventEmailTool: ToolDefinition = {
 
   terminal: false,
 
+  // A successful call means a real Calendar event now exists — see the
+  // field's doc comment in lib/agent/tools/types.ts.
+  marksCapabilityCompleted: true,
+
   async execute(args: Record<string, any>, context: ToolContext) {
     const { supabase, tenantId, email } = context;
 

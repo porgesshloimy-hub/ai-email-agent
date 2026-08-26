@@ -63,6 +63,10 @@ export const createZoomMeetingTool: ToolDefinition = {
 
   terminal: false,
 
+  // A successful call means a real Zoom meeting now exists — see the
+  // field's doc comment in lib/agent/tools/types.ts.
+  marksCapabilityCompleted: true,
+
   async execute(args: Record<string, any>, context: ToolContext) {
     const { tenantId, permissions } = context;
 

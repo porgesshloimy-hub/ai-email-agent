@@ -75,12 +75,42 @@ export async function GET() {
       );
     }
 
+    /**
+     * Real connection status per integration group, so the Agent page
+     * can lock permission rows for anything not actually connected —
+     * a configured permission with nothing behind it isn't real
+     * access (see lib/agent/permissions.ts's resolveCalendarWriteCapability/
+     * canReadCalendar/resolveZoomCapability, which enforce exactly this
+     * same distinction on the backend). This mirrors that same source
+     * of truth in the UI rather than re-deriving it differently.
+     */
+    const [{ data: gmailConnection }, { data: zoomConnection }] =
+      await Promise.all([
+        supabase
+          .from("gmail_connections")
+          .select("calendar_scope_granted")
+          .eq("tenant_id", tenant.id)
+          .maybeSingle(),
+        supabase
+          .from("zoom_connections")
+          .select("id")
+          .eq("tenant_id", tenant.id)
+          .maybeSingle(),
+      ]);
+
+    const connections = {
+      gmail: Boolean(gmailConnection),
+      calendar: Boolean(gmailConnection?.calendar_scope_granted),
+      zoom: Boolean(zoomConnection),
+    };
+
     return NextResponse.json({
       customInstructions: config?.custom_instructions ?? "",
       rules: Array.isArray(config?.rules) ? config.rules : [],
       permissions: permissions ?? [],
       aiProvider: config?.ai_provider ?? DEFAULT_AI_PROVIDER,
       aiModel: config?.ai_model ?? DEFAULT_AI_MODEL,
+      connections,
     });
   } catch (error) {
     console.error("Unexpected error loading agent settings:", error);

@@ -18,3 +18,39 @@ export function ZoomIcon({ size = 36 }: { size?: number }) {
     </svg>
   );
 }
+
+/**
+ * Gmail — used for the per-action permission rows on the Agent
+ * settings page (app/dashboard/agent/page.tsx), which lists
+ * gmail.read/draft/send/archive/delete individually. Deliberately
+ * distinct from GoogleIcon above (which represents the whole Google
+ * account connection on the Settings page) so the Email/Calendar/Zoom
+ * permission groups are visually distinguishable at a glance.
+ */
+export function GmailIcon({ size = 36 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+      <rect width="24" height="24" rx="5" fill="#fff" stroke="#e4e4e7" />
+      <path fill="#EA4335" d="M4 7.2C4 6.1 4.9 5.2 6 5.2h12c1.1 0 2 .9 2 1.9v.4l-8 5-8-5v-.4z" />
+      <path fill="#C5221F" d="M4 7.6l8 5 8-5v9.2c0 1.1-.9 2-2 2H6c-1.1 0-2-.9-2-2V7.6z" />
+    </svg>
+  );
+}
+
+/**
+ * Google Calendar — same rationale as GmailIcon above, used on the
+ * Agent settings page's Calendar permission rows.
+ */
+export function CalendarIcon({ size = 36 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+      <rect width="24" height="24" rx="5" fill="#fff" stroke="#e4e4e7" />
+      <rect x="4" y="5.5" width="16" height="14" rx="2" fill="#4285F4" />
+      <rect x="4" y="5.5" width="16" height="4" rx="2" fill="#1a56c4" />
+      <rect x="7" y="12" width="3" height="3" fill="#fff" />
+      <rect x="12" y="12" width="3" height="3" fill="#fff" opacity="0.75" />
+      <rect x="7" y="4" width="1.6" height="3" rx="0.8" fill="#1a56c4" />
+      <rect x="15.4" y="4" width="1.6" height="3" rx="0.8" fill="#1a56c4" />
+    </svg>
+  );
+}

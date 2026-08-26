@@ -91,11 +91,33 @@ export async function rejectDraft(formData: FormData) {
  * placeholder and sends it — no new model call, no new AI cost, and no
  * risk of the agent "acting live" at approval time.
  *
- * A failure to send this confirmation email does NOT roll back or fail
- * the approval — the Zoom meeting / calendar event has already been
- * created for real by this point, so the meeting itself must not be
- * lost just because the follow-up email failed. The failure is logged
- * loudly instead.
+ * SAFETY CHECKS (added — this function previously ran none at all):
+ * this is the one place a proposal's stored text actually reaches a
+ * customer, potentially days after the model wrote it, with no human
+ * re-reading it first (approving is a decision about the MEETING, not
+ * a proofread of the email). Before sending:
+ *
+ * 1. Substitute {{meeting_link}} as before.
+ * 2. Run the same stripKnownSafePlaceholders/detectHallucinatedContent
+ *    checks lib/agent/run.ts's live loop already applies to
+ *    send_reply/create_draft — with allowMeetingLinkPlaceholder: false,
+ *    since by this point substitution has already been attempted, so a
+ *    surviving {{meeting_link}} means it failed (e.g. no real link was
+ *    available — see confirmCalendarEvent's createGoogleMeet fix
+ *    below), not that it's still pending.
+ * 3. Run the same grounding check lib/agent/grounding-guard.ts applies
+ *    live, using the ONE capability that was just actually fulfilled
+ *    (`capability`, passed in by the caller) as both the available and
+ *    completed set — this only flags a claim that goes beyond
+ *    confirming the specific meeting/event that was actually just
+ *    created, it does not re-relitigate that meeting itself.
+ *
+ * A violation at this point does NOT roll back or fail the approval —
+ * the Zoom meeting / calendar event has already been created for real
+ * by this point, so the meeting itself must not be lost. The
+ * confirmation send is skipped and logged loudly instead, the same way
+ * a Gmail API failure here was already handled, so the owner can see
+ * it in logs and follow up manually.
  */
 async function sendStoredConfirmation(
   action: {
@@ -108,7 +130,8 @@ async function sendStoredConfirmation(
     draft_confirmation_body: string | null;
   },
   meetingLink: string | null,
-  actionId: string
+  actionId: string,
+  capability: "zoom" | "calendar"
 ) {
   if (
     !action.customer_email ||
@@ -131,22 +154,76 @@ async function sendStoredConfirmation(
 
   try {
     const { createDraft, sendDraft } = await import("@/lib/gmail/client");
+    const { checkReplyIsGrounded } = await import("@/lib/agent/grounding-guard");
+    const {
+      stripKnownSafePlaceholders,
+      detectHallucinatedContent,
+    } = await import("@/lib/agent/content-safety");
 
-    const finalBody = meetingLink
+    let finalBody = meetingLink
       ? action.draft_confirmation_body.replace(
           /\{\{meeting_link\}\}/g,
           meetingLink
         )
       : action.draft_confirmation_body;
 
+    finalBody = stripKnownSafePlaceholders(finalBody);
+
+    const deterministicViolation = detectHallucinatedContent(
+      finalBody,
+      // If this confirmation is for a Zoom meeting, a real Zoom action
+      // just happened, so legitimate mentions of Zoom are expected —
+      // treat zoomCapability as "write" so the zoom-specific branch
+      // doesn't fire. If this confirmation is for a plain calendar
+      // event, no Zoom action happened at all, so any mention of Zoom
+      // here would be exactly the kind of fabrication this check
+      // exists to catch — treat zoomCapability as "none" so it does
+      // fire.
+      { zoomCapability: capability === "zoom" ? "write" : "none" },
+      { allowMeetingLinkPlaceholder: false }
+    );
+
+    if (deterministicViolation) {
+      console.error(
+        "CONFIRMATION EMAIL BLOCKED — CONTENT SAFETY CHECK FAILED:",
+        {
+          actionId,
+          tenantId: action.tenant_id,
+          capability,
+          violation: deterministicViolation,
+        }
+      );
+
+      return;
+    }
+
+    const groundingResult = await checkReplyIsGrounded({
+      replyText: finalBody,
+      availableCapabilities: [capability],
+      completedCapabilities: [capability],
+    });
+
+    if (!groundingResult.ok) {
+      console.error("CONFIRMATION EMAIL BLOCKED — GROUNDING CHECK FAILED:", {
+        actionId,
+        tenantId: action.tenant_id,
+        capability,
+        source: groundingResult.source,
+        violations: groundingResult.violations,
+        error: groundingResult.error,
+      });
+
+      return;
+    }
+
     const draft = await createDraft(
-  action.tenant_id,
-  action.gmail_thread_id,
-  action.customer_email,
-  `Re: ${action.gmail_subject ?? action.proposed_summary ?? "Your meeting"}`,
-  finalBody,
-  action.gmail_message_id ?? undefined
-);
+      action.tenant_id,
+      action.gmail_thread_id,
+      action.customer_email,
+      `Re: ${action.gmail_subject ?? action.proposed_summary ?? "Your meeting"}`,
+      finalBody,
+      action.gmail_message_id ?? undefined
+    );
 
     if (!draft.id) {
       throw new Error("Gmail did not return a draft ID for the confirmation email");
@@ -302,11 +379,33 @@ export async function confirmCalendarEvent(formData: FormData) {
   }
 
   const { createEvent, getGoogleMeetUrl } = await import("@/lib/calendar/client");
+
+  /**
+   * BUG FIX: this call previously never passed createGoogleMeet at
+   * all, so it always defaulted to false — no Google Meet conference
+   * was ever created for an approved calendar proposal. But
+   * propose_calendar_event's own tool description explicitly tells the
+   * model it may write the {{meeting_link}} placeholder into
+   * confirmationMessage "if a link is expected". Since meetingLink
+   * below is getGoogleMeetUrl(event), and no Meet was ever requested,
+   * meetingLink was always null here — and sendStoredConfirmation's
+   * substitution only runs `if (meetingLink)`, so a stored confirmation
+   * containing {{meeting_link}} was sent to the customer with that
+   * literal placeholder text still in it. This is the same class of
+   * failure as the live-agent Zoom incident, just via the approval
+   * path instead. Fix: only request a Meet when the stored confirmation
+   * actually expects a link, so a real one exists to substitute.
+   */
+  const needsMeetingLink = /\{\{meeting_link\}\}/.test(
+    action.draft_confirmation_body ?? ""
+  );
+
   const event = await createEvent(action.tenant_id, {
     summary: action.proposed_summary,
     startTime: action.proposed_start,
     endTime: action.proposed_end,
     attendeeEmails: action.attendee_emails ?? [],
+    createGoogleMeet: needsMeetingLink,
   });
 
   const { error: updateError } = await supabase
@@ -339,7 +438,8 @@ export async function confirmCalendarEvent(formData: FormData) {
   await sendStoredConfirmation(
     action,
     getGoogleMeetUrl(event),
-    actionId
+    actionId,
+    "calendar"
   );
 
   revalidatePath("/dashboard/approvals");
@@ -471,7 +571,8 @@ export async function confirmZoomMeeting(formData: FormData) {
   await sendStoredConfirmation(
     action,
     zoomMeeting.join_url,
-    actionId
+    actionId,
+    "zoom"
   );
 
   revalidatePath("/dashboard/approvals");

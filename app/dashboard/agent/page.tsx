@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   addRule,
   deleteRule,
@@ -14,6 +14,7 @@ import {
   DEFAULT_AI_MODEL,
   type AIProvider,
 } from "@/lib/agent/models";
+import { GmailIcon, CalendarIcon, ZoomIcon } from "@/lib/integrations/icons";
 
 type PermissionLevel =
   | "denied"
@@ -110,72 +111,13 @@ const ZOOM_ACTIONS = [
   },
 ];
 
-function PermissionBadge({
-  level,
-}: {
-  level: PermissionLevel;
-}) {
-  if (level === "allowed") {
-    return (
-      <span
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-          padding: "5px 10px",
-          borderRadius: 999,
-          background: "#ecfdf3",
-          color: "#027a48",
-          fontSize: 12,
-          fontWeight: 600,
-        }}
-      >
-        <span>✓</span>
-        Automatic
-      </span>
-    );
-  }
-
-  if (level === "approval_required") {
-    return (
-      <span
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-          padding: "5px 10px",
-          borderRadius: 999,
-          background: "#fff7ed",
-          color: "#c2410c",
-          fontSize: 12,
-          fontWeight: 600,
-        }}
-      >
-        <span>●</span>
-        Approval required
-      </span>
-    );
-  }
-
-  return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 6,
-        padding: "5px 10px",
-        borderRadius: 999,
-        background: "#f4f4f5",
-        color: "#52525b",
-        fontSize: 12,
-        fontWeight: 600,
-      }}
-    >
-      <span>×</span>
-      Never
-    </span>
-  );
-}
+/**
+ * PermissionBadge was removed as part of the compact row redesign —
+ * PermissionSelect's own option text ("Automatic"/"Approval required"/
+ * "Never") already communicates the level, so the separate badge row
+ * underneath each item was redundant vertical space. See PermissionRow
+ * below for the new compact layout.
+ */
 
 function PermissionSelect({
   action,
@@ -206,7 +148,6 @@ function PermissionSelect({
 
     setSelectedLevel(newLevel);
     setSaving(true);
-    onError("");
 
     try {
       const formData = new FormData();
@@ -237,12 +178,13 @@ function PermissionSelect({
       onChange={handleChange}
       disabled={saving}
       style={{
-        minWidth: 180,
-        padding: "9px 34px 9px 12px",
+        flexShrink: 0,
+        minWidth: 160,
+        padding: "7px 30px 7px 10px",
         border: "1px solid #d4d4d8",
         borderRadius: 8,
         background: saving ? "#f4f4f5" : "#fff",
-        fontSize: 13,
+        fontSize: 12.5,
         fontWeight: 500,
         color: "#18181b",
         cursor: saving ? "wait" : "pointer",
@@ -349,6 +291,225 @@ function Modal({
   );
 }
 
+/**
+ * ------------------------------------------------------------
+ * Toast notifications
+ * ------------------------------------------------------------
+ *
+ * Replaces the previous single `message` banner, which rendered at
+ * the very top of the page (right under the header) — if the user had
+ * scrolled down (e.g. to the Rules or Knowledge section, common on
+ * this long page) a "Permission saved"/"Model updated" confirmation
+ * could render entirely off-screen above the viewport, effectively
+ * invisible.
+ *
+ * Toasts instead render fixed to the bottom of the viewport (not the
+ * page — position: fixed, so scroll position never matters), stacked
+ * bottom-up, wide-but-short, and self-dismiss after a few seconds.
+ * `zIndex: 2000` keeps them above the existing Modal (zIndex 1000) and
+ * everything else on the page.
+ */
+
+type ToastTone = "success" | "error" | "info";
+
+type ToastItem = {
+  id: number;
+  text: string;
+  tone: ToastTone;
+};
+
+const TOAST_DURATION_MS = 3500;
+
+const TOAST_TONE_STYLES: Record<
+  ToastTone,
+  { background: string; border: string; color: string }
+> = {
+  success: {
+    background: "#f0fdf4",
+    border: "#bbf7d0",
+    color: "#166534",
+  },
+  error: {
+    background: "#fef2f2",
+    border: "#fecaca",
+    color: "#b91c1c",
+  },
+  info: {
+    background: "#18181b",
+    border: "#27272a",
+    color: "#fafafa",
+  },
+};
+
+function ToastStack({
+  toasts,
+  onDismiss,
+}: {
+  toasts: ToastItem[];
+  onDismiss: (id: number) => void;
+}) {
+  if (toasts.length === 0) {
+    return null;
+  }
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        left: "50%",
+        bottom: 22,
+        transform: "translateX(-50%)",
+        zIndex: 2000,
+        display: "flex",
+        flexDirection: "column-reverse",
+        gap: 8,
+        width: "min(92vw, 460px)",
+        pointerEvents: "none",
+      }}
+    >
+      {toasts.map((toast) => {
+        const tone = TOAST_TONE_STYLES[toast.tone];
+
+        return (
+          <div
+            key={toast.id}
+            onClick={() => onDismiss(toast.id)}
+            role="status"
+            style={{
+              pointerEvents: "auto",
+              cursor: "pointer",
+              padding: "12px 16px",
+              borderRadius: 12,
+              background: tone.background,
+              border: `1px solid ${tone.border}`,
+              color: tone.color,
+              fontSize: 13,
+              fontWeight: 600,
+              lineHeight: 1.4,
+              boxShadow: "0 8px 24px rgba(0,0,0,0.14)",
+              animation: "toast-in 0.18s ease-out",
+            }}
+          >
+            {toast.text}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * ------------------------------------------------------------
+ * Connection-gated permission rows
+ * ------------------------------------------------------------
+ *
+ * A permission for an integration that isn't actually connected is
+ * meaningless to change — the backend already enforces this (see
+ * lib/agent/permissions.ts's resolveCalendarWriteCapability/
+ * canReadCalendar/resolveZoomCapability, all of which require a real
+ * connection before honoring any configured level at all). This
+ * mirrors that same rule in the UI: a row for a disconnected
+ * integration is faded and its control replaced with a static,
+ * non-interactive "Not connected" pill linking to Settings, rather
+ * than a dropdown the user could click that wouldn't actually do
+ * anything different on the backend.
+ */
+
+function ConnectRequiredPill() {
+  return (
+    <a
+      href="/dashboard/settings"
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "7px 12px",
+        borderRadius: 999,
+        border: "1px solid #e4e4e7",
+        background: "#f4f4f5",
+        color: "#71717a",
+        fontSize: 12,
+        fontWeight: 600,
+        textDecoration: "none",
+        whiteSpace: "nowrap",
+      }}
+    >
+      Not connected
+    </a>
+  );
+}
+
+function PermissionRow({
+  icon,
+  action,
+  level,
+  connected,
+  isFirst,
+  onSaved,
+  onError,
+}: {
+  icon: React.ReactNode;
+  action: { key: string; label: string; description: string };
+  level: PermissionLevel;
+  connected: boolean;
+  isFirst: boolean;
+  onSaved: (action: string, level: PermissionLevel) => void;
+  onError: (message: string) => void;
+}) {
+  return (
+    <div
+      title={action.description}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        padding: "10px 14px",
+        borderTop: isFirst ? "none" : "1px solid #f0f0f1",
+        opacity: connected ? 1 : 0.55,
+      }}
+    >
+      <div style={{ flexShrink: 0, display: "flex" }}>{icon}</div>
+
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div
+          style={{
+            fontSize: 13.5,
+            fontWeight: 600,
+            lineHeight: 1.3,
+          }}
+        >
+          {action.label}
+        </div>
+
+        <div
+          style={{
+            fontSize: 11.5,
+            color: "#a1a1aa",
+            lineHeight: 1.35,
+            marginTop: 1,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {action.description}
+        </div>
+      </div>
+
+      {connected ? (
+        <PermissionSelect
+          action={action.key}
+          level={level}
+          onSaved={onSaved}
+          onError={onError}
+        />
+      ) : (
+        <ConnectRequiredPill />
+      )}
+    </div>
+  );
+}
+
 export default function AgentPage() {
   const [instructions, setInstructions] = useState("");
 
@@ -367,6 +528,12 @@ export default function AgentPage() {
 
   const [loading, setLoading] = useState(true);
 
+  const [connections, setConnections] = useState({
+    gmail: false,
+    calendar: false,
+    zoom: false,
+  });
+
   const [newRule, setNewRule] = useState("");
   const [savingRule, setSavingRule] = useState(false);
 
@@ -384,7 +551,24 @@ export default function AgentPage() {
     useState(false);
   const [uploading, setUploading] = useState(false);
 
-  const [message, setMessage] = useState("");
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const toastIdRef = useRef(0);
+
+  function pushToast(text: string, tone: ToastTone = "info") {
+    if (!text) return;
+
+    const id = ++toastIdRef.current;
+
+    setToasts((current) => [...current, { id, text, tone }]);
+
+    setTimeout(() => {
+      setToasts((current) => current.filter((toast) => toast.id !== id));
+    }, TOAST_DURATION_MS);
+  }
+
+  function dismissToast(id: number) {
+    setToasts((current) => current.filter((toast) => toast.id !== id));
+  }
 
   /*
    * Knowledge detail dialog state.
@@ -421,12 +605,18 @@ export default function AgentPage() {
         setPermissions(data.permissions ?? []);
         setAiProvider(data.aiProvider ?? DEFAULT_AI_PROVIDER);
         setAiModel(data.aiModel ?? DEFAULT_AI_MODEL);
+        setConnections({
+          gmail: Boolean(data.connections?.gmail),
+          calendar: Boolean(data.connections?.calendar),
+          zoom: Boolean(data.connections?.zoom),
+        });
       } catch (error) {
         console.error(error);
-        setMessage(
+        pushToast(
           error instanceof Error
             ? error.message
-            : "Failed to load agent settings."
+            : "Failed to load agent settings.",
+          "error"
         );
       } finally {
         setLoading(false);
@@ -454,10 +644,9 @@ export default function AgentPage() {
     } catch (error) {
       console.error(error);
 
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : "Failed to load knowledge."
+      pushToast(
+        error instanceof Error ? error.message : "Failed to load knowledge.",
+        "error"
       );
     } finally {
       setKnowledgeLoading(false);
@@ -527,11 +716,13 @@ export default function AgentPage() {
       ];
     });
 
-    setMessage("Permission saved.");
+    pushToast("Permission saved.", "success");
   }
 
   function handlePermissionError(message: string) {
-    setMessage(message);
+    if (message) {
+      pushToast(message, "error");
+    }
   }
 
   async function handleInstructionsSubmit(
@@ -546,12 +737,13 @@ export default function AgentPage() {
     try {
       await saveInstructions(formData);
 
-      setMessage("Instructions saved.");
+      pushToast("Instructions saved.", "success");
     } catch (error) {
-      setMessage(
+      pushToast(
         error instanceof Error
           ? error.message
-          : "Failed to save instructions."
+          : "Failed to save instructions.",
+        "error"
       );
     }
   }
@@ -578,15 +770,16 @@ export default function AgentPage() {
 
       await saveModelSelection(formData);
 
-      setMessage("Model updated.");
+      pushToast("Model updated.", "success");
     } catch (error) {
       setAiProvider(previousProvider);
       setAiModel(previousModel);
 
-      setMessage(
+      pushToast(
         error instanceof Error
           ? error.message
-          : "Failed to update model."
+          : "Failed to update model.",
+        "error"
       );
     } finally {
       setSavingModel(false);
@@ -616,12 +809,13 @@ export default function AgentPage() {
 
       setNewRule("");
 
-      setMessage("Rule added.");
+      pushToast("Rule added.", "success");
     } catch (error) {
-      setMessage(
+      pushToast(
         error instanceof Error
           ? error.message
-          : "Failed to add rule."
+          : "Failed to add rule.",
+        "error"
       );
     } finally {
       setSavingRule(false);
@@ -650,20 +844,22 @@ export default function AgentPage() {
         setSelectedRule(null);
       }
 
-      setMessage("Rule removed.");
+      pushToast("Rule removed.", "success");
     } catch (error) {
-      setMessage(
+      pushToast(
         error instanceof Error
           ? error.message
-          : "Failed to remove rule."
+          : "Failed to remove rule.",
+        "error"
       );
     }
   }
 
   async function handleManualKnowledge() {
     if (!title.trim() || !content.trim()) {
-      setMessage(
-        "Please enter both a title and the knowledge."
+      pushToast(
+        "Please enter both a title and the knowledge.",
+        "error"
       );
 
       return;
@@ -697,14 +893,15 @@ export default function AgentPage() {
       setTitle("");
       setContent("");
 
-      setMessage("Knowledge added successfully.");
+      pushToast("Knowledge added successfully.", "success");
 
       await loadKnowledge();
     } catch (error) {
-      setMessage(
+      pushToast(
         error instanceof Error
           ? error.message
-          : "Failed to save knowledge."
+          : "Failed to save knowledge.",
+        "error"
       );
     } finally {
       setSavingKnowledge(false);
@@ -719,7 +916,6 @@ export default function AgentPage() {
     if (!file) return;
 
     setUploading(true);
-    setMessage("");
 
     try {
       const formData = new FormData();
@@ -742,18 +938,20 @@ export default function AgentPage() {
         );
       }
 
-      setMessage(
-        `Uploaded successfully. ${data.chunksCreated} knowledge chunks created.`
+      pushToast(
+        `Uploaded successfully. ${data.chunksCreated} knowledge chunks created.`,
+        "success"
       );
 
       await loadKnowledge();
 
       event.target.value = "";
     } catch (error) {
-      setMessage(
+      pushToast(
         error instanceof Error
           ? error.message
-          : "Upload failed."
+          : "Upload failed.",
+        "error"
       );
     } finally {
       setUploading(false);
@@ -793,12 +991,13 @@ export default function AgentPage() {
 
       await loadKnowledge();
 
-      setMessage("Knowledge deleted.");
+      pushToast("Knowledge deleted.", "success");
     } catch (error) {
-      setMessage(
+      pushToast(
         error instanceof Error
           ? error.message
-          : "Failed to delete knowledge."
+          : "Failed to delete knowledge.",
+        "error"
       );
     }
   }
@@ -984,22 +1183,6 @@ export default function AgentPage() {
           </p>
         </header>
 
-        {message && (
-          <div
-            style={{
-              marginBottom: 20,
-              padding: "12px 15px",
-              borderRadius: 10,
-              background: "#f0fdf4",
-              border: "1px solid #bbf7d0",
-              color: "#166534",
-              fontSize: 14,
-            }}
-          >
-            {message}
-          </div>
-        )}
-
         {/* Instructions */}
         <section
           style={{
@@ -1178,8 +1361,8 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
             background: "#fff",
             border: "1px solid #e4e4e7",
             borderRadius: 16,
-            padding: 26,
-            marginBottom: 20,
+            padding: 20,
+            marginBottom: 14,
             boxShadow:
               "0 1px 2px rgba(0,0,0,0.03)",
           }}
@@ -1197,70 +1380,50 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
               overflow: "hidden",
             }}
           >
-            {EMAIL_ACTIONS.map((action, index) => {
-              const level = getPermission(action.key);
-
-              return (
-                <div
-                  key={action.key}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: 24,
-                    padding: "17px 18px",
-                    borderTop:
-                      index === 0
-                        ? "none"
-                        : "1px solid #f0f0f1",
-                  }}
-                >
-                  <div style={{ minWidth: 0 }}>
-                    <div
-                      style={{
-                        fontSize: 14,
-                        fontWeight: 600,
-                        marginBottom: 4,
-                      }}
-                    >
-                      {action.label}
-                    </div>
-
-                    <div
-                      style={{
-                        fontSize: 13,
-                        color: "#71717a",
-                        lineHeight: 1.45,
-                      }}
-                    >
-                      {action.description}
-                    </div>
-
-                    <div style={{ marginTop: 8 }}>
-                      <PermissionBadge level={level} />
-                    </div>
-                  </div>
-
-                  <PermissionSelect
-                    action={action.key}
-                    level={level}
-                    onSaved={handlePermissionSaved}
-                    onError={handlePermissionError}
-                  />
-                </div>
-              );
-            })}
+            {EMAIL_ACTIONS.map((action, index) => (
+              <PermissionRow
+                key={action.key}
+                icon={<GmailIcon size={20} />}
+                action={action}
+                level={getPermission(action.key)}
+                connected={connections.gmail}
+                isFirst={index === 0}
+                onSaved={handlePermissionSaved}
+                onError={handlePermissionError}
+              />
+            ))}
           </div>
+
+          {!connections.gmail && (
+            <div
+              style={{
+                marginTop: 10,
+                padding: "9px 12px",
+                borderRadius: 9,
+                background: "#fef2f2",
+                border: "1px solid #fecaca",
+                color: "#b91c1c",
+                fontSize: 12,
+                lineHeight: 1.5,
+              }}
+            >
+              Connect Gmail in{" "}
+              <a href="/dashboard/settings" style={{ color: "#b91c1c", fontWeight: 600 }}>
+                Settings
+              </a>{" "}
+              to enable these permissions.
+            </div>
+          )}
 
           <div
             style={{
-              marginTop: 15,
-              padding: 13,
+              marginTop: 10,
+              padding: 11,
               borderRadius: 10,
               background: "#fafafa",
               color: "#71717a",
-              fontSize: 12,
-              lineHeight: 1.55,
+              fontSize: 11.5,
+              lineHeight: 1.5,
             }}
           >
             <strong style={{ color: "#52525b" }}>
@@ -1277,8 +1440,8 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
             background: "#fff",
             border: "1px solid #e4e4e7",
             borderRadius: 16,
-            padding: 26,
-            marginBottom: 20,
+            padding: 20,
+            marginBottom: 14,
             boxShadow:
               "0 1px 2px rgba(0,0,0,0.03)",
           }}
@@ -1296,70 +1459,50 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
               overflow: "hidden",
             }}
           >
-            {CALENDAR_ACTIONS.map((action, index) => {
-              const level = getPermission(action.key);
-
-              return (
-                <div
-                  key={action.key}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: 24,
-                    padding: "17px 18px",
-                    borderTop:
-                      index === 0
-                        ? "none"
-                        : "1px solid #f0f0f1",
-                  }}
-                >
-                  <div style={{ minWidth: 0 }}>
-                    <div
-                      style={{
-                        fontSize: 14,
-                        fontWeight: 600,
-                        marginBottom: 4,
-                      }}
-                    >
-                      {action.label}
-                    </div>
-
-                    <div
-                      style={{
-                        fontSize: 13,
-                        color: "#71717a",
-                        lineHeight: 1.45,
-                      }}
-                    >
-                      {action.description}
-                    </div>
-
-                    <div style={{ marginTop: 8 }}>
-                      <PermissionBadge level={level} />
-                    </div>
-                  </div>
-
-                  <PermissionSelect
-                    action={action.key}
-                    level={level}
-                    onSaved={handlePermissionSaved}
-                    onError={handlePermissionError}
-                  />
-                </div>
-              );
-            })}
+            {CALENDAR_ACTIONS.map((action, index) => (
+              <PermissionRow
+                key={action.key}
+                icon={<CalendarIcon size={20} />}
+                action={action}
+                level={getPermission(action.key)}
+                connected={connections.calendar}
+                isFirst={index === 0}
+                onSaved={handlePermissionSaved}
+                onError={handlePermissionError}
+              />
+            ))}
           </div>
+
+          {!connections.calendar && (
+            <div
+              style={{
+                marginTop: 10,
+                padding: "9px 12px",
+                borderRadius: 9,
+                background: "#fef2f2",
+                border: "1px solid #fecaca",
+                color: "#b91c1c",
+                fontSize: 12,
+                lineHeight: 1.5,
+              }}
+            >
+              Grant Calendar access in{" "}
+              <a href="/dashboard/settings" style={{ color: "#b91c1c", fontWeight: 600 }}>
+                Settings
+              </a>{" "}
+              to enable these permissions.
+            </div>
+          )}
 
           <div
             style={{
-              marginTop: 15,
-              padding: 13,
+              marginTop: 10,
+              padding: 11,
               borderRadius: 10,
               background: "#fafafa",
               color: "#71717a",
-              fontSize: 12,
-              lineHeight: 1.55,
+              fontSize: 11.5,
+              lineHeight: 1.5,
             }}
           >
             <strong style={{ color: "#52525b" }}>
@@ -1376,8 +1519,8 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
             background: "#fff",
             border: "1px solid #e4e4e7",
             borderRadius: 16,
-            padding: 26,
-            marginBottom: 20,
+            padding: 20,
+            marginBottom: 14,
             boxShadow:
               "0 1px 2px rgba(0,0,0,0.03)",
           }}
@@ -1395,70 +1538,50 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
               overflow: "hidden",
             }}
           >
-            {ZOOM_ACTIONS.map((action, index) => {
-              const level = getPermission(action.key);
-
-              return (
-                <div
-                  key={action.key}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: 24,
-                    padding: "17px 18px",
-                    borderTop:
-                      index === 0
-                        ? "none"
-                        : "1px solid #f0f0f1",
-                  }}
-                >
-                  <div style={{ minWidth: 0 }}>
-                    <div
-                      style={{
-                        fontSize: 14,
-                        fontWeight: 600,
-                        marginBottom: 4,
-                      }}
-                    >
-                      {action.label}
-                    </div>
-
-                    <div
-                      style={{
-                        fontSize: 13,
-                        color: "#71717a",
-                        lineHeight: 1.45,
-                      }}
-                    >
-                      {action.description}
-                    </div>
-
-                    <div style={{ marginTop: 8 }}>
-                      <PermissionBadge level={level} />
-                    </div>
-                  </div>
-
-                  <PermissionSelect
-                    action={action.key}
-                    level={level}
-                    onSaved={handlePermissionSaved}
-                    onError={handlePermissionError}
-                  />
-                </div>
-              );
-            })}
+            {ZOOM_ACTIONS.map((action, index) => (
+              <PermissionRow
+                key={action.key}
+                icon={<ZoomIcon size={20} />}
+                action={action}
+                level={getPermission(action.key)}
+                connected={connections.zoom}
+                isFirst={index === 0}
+                onSaved={handlePermissionSaved}
+                onError={handlePermissionError}
+              />
+            ))}
           </div>
+
+          {!connections.zoom && (
+            <div
+              style={{
+                marginTop: 10,
+                padding: "9px 12px",
+                borderRadius: 9,
+                background: "#fef2f2",
+                border: "1px solid #fecaca",
+                color: "#b91c1c",
+                fontSize: 12,
+                lineHeight: 1.5,
+              }}
+            >
+              Connect Zoom in{" "}
+              <a href="/dashboard/settings" style={{ color: "#b91c1c", fontWeight: 600 }}>
+                Settings
+              </a>{" "}
+              to enable this permission.
+            </div>
+          )}
 
           <div
             style={{
-              marginTop: 15,
-              padding: 13,
+              marginTop: 10,
+              padding: 11,
               borderRadius: 10,
               background: "#fafafa",
               color: "#71717a",
-              fontSize: 12,
-              lineHeight: 1.55,
+              fontSize: 11.5,
+              lineHeight: 1.5,
             }}
           >
             <strong style={{ color: "#52525b" }}>
@@ -1468,7 +1591,7 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
             <strong style={{ color: "#52525b" }}>
               Approval required
             </strong>{" "}
-            has it propose a meeting for you to confirm first. This requires a connected Zoom account.
+            has it propose a meeting for you to confirm first.
           </div>
         </section>
 
@@ -2479,7 +2602,21 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
             transform: rotate(360deg);
           }
         }
+
+        @keyframes toast-in {
+          from {
+            opacity: 0;
+            transform: translateY(8px);
+          }
+
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
       `}</style>
+
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </main>
   );
 }

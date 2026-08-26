@@ -124,7 +124,20 @@ export function deriveAvailableCapabilities(
 ): CapabilityKey[] {
   const capabilities: CapabilityKey[] = [CAPABILITY.GMAIL];
 
-  if (permissions.calendarWriteCapability !== "none") {
+  /**
+   * "calendar" covers both the write tools (create/propose_calendar_event)
+   * and the read-only check_calendar_availability tool. Previously this
+   * only checked calendarWriteCapability, which meant a tenant with
+   * calendar.read allowed but calendar.write denied/approval-only-without-write
+   * would never even have "calendar" in the available set — so
+   * check_calendar_availability (gated on calendarReadAllowed, not
+   * calendarWriteCapability) could never be routed in for them even
+   * though they're independently permitted to use it.
+   */
+  if (
+    permissions.calendarWriteCapability !== "none" ||
+    permissions.calendarReadAllowed
+  ) {
     capabilities.push(CAPABILITY.CALENDAR);
   }
 

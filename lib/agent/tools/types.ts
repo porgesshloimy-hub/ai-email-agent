@@ -109,4 +109,24 @@ export interface ToolDefinition {
    */
   terminal?: boolean;
   createsApproval?: boolean;
+
+  /**
+   * True only for tools whose successful execution means the
+   * real-world action for this `capability` actually, synchronously
+   * happened this run (e.g. create_zoom_meeting, create_calendar_event
+   * — a real Zoom meeting or Calendar event now exists). NOT set for
+   * propose_* tools (they only queue an approval — nothing has
+   * actually happened yet) or for tools with no external side effect
+   * (create_draft, send_reply, check_calendar_availability,
+   * no_action_required, etc.).
+   *
+   * Consumed by lib/agent/run.ts to build a per-run
+   * `completedCapabilities` ledger, which lib/agent/grounding-guard.ts
+   * then checks outgoing reply text against — see that file's module
+   * comment for why this is a ledger-driven check rather than a
+   * per-connector keyword list. A future connector's real-completion
+   * tool (e.g. a Drive "upload_file" tool) picks this up automatically
+   * just by setting this flag; nothing else needs to change.
+   */
+  marksCapabilityCompleted?: boolean;
 }

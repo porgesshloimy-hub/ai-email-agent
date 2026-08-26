@@ -1,4 +1,5 @@
 import { createServiceSupabase } from "@/lib/supabase/server";
+import { tenantHasCalendarAccess } from "@/lib/google/authClient";
 import type {
   AgentAction,
   GmailAction,
@@ -110,10 +111,33 @@ export async function resolveSendCapability(
  * allowed            -> agent may create events directly
  * approval_required  -> agent may propose an event for approval
  * none               -> no calendar-writing tool is exposed
+ *
+ * BUG FIX: this previously only checked the configured permission
+ * level, unlike resolveZoomCapability just below, which correctly
+ * requires an actual connection before honoring the permission level
+ * at all ("A Zoom permission by itself is not enough"). The same is
+ * true here — a tenant could have calendar.write set to "allowed" in
+ * Settings while never having connected Google Calendar at all (or
+ * having granted Gmail but declined the Calendar scope specifically —
+ * see calendar_scope_granted), and this function would still report
+ * "write", so create_calendar_event/propose_calendar_event would be
+ * offered to the model with no real Calendar access behind them —
+ * exactly the kind of "tool offered but not actually usable" gap that
+ * makes hallucinated-completion claims more likely and wastes a full
+ * agent step when the underlying API call then fails.
+ * tenantHasCalendarAccess() (lib/google/authClient.ts) already existed
+ * for exactly this check but was never actually called anywhere in the
+ * app — this wires it in, mirroring resolveZoomCapability's pattern.
  */
 export async function resolveCalendarWriteCapability(
   tenantId: string
 ): Promise<"write" | "propose_only" | "none"> {
+  const hasCalendarAccess = await tenantHasCalendarAccess(tenantId);
+
+  if (!hasCalendarAccess) {
+    return "none";
+  }
+
   const writeLevel = await getPermissionLevel(
     tenantId,
     "calendar.write"
@@ -206,10 +230,20 @@ export async function resolveZoomCapability(
  *
  * Reading calendar information is not itself an approval-gated
  * action. Only calendar writes are.
+ *
+ * Same connection-check fix as resolveCalendarWriteCapability just
+ * above, for the same reason: a configured permission level with no
+ * actual Calendar connection behind it is not real access.
  */
 export async function canReadCalendar(
   tenantId: string
 ): Promise<boolean> {
+  const hasCalendarAccess = await tenantHasCalendarAccess(tenantId);
+
+  if (!hasCalendarAccess) {
+    return false;
+  }
+
   const level = await getPermissionLevel(
     tenantId,
     "calendar.read"

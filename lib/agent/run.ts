@@ -36,6 +36,7 @@ import {
   stripKnownSafePlaceholders,
   detectHallucinatedContent,
 } from "@/lib/agent/content-safety";
+import { resolveCategory, describeResolvedCategory } from "@/lib/agent/tools/categories";
 import OpenAI from "openai";
 
 /**
@@ -261,12 +262,24 @@ export async function processIncomingEmail(
     } = await supabase
       .from("agent_configs")
       .select(
-        "custom_instructions, rules, ai_provider, ai_model"
+        "custom_instructions, rules, ai_provider, ai_model, tool_preferences"
       )
       .eq(
         "tenant_id",
         email.tenantId
       )
+      .single();
+
+    /**
+     * Business's own operating timezone (migration 007) — used to
+     * anchor "today"/"tomorrow" resolution below instead of the
+     * previously-hardcoded UTC. See lib/agent/date-context.ts's module
+     * comment for the full history of why this exists.
+     */
+    const { data: tenantRow } = await supabase
+      .from("tenants")
+      .select("timezone")
+      .eq("id", email.tenantId)
       .single();
 
     /**
@@ -487,6 +500,31 @@ export async function processIncomingEmail(
 
     /**
      * --------------------------------------------------------
+     * TOOL CATEGORIES / ALTERNATIVES
+     * --------------------------------------------------------
+     *
+     * See lib/agent/tools/categories.ts for the full rationale. This
+     * resolves, for this specific tenant right now, which providers in
+     * each category (currently just "video_meeting": Zoom vs. Google
+     * Meet) are actually available, and which one to default to —
+     * either the tenant's saved preference (agent_configs.tool_preferences)
+     * or the category's documented sensible default.
+     */
+    const videoMeetingCategory = resolveCategory(
+      "video_meeting",
+      {
+        zoom: zoomCapability !== "none",
+        calendar: calendarWriteCapability !== "none",
+      },
+      (agentConfig?.tool_preferences ?? {}) as Record<string, string>
+    );
+
+    const videoMeetingGuidance = videoMeetingCategory
+      ? describeResolvedCategory(videoMeetingCategory)
+      : "";
+
+    /**
+     * --------------------------------------------------------
      * SYSTEM PROMPT + MESSAGE HISTORY
      * --------------------------------------------------------
      */
@@ -498,7 +536,7 @@ export async function processIncomingEmail(
         content: [
           "You are the email assistant for this business.",
 
-          buildCurrentDateContext(),
+          buildCurrentDateContext(tenantRow?.timezone),
 
           "<custom_instructions>",
           agentConfig?.custom_instructions ?? "",
@@ -539,11 +577,9 @@ export async function processIncomingEmail(
           }. Calendar read access (checking availability) is ${
             calendarReadAllowed ? "available" : "NOT available"
           }.`,
-          "Zoom availability is determined by the status above, not by guessing.",
-          "If create_zoom_meeting or propose_zoom_meeting is available, the business has a connected Zoom account and you are authorized to create or propose Zoom meetings.",
-          "If neither tool is available, you do not have authority or capability to create a Zoom meeting. Never invent a Zoom link or claim that the business has Zoom connected.",
           "Creating a Zoom meeting and creating a calendar event are separate actions. A Zoom meeting creates the actual Zoom meeting and join URL. A calendar event places the meeting on the calendar. When both are needed, use both tools in the appropriate sequence.",
           "When the create_zoom_meeting tool succeeds, its result contains the real Zoom join URL. Use that result rather than inventing or constructing a Zoom URL yourself.",
+          videoMeetingGuidance,
           "</integrations>",
 
           "<action_rules>",

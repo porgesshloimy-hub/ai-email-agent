@@ -7,6 +7,7 @@ import {
   saveInstructions,
   saveModelSelection,
   savePermission,
+  saveToolPreference,
 } from "./actions";
 import {
   MODEL_OPTIONS_IN_DISPLAY_ORDER,
@@ -15,6 +16,7 @@ import {
   type AIProvider,
 } from "@/lib/agent/models";
 import { EmailIcon, CalendarIcon, ZoomIcon } from "@/lib/integrations/icons";
+import { TOOL_CATEGORIES } from "@/lib/agent/tools/categories";
 
 type PermissionLevel =
   | "denied"
@@ -533,6 +535,9 @@ export default function AgentPage() {
     zoom: false,
   });
 
+  const [toolPreferences, setToolPreferences] = useState<Record<string, string>>({});
+  const [savingPreference, setSavingPreference] = useState<string | null>(null);
+
   const [newRule, setNewRule] = useState("");
   const [savingRule, setSavingRule] = useState(false);
 
@@ -609,6 +614,11 @@ export default function AgentPage() {
           calendar: Boolean(data.connections?.calendar),
           zoom: Boolean(data.connections?.zoom),
         });
+        setToolPreferences(
+          data.toolPreferences && typeof data.toolPreferences === "object"
+            ? data.toolPreferences
+            : {}
+        );
       } catch (error) {
         console.error(error);
         pushToast(
@@ -721,6 +731,36 @@ export default function AgentPage() {
   function handlePermissionError(message: string) {
     if (message) {
       pushToast(message, "error");
+    }
+  }
+
+  async function handleToolPreferenceChange(
+    categoryId: string,
+    providerId: string
+  ) {
+    const previous = toolPreferences[categoryId] ?? "";
+
+    // Optimistic update, same pattern as handlePermissionSaved.
+    setToolPreferences((current) => ({ ...current, [categoryId]: providerId }));
+    setSavingPreference(categoryId);
+
+    const formData = new FormData();
+    formData.set("categoryId", categoryId);
+    formData.set("providerId", providerId);
+
+    try {
+      await saveToolPreference(formData);
+      pushToast("Preference saved.", "success");
+    } catch (error) {
+      // Roll back on failure so the select doesn't show a preference
+      // that wasn't actually persisted.
+      setToolPreferences((current) => ({ ...current, [categoryId]: previous }));
+      pushToast(
+        error instanceof Error ? error.message : "Failed to save preference.",
+        "error"
+      );
+    } finally {
+      setSavingPreference(null);
     }
   }
 
@@ -1593,6 +1633,82 @@ Answer straightforward pricing questions automatically. Be friendly and concise.
             has it propose a meeting for you to confirm first.
           </div>
         </section>
+
+        {/* Tool preferences ("alternatives") */}
+        {TOOL_CATEGORIES.map((category) => {
+          const availableProviders = category.providers.filter(
+            (provider) =>
+              connections[provider.capability as keyof typeof connections]
+          );
+
+          /**
+           * Nothing to choose between unless at least two options are
+           * actually connected — matches lib/agent/tools/categories.ts's
+           * resolveCategory: a lone available provider needs no
+           * preference (it's the only option), and nothing available
+           * needs no preference either (there's no default to set).
+           */
+          if (availableProviders.length < 2) {
+            return null;
+          }
+
+          const currentValue = toolPreferences[category.id] ?? "";
+
+          return (
+            <section
+              key={category.id}
+              style={{
+                background: "#fff",
+                border: "1px solid #e4e4e7",
+                borderRadius: 16,
+                padding: 20,
+                marginBottom: 14,
+                boxShadow: "0 1px 2px rgba(0,0,0,0.03)",
+              }}
+            >
+              <SectionHeader
+                eyebrow="Preferences"
+                title={category.label}
+                description={`This business has more than one way to provide ${category.customerFacingDescription}. Choose which one the agent should use by default when a customer doesn't ask for a specific one.`}
+              />
+
+              <select
+                value={currentValue}
+                disabled={savingPreference === category.id}
+                onChange={(event) =>
+                  handleToolPreferenceChange(category.id, event.target.value)
+                }
+                style={{
+                  width: "100%",
+                  padding: "9px 12px",
+                  border: "1px solid #d4d4d8",
+                  borderRadius: 8,
+                  background: savingPreference === category.id ? "#f4f4f5" : "#fff",
+                  fontSize: 13,
+                  fontWeight: 500,
+                  color: "#18181b",
+                  cursor: savingPreference === category.id ? "wait" : "pointer",
+                  opacity: savingPreference === category.id ? 0.7 : 1,
+                }}
+              >
+                <option value="">
+                  No preference — use the sensible default
+                  {(() => {
+                    const fallback = category.providers.find(
+                      (p) => p.id === category.defaultProvider
+                    );
+                    return fallback ? ` (${fallback.label})` : "";
+                  })()}
+                </option>
+                {availableProviders.map((provider) => (
+                  <option key={provider.id} value={provider.id}>
+                    Prefer {provider.label}
+                  </option>
+                ))}
+              </select>
+            </section>
+          );
+        })}
 
         {/* Rules */}
         <section

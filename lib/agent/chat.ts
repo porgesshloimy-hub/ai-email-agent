@@ -19,6 +19,7 @@ import {
 import { getToolsForSurface, findToolForSurface } from "@/lib/agent/tools";
 import type { ToolContext } from "@/lib/agent/tools";
 import { buildCurrentDateContext } from "@/lib/agent/date-context";
+import { resolveCategory, describeResolvedCategory } from "@/lib/agent/tools/categories";
 
 /**
  * Handles a single message from the business owner via Google Chat. This is
@@ -38,13 +39,13 @@ export async function handleChatMessage(tenantId: string, messageText: string): 
 
   const { data: tenant } = await supabase
     .from("tenants")
-    .select("business_name, business_description")
+    .select("business_name, business_description, timezone")
     .eq("id", tenantId)
     .single();
 
   const { data: agentConfig } = await supabase
     .from("agent_configs")
-    .select("custom_instructions, rules, ai_provider, ai_model")
+    .select("custom_instructions, rules, ai_provider, ai_model, tool_preferences")
     .eq("tenant_id", tenantId)
     .single();
 
@@ -76,6 +77,26 @@ export async function handleChatMessage(tenantId: string, messageText: string): 
 
   const calendarReadAllowed = await canReadCalendar(tenantId);
   const calendarWriteCapability = await resolveCalendarWriteCapability(tenantId);
+
+  /**
+   * See lib/agent/tools/categories.ts. Chat has no Zoom tool at all
+   * (zoomCapability is always "none" for this surface, below), so this
+   * only ever resolves to Google Meet-or-nothing today — but it's
+   * computed the same way as the email pipeline so it stays correct
+   * automatically if a Zoom chat tool is ever added.
+   */
+  const videoMeetingCategory = resolveCategory(
+    "video_meeting",
+    {
+      zoom: false,
+      calendar: calendarWriteCapability !== "none",
+    },
+    (agentConfig?.tool_preferences ?? {}) as Record<string, string>
+  );
+
+  const videoMeetingGuidance = videoMeetingCategory
+    ? describeResolvedCategory(videoMeetingCategory)
+    : "";
 
 
   // Pull a quick snapshot of recent activity so "what's pending" type
@@ -119,11 +140,12 @@ export async function handleChatMessage(tenantId: string, messageText: string): 
       content: [
         `You are the AI assistant for ${tenant?.business_name ?? "this business"}, talking directly with the ` +
           `business owner over Google Chat (not a customer). Be concise — this is a chat conversation, not email.`,
-        buildCurrentDateContext(),
+        buildCurrentDateContext(tenant?.timezone),
         tenant?.business_description ?? "",
         agentConfig?.custom_instructions ?? "",
         `There are currently ${pendingEmailCount ?? 0} email drafts awaiting the owner's review.`,
         calendarReadAllowed ? "You can discuss calendar availability if asked." : "",
+        videoMeetingGuidance,
       ]
         .filter(Boolean)
         .join("\n"),

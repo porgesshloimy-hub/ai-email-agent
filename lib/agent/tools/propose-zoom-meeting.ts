@@ -18,7 +18,11 @@ const proposeZoomMeetingParams = {
       description: "Meeting duration in minutes.",
     },
 
-    timezone: { type: "string" },
+    timezone: {
+      type: "string",
+      description:
+        "IANA timezone for the meeting, such as Europe/London. Use the customer's timezone if one is stated or clearly implied in the conversation; otherwise use the business's own timezone given in the current date/time context above.",
+    },
 
     agenda: { type: "string" },
 

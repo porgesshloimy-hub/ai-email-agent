@@ -37,7 +37,7 @@ export const createZoomMeetingTool: ToolDefinition = {
       timezone: {
         type: "string",
         description:
-          "IANA timezone for the meeting, such as Europe/London. Use the timezone explicitly stated or clearly implied by the email/business context when available.",
+          "IANA timezone for the meeting, such as Europe/London. Use the customer's timezone if one is stated or clearly implied in the conversation; otherwise use the business's own timezone given in the current date/time context above. Do not leave this blank or guess a timezone with no basis in either the conversation or the business's own timezone.",
       },
 
       agenda: {

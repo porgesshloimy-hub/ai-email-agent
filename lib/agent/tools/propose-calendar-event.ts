@@ -18,7 +18,7 @@ const proposeCalendarEventParams = {
     confirmationMessage: {
       type: "string",
       description:
-        "The complete customer-facing confirmation email to send automatically if the account holder approves this proposal. Write it now, in the same natural tone as your other replies, as if the meeting time is confirmed. Include the exact placeholder {{meeting_link}} on its own wherever a meeting link should appear, if a link is expected; it will be replaced with the real link before sending.",
+        "The complete customer-facing confirmation email to send automatically if the account holder approves this proposal. Write it now, in the same natural tone as your other replies, as if the meeting time is confirmed. If requestGoogleMeet is true, include the exact placeholder {{meeting_link}} on its own wherever the Google Meet link should appear; it will be replaced with the real link before sending. Do not include {{meeting_link}} if requestGoogleMeet is false — there will be nothing to substitute it with.",
     },
   },
 
@@ -94,6 +94,7 @@ async function executeProposeCalendarEvent(
       gmail_subject: email.subject,
       attendee_emails: args.attendeeEmails ?? [],
       draft_confirmation_body: args.confirmationMessage,
+      request_google_meet: args.requestGoogleMeet === true,
     })
     .select("id")
     .single();

@@ -8,6 +8,7 @@ import {
 import type { AgentAction, PermissionLevel } from "@/types";
 import { isValidModelSelection, type AIProvider } from "@/lib/agent/models";
 import { isProviderConfigured } from "@/lib/agent/llm";
+import { getToolCategory, type ToolCategoryId } from "@/lib/agent/tools/categories";
 
 async function getAuthenticatedTenantId(): Promise<string> {
   const userSupabase = await createServerSupabase();
@@ -293,6 +294,72 @@ export async function deleteRule(formData: FormData) {
   if (error) {
     console.error("Failed to delete rule:", error);
     throw new Error("Failed to delete rule");
+  }
+
+  revalidatePath("/dashboard/agent");
+}
+/**
+ * Save which provider the tenant prefers within a tool category (see
+ * lib/agent/tools/categories.ts) — e.g. Zoom vs. Google Meet for video
+ * meetings — used only when both are available and the customer didn't
+ * specify one. Stored as a single key inside agent_configs.tool_preferences
+ * (jsonb), read-modify-write so saving one category's preference never
+ * clobbers another's.
+ */
+export async function saveToolPreference(formData: FormData) {
+  const tenantId = await getAuthenticatedTenantId();
+
+  const categoryId = String(formData.get("categoryId") ?? "") as ToolCategoryId;
+  const providerId = String(formData.get("providerId") ?? "");
+
+  const category = getToolCategory(categoryId);
+  if (!category) {
+    throw new Error(`Unknown tool category "${categoryId}"`);
+  }
+
+  // "" (the "No preference" option) clears this category's entry
+  // rather than storing an invalid provider id.
+  if (providerId && !category.providers.some((p) => p.id === providerId)) {
+    throw new Error(
+      `"${providerId}" is not a valid option for ${category.label}`
+    );
+  }
+
+  const supabase = createServiceSupabase();
+
+  const { data: existing } = await supabase
+    .from("agent_configs")
+    .select("tool_preferences")
+    .eq("tenant_id", tenantId)
+    .single();
+
+  const currentPreferences = (existing?.tool_preferences ?? {}) as Record<
+    string,
+    string
+  >;
+
+  const nextPreferences = { ...currentPreferences };
+
+  if (providerId) {
+    nextPreferences[categoryId] = providerId;
+  } else {
+    delete nextPreferences[categoryId];
+  }
+
+  const { error } = await supabase.from("agent_configs").upsert(
+    {
+      tenant_id: tenantId,
+      tool_preferences: nextPreferences,
+      updated_at: new Date().toISOString(),
+    },
+    {
+      onConflict: "tenant_id",
+    }
+  );
+
+  if (error) {
+    console.error("Failed to save tool preference:", error);
+    throw new Error("Failed to save tool preference");
   }
 
   revalidatePath("/dashboard/agent");

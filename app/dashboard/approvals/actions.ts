@@ -381,24 +381,19 @@ export async function confirmCalendarEvent(formData: FormData) {
   const { createEvent, getGoogleMeetUrl } = await import("@/lib/calendar/client");
 
   /**
-   * BUG FIX: this call previously never passed createGoogleMeet at
-   * all, so it always defaulted to false — no Google Meet conference
-   * was ever created for an approved calendar proposal. But
-   * propose_calendar_event's own tool description explicitly tells the
-   * model it may write the {{meeting_link}} placeholder into
-   * confirmationMessage "if a link is expected". Since meetingLink
-   * below is getGoogleMeetUrl(event), and no Meet was ever requested,
-   * meetingLink was always null here — and sendStoredConfirmation's
-   * substitution only runs `if (meetingLink)`, so a stored confirmation
-   * containing {{meeting_link}} was sent to the customer with that
-   * literal placeholder text still in it. This is the same class of
-   * failure as the live-agent Zoom incident, just via the approval
-   * path instead. Fix: only request a Meet when the stored confirmation
-   * actually expects a link, so a real one exists to substitute.
+   * UPDATED (alternatives/categories framework — see
+   * lib/agent/tools/categories.ts): this used to infer whether a Meet
+   * link was wanted by checking for a leftover {{meeting_link}}
+   * placeholder in the stored confirmation text. That was itself a fix
+   * for an earlier bug (createGoogleMeet was never passed at all), but
+   * inferring intent from placeholder presence is indirect — it's
+   * really re-deriving something the model already decided explicitly
+   * at proposal time. propose_calendar_event now stores that decision
+   * directly as request_google_meet on this row, so this reads the
+   * real recorded fact instead of re-inferring it from a side effect
+   * of how the text happened to be written.
    */
-  const needsMeetingLink = /\{\{meeting_link\}\}/.test(
-    action.draft_confirmation_body ?? ""
-  );
+  const needsMeetingLink = Boolean((action as any).request_google_meet);
 
   const event = await createEvent(action.tenant_id, {
     summary: action.proposed_summary,

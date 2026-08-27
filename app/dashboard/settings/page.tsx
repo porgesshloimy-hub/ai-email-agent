@@ -1,6 +1,7 @@
 import { createServerSupabase } from "@/lib/supabase/server";
 import { INTEGRATIONS } from "@/lib/integrations/config";
-import { disconnectGoogle, disconnectZoom } from "./actions";
+import { disconnectGoogle, disconnectZoom, saveTimezone } from "./actions";
+import { COMMON_TIMEZONES } from "@/lib/timezones";
 import {
   Badge,
   Bento,
@@ -178,6 +179,42 @@ export default async function SettingsPage() {
                 </dd>
               </div>
             </dl>
+          </Panel>
+        </BentoItem>
+
+        <BentoItem span="md">
+          <Panel padding="lg">
+            <PanelTitle>Timezone</PanelTitle>
+            <p className="text-sm leading-relaxed text-muted">
+              This is your business&apos;s own timezone — it controls what the agent considers
+              &quot;today,&quot; &quot;tomorrow,&quot; and the correct day when resolving
+              phrases like &quot;next Monday.&quot; It is not necessarily any individual
+              customer&apos;s timezone; the agent is instructed to prefer a customer&apos;s own
+              stated timezone when one is clear from the conversation, and to always spell out
+              the timezone explicitly whenever it confirms a specific date or time.
+            </p>
+
+            <form action={saveTimezone} className="mt-5">
+              <Label htmlFor="timezone">Business timezone</Label>
+              <select
+                id="timezone"
+                name="timezone"
+                defaultValue={tenant?.timezone ?? "UTC"}
+                className="focus-ring w-full rounded-control border border-line-strong bg-surface px-3 py-2.5 text-sm text-ink"
+              >
+                {COMMON_TIMEZONES.map((tz) => (
+                  <option key={tz.value} value={tz.value}>
+                    {tz.label}
+                  </option>
+                ))}
+              </select>
+
+              <div className="mt-3 flex justify-end">
+                <Button type="submit" size="sm">
+                  Save timezone
+                </Button>
+              </div>
+            </form>
           </Panel>
         </BentoItem>
       </Bento>

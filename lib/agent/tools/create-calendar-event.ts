@@ -44,18 +44,26 @@ const calendarEventParams = {
 
     startTime: {
       type: "string",
-      description: "ISO 8601 start datetime.",
+      description:
+        "ISO 8601 start datetime, WITH a UTC offset included (e.g. 2026-08-26T15:00:00-07:00), not a bare local time — Google Calendar interprets a datetime with no offset as UTC, which silently creates the event at the wrong moment. Use the customer's timezone if one is stated or clearly implied in the conversation; otherwise use the business's own timezone given in the current date/time context above.",
     },
 
     endTime: {
       type: "string",
-      description: "ISO 8601 end datetime.",
+      description:
+        "ISO 8601 end datetime, WITH a UTC offset included, same rule as startTime.",
     },
 
     attendeeEmails: {
       type: "array",
       items: { type: "string" },
       description: "Optional attendee email addresses.",
+    },
+
+    requestGoogleMeet: {
+      type: "boolean",
+      description:
+        "Whether to attach a real Google Meet video-conference link to this event. Set true only when a video meeting is actually wanted (e.g. the category guidance in your system prompt resolved to Google Meet, or the customer specifically asked for one) — do not attach a Meet link to a plain in-person appointment or a call that doesn't need video. See the video meeting options described in your system prompt for when to prefer this over Zoom, and vice versa.",
     },
 
     reasoning: {
@@ -112,13 +120,22 @@ export const createCalendarEventEmailTool: ToolDefinition = {
 
     const { createEvent } = await import("@/lib/calendar/client");
 
+    /**
+     * BUG FIX (found while building the alternatives/categories
+     * framework — see lib/agent/tools/categories.ts): this previously
+     * hardcoded createGoogleMeet: true unconditionally, attaching a
+     * Meet link to every single calendar event regardless of whether a
+     * video meeting was ever wanted. requestGoogleMeet is now the
+     * model's own explicit decision, informed by the video-meeting
+     * category guidance in the system prompt.
+     */
     const event = await createEvent(tenantId, {
       summary: args.summary,
       description: args.description,
       startTime: args.startTime,
       endTime: args.endTime,
       attendeeEmails: args.attendeeEmails,
-      createGoogleMeet: true,
+      createGoogleMeet: args.requestGoogleMeet === true,
     });
 
     await supabase.from("calendar_actions").insert({
@@ -189,8 +206,16 @@ export const createCalendarEventChatTool: ToolDefinition = {
     type: "object",
     properties: {
       summary: { type: "string" },
-      startTime: { type: "string", description: "ISO 8601 start datetime." },
-      endTime: { type: "string", description: "ISO 8601 end datetime." },
+      startTime: {
+        type: "string",
+        description:
+          "ISO 8601 start datetime, WITH a UTC offset included (e.g. 2026-08-26T15:00:00-07:00) — a bare datetime with no offset is interpreted as UTC by Google Calendar, silently creating the event at the wrong moment. Use the business's own timezone given in the current date/time context above unless the owner states a different one.",
+      },
+      endTime: {
+        type: "string",
+        description:
+          "ISO 8601 end datetime, WITH a UTC offset included, same rule as startTime.",
+      },
     },
     required: ["summary", "startTime", "endTime"],
   },

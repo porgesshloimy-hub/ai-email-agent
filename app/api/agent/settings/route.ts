@@ -46,7 +46,7 @@ export async function GET() {
     // Load the agent configuration.
     const { data: config, error: configError } = await supabase
       .from("agent_configs")
-      .select("custom_instructions, rules, ai_provider, ai_model")
+      .select("custom_instructions, rules, ai_provider, ai_model, tool_preferences")
       .eq("tenant_id", tenant.id)
       .maybeSingle();
 
@@ -111,6 +111,7 @@ export async function GET() {
       aiProvider: config?.ai_provider ?? DEFAULT_AI_PROVIDER,
       aiModel: config?.ai_model ?? DEFAULT_AI_MODEL,
       connections,
+      toolPreferences: config?.tool_preferences ?? {},
     });
   } catch (error) {
     console.error("Unexpected error loading agent settings:", error);

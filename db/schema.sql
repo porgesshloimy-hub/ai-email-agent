@@ -13,6 +13,7 @@ create table tenants (
   business_name text not null,
   business_description text,             -- "We are a plumbing company in Brooklyn."
   phone_number text,                     -- for Twilio SMS notifications
+  timezone text not null default 'UTC',  -- IANA zone, e.g. 'America/New_York' (migration 007)
   stripe_customer_id text,               -- set once the tenant connects billing; null until then
   stripe_subscription_item_id text,      -- the metered subscription item usage is reported against
   created_at timestamptz not null default now()

@@ -37,6 +37,12 @@ import {
   detectHallucinatedContent,
 } from "@/lib/agent/content-safety";
 import { resolveCategory, describeResolvedCategory } from "@/lib/agent/tools/categories";
+import { resolvePersona } from "@/lib/agent/personas/resolve";
+import {
+  narrowSendCapability,
+  narrowWriteCapability,
+  narrowReadCapability,
+} from "@/lib/agent/personas/apply-overrides";
 import OpenAI from "openai";
 
 /**
@@ -231,25 +237,59 @@ export async function processIncomingEmail(
      * --------------------------------------------------------
      */
 
-    const sendCapability =
+    const sendCapabilityReal =
       await resolveSendCapability(
         email.tenantId
       );
 
-    const calendarWriteCapability =
+    const calendarWriteCapabilityReal =
       await resolveCalendarWriteCapability(
         email.tenantId
       );
 
-    const zoomCapability =
+    const zoomCapabilityReal =
       await resolveZoomCapability(
         email.tenantId
       );
 
-    const calendarReadAllowed =
+    const calendarReadAllowedReal =
       await canReadCalendar(
         email.tenantId
       );
+
+    /**
+     * --------------------------------------------------------
+     * PERSONA (migration 010 — agent_personas)
+     * --------------------------------------------------------
+     *
+     * Every tenant is seeded with exactly one "Assistant" persona,
+     * audience "customer" — this resolves to that row today. Its
+     * permission_overrides can only narrow the capabilities just
+     * resolved above from real, connection-checked permissions; it can
+     * never grant something the tenant doesn't actually have. This is
+     * intentionally a no-op for a single-persona tenant unless overrides
+     * are explicitly configured — resolvePersona() falling back to a
+     * synthetic default (empty overrides) preserves pre-persona behavior
+     * exactly if anything about persona resolution ever fails.
+     */
+    const persona = await resolvePersona(email.tenantId, "customer");
+
+    const sendCapability = narrowSendCapability(sendCapabilityReal, persona);
+    const calendarWriteCapability = narrowWriteCapability(
+      calendarWriteCapabilityReal,
+      persona,
+      "calendar.write"
+    );
+    const zoomCapability = narrowWriteCapability(
+      zoomCapabilityReal,
+      persona,
+      "zoom.meet"
+    );
+    const calendarReadAllowed = narrowReadCapability(
+      calendarReadAllowedReal,
+      persona,
+      "calendar.read"
+    );
 
     /**
      * --------------------------------------------------------
@@ -538,6 +578,20 @@ export async function processIncomingEmail(
 
           buildCurrentDateContext(tenantRow?.timezone),
 
+          /**
+           * DEFERRED, NOT FORGOTTEN: agent_personas.system_prompt (the
+           * seeded default persona's copy of this same
+           * custom_instructions value, migration 010) is intentionally
+           * NOT also injected here. Doing so today would duplicate this
+           * exact text for every tenant, since the seed step copied
+           * custom_instructions into system_prompt as a starting point.
+           * Once a tenant has more than one persona, system_prompt needs
+           * to become the actual source of truth here instead of
+           * agent_configs.custom_instructions directly — that's a real
+           * decision (which field wins, how the dashboard's custom
+           * instructions UI relates to per-persona prompts) that
+           * shouldn't be made silently as a side effect of this edit.
+           */
           "<custom_instructions>",
           agentConfig?.custom_instructions ?? "",
           "</custom_instructions>",

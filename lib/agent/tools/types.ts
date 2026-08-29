@@ -60,6 +60,15 @@ export interface ToolEmailContext {
 export interface ToolChatContext {
   pendingEmails: { draft_content?: string | null }[] | null;
   pendingEmailCount: number | null;
+  /**
+   * The owner's raw, unmodified chat message for this turn. Added for
+   * lib/agent/approval/resolve.ts's owner-directed approval path
+   * resolution — scoring whether an instruction was explicit has to
+   * look at what the owner actually typed, not the model's
+   * interpretation of it (that self-report is exactly what this check
+   * exists to not trust).
+   */
+  ownerMessageText: string;
 }
 
 export interface ToolContext {

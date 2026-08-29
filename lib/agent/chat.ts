@@ -20,6 +20,11 @@ import { getToolsForSurface, findToolForSurface } from "@/lib/agent/tools";
 import type { ToolContext } from "@/lib/agent/tools";
 import { buildCurrentDateContext } from "@/lib/agent/date-context";
 import { resolveCategory, describeResolvedCategory } from "@/lib/agent/tools/categories";
+import { resolvePersona } from "@/lib/agent/personas/resolve";
+import {
+  narrowWriteCapability,
+  narrowReadCapability,
+} from "@/lib/agent/personas/apply-overrides";
 
 /**
  * Handles a single message from the business owner via Google Chat. This is
@@ -36,6 +41,90 @@ import { resolveCategory, describeResolvedCategory } from "@/lib/agent/tools/cat
  */
 export async function handleChatMessage(tenantId: string, messageText: string): Promise<string> {
   const supabase = createServiceSupabase();
+
+  /**
+   * --------------------------------------------------------
+   * PENDING OWNER CONFIRMATION CHECK
+   * --------------------------------------------------------
+   *
+   * lib/agent/approval/resolve.ts (Phase 5): if the owner's PREVIOUS
+   * message resulted in a held-for-confirmation action (an ambiguous
+   * calendar request, for instance), this message is very likely their
+   * reply to it, not a new request. Checked before anything else so a
+   * quick "yes"/"go ahead"/"cancel" doesn't get run through the normal
+   * model pipeline at all — it's resolved deterministically here.
+   *
+   * Only one pending confirmation can exist per tenant at a time
+   * (migration 012's unique constraint) — see that migration's comment
+   * for why multi-item disambiguation isn't attempted yet.
+   */
+  const { data: pending } = await supabase
+    .from("pending_owner_confirmations")
+    .select("id, tool_name, args, confirmation_message, expires_at")
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+
+  if (pending) {
+    if (new Date(pending.expires_at) < new Date()) {
+      // Stale — clear it and fall through to normal processing, since
+      // this incoming message is very unlikely to still be a reply to a
+      // confirmation prompt sent over 30 minutes ago.
+      await supabase.from("pending_owner_confirmations").delete().eq("id", pending.id);
+    } else {
+      const normalized = messageText.trim().toLowerCase();
+
+      const isAffirmative = /^(yes|yep|yeah|yup|confirm|confirmed|go ahead|do it|sounds good|ok|okay|sure)\b/.test(
+        normalized
+      );
+      const isNegative = /^(no|nope|cancel|don'?t|nevermind|never mind|stop)\b/.test(normalized);
+
+      if (isAffirmative) {
+        await supabase.from("pending_owner_confirmations").delete().eq("id", pending.id);
+
+        const toolContext: ToolContext = {
+          tenantId,
+          supabase,
+          permissions: {
+            sendAllowed: false,
+            calendarReadAllowed: true,
+            calendarWriteCapability: "write",
+            zoomCapability: "none",
+          },
+        };
+
+        const toolDef = findToolForSurface(pending.tool_name, "chat", toolContext);
+
+        if (!toolDef) {
+          return "Sorry, I couldn't find how to complete that action anymore — could you ask again?";
+        }
+
+        // Confirmed execution — log it distinctly from the original
+        // "held for confirmation" log entry so the audit trail shows
+        // both the hold and the eventual confirmed execution.
+        await supabase.from("owner_directed_action_log").insert({
+          tenant_id: tenantId,
+          tool_name: pending.tool_name,
+          explicitness_heuristic_score: null,
+          executed_directly: true,
+          content_snapshot: JSON.stringify({ ...pending.args, confirmedByOwner: true }),
+          source_channel: "chat",
+        });
+
+        return await toolDef.execute(pending.args as Record<string, any>, toolContext);
+      }
+
+      if (isNegative) {
+        await supabase.from("pending_owner_confirmations").delete().eq("id", pending.id);
+        return "No problem — I won't book that.";
+      }
+
+      // Ambiguous reply to a pending confirmation: re-ask rather than
+      // guessing, and rather than silently falling through to the
+      // normal pipeline (which could misinterpret this as an unrelated
+      // new request while a real action is still sitting unconfirmed).
+      return `Sorry, just to confirm: ${pending.confirmation_message}`;
+    }
+  }
 
   const { data: tenant } = await supabase
     .from("tenants")
@@ -75,8 +164,30 @@ export async function handleChatMessage(tenantId: string, messageText: string): 
     aiModel = DEFAULT_AI_MODEL;
   }
 
-  const calendarReadAllowed = await canReadCalendar(tenantId);
-  const calendarWriteCapability = await resolveCalendarWriteCapability(tenantId);
+  const calendarReadAllowedReal = await canReadCalendar(tenantId);
+  const calendarWriteCapabilityReal = await resolveCalendarWriteCapability(tenantId);
+
+  /**
+   * Google Chat is already, by this file's own design (see the module
+   * docstring above), a conversation with the OWNER — not a customer.
+   * So this resolves the tenant's "owner" persona, not "customer" as
+   * lib/agent/run.ts does. Every tenant is currently seeded (migration
+   * 010) with only a "customer" persona, so resolvePersona() falls back
+   * to its synthetic default here (empty overrides) until an owner
+   * persona actually exists for a tenant — a safe no-op, not a bug.
+   */
+  const persona = await resolvePersona(tenantId, "owner");
+
+  const calendarReadAllowed = narrowReadCapability(
+    calendarReadAllowedReal,
+    persona,
+    "calendar.read"
+  );
+  const calendarWriteCapability = narrowWriteCapability(
+    calendarWriteCapabilityReal,
+    persona,
+    "calendar.write"
+  );
 
   /**
    * See lib/agent/tools/categories.ts. Chat has no Zoom tool at all
@@ -122,6 +233,7 @@ export async function handleChatMessage(tenantId: string, messageText: string): 
     chat: {
       pendingEmails,
       pendingEmailCount,
+      ownerMessageText: messageText,
     },
   };
 

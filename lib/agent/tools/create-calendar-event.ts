@@ -1,4 +1,5 @@
 import type { ToolContext, ToolDefinition } from "./types";
+import { resolveOwnerApprovalPath } from "@/lib/agent/approval/resolve";
 
 /**
  * DISCREPANCY BETWEEN SURFACES (found while diffing, not introduced
@@ -226,8 +227,64 @@ export const createCalendarEventChatTool: ToolDefinition = {
   isAvailable: (context: ToolContext) =>
     context.permissions.calendarWriteCapability !== "none",
 
+  /**
+   * Owner-directed approval resolution (lib/agent/approval/resolve.ts):
+   * previously this executed unconditionally for every request, whether
+   * the owner said "book Johnson tomorrow at 3pm" (fully explicit) or
+   * "block off some time tomorrow" (the model would have to invent the
+   * actual time/summary). Now the owner's own message is scored, and a
+   * request that required the model to fill in gaps is held for
+   * confirmation instead of silently executed. Every path — executed
+   * directly or held for confirmation — is logged to
+   * owner_directed_action_log (migration 010) so nothing here is a
+   * silent, unauditable decision.
+   */
   async execute(args: Record<string, any>, context: ToolContext) {
     const { supabase, tenantId } = context;
+    const ownerMessageText = context.chat?.ownerMessageText ?? "";
+
+    const resolution = resolveOwnerApprovalPath("create_calendar_event", ownerMessageText);
+
+    await supabase.from("owner_directed_action_log").insert({
+      tenant_id: tenantId,
+      tool_name: "create_calendar_event",
+      explicitness_heuristic_score: resolution.explicitnessScore,
+      executed_directly: resolution.path === "execute",
+      content_snapshot: JSON.stringify(args),
+      source_channel: "chat",
+    });
+
+    if (resolution.path === "sync_confirm") {
+      const confirmationMessage =
+        `Just to confirm before I book it — "${args.summary}" from ${args.startTime} to ${args.endTime}. ` +
+        `Go ahead?`;
+
+      const { error: pendingError } = await supabase
+        .from("pending_owner_confirmations")
+        .insert({
+          tenant_id: tenantId,
+          tool_name: "create_calendar_event",
+          args,
+          confirmation_message: confirmationMessage,
+          explicitness_score: resolution.explicitnessScore,
+        });
+
+      if (pendingError) {
+        /**
+         * Fail open toward the SAFER behavior here — if we can't even
+         * record that a confirmation is pending, executing anyway would
+         * defeat the entire point of this check. Report the failure
+         * back to the owner rather than silently booking the event.
+         */
+        console.error("FAILED TO STORE PENDING OWNER CONFIRMATION:", {
+          tenantId,
+          error: pendingError,
+        });
+        return "I wasn't able to set that up for confirmation — please try again.";
+      }
+
+      return confirmationMessage;
+    }
 
     const { createEvent } = await import("@/lib/calendar/client");
     const event = await createEvent(tenantId, {
@@ -244,7 +301,7 @@ export const createCalendarEventChatTool: ToolDefinition = {
       proposed_start: args.startTime,
       proposed_end: args.endTime,
       google_event_id: event.id,
-      reasoning: "Requested directly via Google Chat",
+      reasoning: "Requested directly via Google Chat — resolved as an explicit owner instruction",
     });
 
     return `Done — booked "${args.summary}" on your calendar.`;

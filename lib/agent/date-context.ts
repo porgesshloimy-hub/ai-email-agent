@@ -30,6 +30,20 @@ import { isValidTimezone, DEFAULT_TIMEZONE } from "@/lib/timezones";
  *    edge case. Fixed by accepting the tenant's own stored timezone
  *    (tenants.timezone, migration 007) and anchoring "today" to that.
  *
+ * 3. Even with the business's real local timezone, "today" still
+ *    flipped to the next calendar date at literal local midnight — so a
+ *    message written at 12:15 AM saw "tomorrow" resolved as two
+ *    calendar days out from the evening the sender actually meant. In
+ *    ordinary speech, most people who are up shortly after midnight
+ *    still consider themselves in "today" (the day they haven't slept
+ *    through yet) and mean the calendar date that just began when they
+ *    say "tomorrow" — the flip only feels real once morning actually
+ *    arrives, not at the stroke of midnight. Fixed with a day-rollover
+ *    cutoff: for a window after local midnight, the "today" anchor used
+ *    to resolve relative language is deliberately held one day behind
+ *    the real calendar date. See DAY_ROLLOVER_CUTOFF_HOUR below for why
+ *    4:00 AM specifically.
+ *
  * This deliberately does NOT try to determine an individual customer's
  * timezone — there's no single correct answer for a business with
  * clients across multiple zones, and guessing wrong silently is worse
@@ -40,6 +54,31 @@ import { isValidTimezone, DEFAULT_TIMEZONE } from "@/lib/timezones";
  * spelled out so a wrong guess is visible and correctable rather than
  * silent.
  */
+
+/**
+ * The local hour (0–23) before which "today," for the purposes of
+ * resolving relative date language in conversation, is deliberately
+ * held to the previous calendar date rather than the one that
+ * technically just began at midnight.
+ *
+ * 4:00 AM is the chosen cutoff: it's late enough that essentially no one
+ * writing "today"/"tomorrow" shortly after midnight actually means the
+ * date-after-next, but early enough that by 4 AM almost everyone —
+ * including genuine night owls — has either gone to sleep or otherwise
+ * moved on to treating the new calendar date as "today." This mirrors
+ * the same day-rollover convention used by several other systems for
+ * exactly this reason (e.g. nightlife/hospitality booking treating a
+ * "Friday night" as continuing into the small hours rather than ending
+ * at midnight).
+ *
+ * This only affects how "today"/"tomorrow" style language is resolved
+ * in the system prompt below — it never affects the real, actual
+ * current date/time, which is always shown alongside it for
+ * transparency and is what any absolute scheduling logic should still
+ * be able to fall back on if needed.
+ */
+const DAY_ROLLOVER_CUTOFF_HOUR = 4;
+
 export function buildCurrentDateContext(
   tenantTimezone?: string | null
 ): string {
@@ -50,10 +89,11 @@ export function buildCurrentDateContext(
   const now = new Date();
 
   /**
-   * The one place the tenant's timezone actually matters: determining
-   * what calendar date "today" is, as seen from that timezone. "en-CA"
-   * is a convenient trick — that locale formats dates as YYYY-MM-DD
-   * directly, which parses back unambiguously.
+   * The one place the tenant's timezone actually matters for the REAL
+   * date: determining what calendar date it technically is right now,
+   * as seen from that timezone. "en-CA" is a convenient trick — that
+   * locale formats dates as YYYY-MM-DD directly, which parses back
+   * unambiguously.
    */
   const todayParts = new Intl.DateTimeFormat("en-CA", {
     timeZone: timezone,
@@ -67,20 +107,20 @@ export function buildCurrentDateContext(
   const todayDay = todayParts.find((part) => part.type === "day")?.value;
 
   /**
-   * Anchor that calendar date at UTC midnight as a pure arithmetic
-   * proxy. From here on we only ever add whole days to it and read the
-   * result back with timeZone: "UTC" — we never re-interpret it
+   * Anchor that REAL calendar date at UTC midnight as a pure arithmetic
+   * proxy. From here on we only ever add/subtract whole days from it and
+   * read the result back with timeZone: "UTC" — we never re-interpret it
    * against `timezone` again, so a DST transition partway through the
    * lookahead window can't shift which weekday a future date lands on.
    * (Which day of the week a given calendar date falls on is a fact
    * about the date itself, not about any timezone — the tenant's
-   * timezone was only needed once, above, to determine "today".)
+   * timezone was only needed once, above, to determine the real "today".)
    */
-  const todayAnchor = new Date(
+  const realTodayAnchor = new Date(
     `${todayYear}-${todayMonth}-${todayDay}T00:00:00Z`
   );
 
-  const todayLabel = todayAnchor.toLocaleDateString("en-US", {
+  const realTodayLabel = realTodayAnchor.toLocaleDateString("en-US", {
     weekday: "long",
     year: "numeric",
     month: "long",
@@ -95,12 +135,53 @@ export function buildCurrentDateContext(
     timeZoneName: "short",
   });
 
-  // Next 14 days, each explicitly paired with its weekday name, so
-  // resolving "next Monday" / "this Friday" / "a week from Wednesday" is
-  // a lookup against this table rather than something the model has to
-  // calculate itself.
+  /**
+   * Current local hour, in the tenant's own timezone, used only to
+   * decide whether we're inside the early-morning rollover window.
+   * hourCycle: "h23" is used explicitly (rather than relying on
+   * hour12: false alone) because some ICU implementations render
+   * midnight as "24" instead of "0" under hour12: false, which would
+   * silently break the < DAY_ROLLOVER_CUTOFF_HOUR comparison below
+   * right at the one moment this logic matters most.
+   */
+  const localHour = Number(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone,
+      hourCycle: "h23",
+      hour: "numeric",
+    }).format(now)
+  );
+
+  const isEarlyMorningRollover = localHour < DAY_ROLLOVER_CUTOFF_HOUR;
+
+  /**
+   * The EFFECTIVE anchor used to resolve "today"/"tomorrow" and the
+   * lookahead table below. Identical to the real anchor outside the
+   * rollover window; shifted back one calendar day during it, per the
+   * reasoning in DAY_ROLLOVER_CUTOFF_HOUR's comment above.
+   */
+  const effectiveAnchor = new Date(realTodayAnchor);
+  if (isEarlyMorningRollover) {
+    effectiveAnchor.setUTCDate(effectiveAnchor.getUTCDate() - 1);
+  }
+
+  const effectiveTodayLabel = effectiveAnchor.toLocaleDateString("en-US", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+
+  // Next 14 days AFTER the effective anchor, each explicitly paired with
+  // its weekday name, so resolving "tomorrow" / "next Monday" / "this
+  // Friday" is a lookup against this table rather than something the
+  // model has to calculate itself. During the rollover window, the real
+  // current calendar date is simply the first row of this table (i.e.
+  // "tomorrow" from the effective anchor's point of view) rather than
+  // being "today" — which is exactly the resolution being aimed for.
   const lookahead = Array.from({ length: 14 }, (_, i) => {
-    const date = new Date(todayAnchor);
+    const date = new Date(effectiveAnchor);
     date.setUTCDate(date.getUTCDate() + i + 1);
 
     const weekday = date.toLocaleDateString("en-US", {
@@ -113,8 +194,12 @@ export function buildCurrentDateContext(
     return `${weekday}, ${isoDate}`;
   });
 
+  const todayLine = isEarlyMorningRollover
+    ? `This business's timezone is ${timezone}. It's currently the early hours of the morning there (before ${DAY_ROLLOVER_CUTOFF_HOUR}:00 AM), so for the purposes of resolving "today"/"tomorrow" and similar relative language in conversation, treat today as ${effectiveTodayLabel} — the day most people are still up from, not the calendar date that technically just began at midnight. (For reference, the calendar date has technically already rolled over to ${realTodayLabel}; the current local time there is approximately ${localTimeLabel}.)`
+    : `This business's timezone is ${timezone}. Today, in that timezone, is ${effectiveTodayLabel}. The current local time there is approximately ${localTimeLabel}.`;
+
   return [
-    `This business's timezone is ${timezone}. Today, in that timezone, is ${todayLabel}. The current local time there is approximately ${localTimeLabel}.`,
+    todayLine,
     `(Underlying UTC instant, for reference only: ${now.toISOString()}.)`,
     "The next 14 days, with their weekday names, are:",
     ...lookahead.map((line) => `- ${line}`),

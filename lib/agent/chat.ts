@@ -51,11 +51,26 @@ import { fetchChatHistoryTurns, stripLeakedTimestampPrefix } from "@/lib/agent/c
  * so a caller doesn't have to guess or re-query for it. See the
  * message-splitting comment at the bottom of this function for why a
  * reply can become more than one message.
+ *
+ * options.alreadyPersistedOwnerMessageId: lets a caller persist the
+ * owner's own message itself, BEFORE calling this function, and pass
+ * its id through instead of having it persisted again here. Added so
+ * the web widget can confirm "your message was saved" immediately
+ * (a fast, separate round trip) rather than only knowing that once the
+ * entire agent turn — including the LLM call and any tool
+ * execution — has finished. Without this, "message sent reliably" and
+ * "the agent replied" were the same event, so the owner's own bubble
+ * looked unconfirmed for the full duration of the agent's processing,
+ * not just until actual delivery was confirmed.
  */
 export async function handleChatMessage(
   tenantId: string,
   messageText: string,
-  options: { channel?: string; repliedToMessageId?: string | null } = {}
+  options: {
+    channel?: string;
+    repliedToMessageId?: string | null;
+    alreadyPersistedOwnerMessageId?: string;
+  } = {}
 ): Promise<{ text: string; messageIds: string[]; ownerMessageId: string | null }> {
   const channel = options.channel ?? "chat";
   const repliedToMessageId = options.repliedToMessageId ?? null;
@@ -64,14 +79,17 @@ export async function handleChatMessage(
 
   // Persist the incoming owner message immediately, before any
   // processing — so it's captured even if something downstream throws,
-  // and so its id exists for reply-to resolution below.
-  const ownerMessageRow = await persistChatMessage(
-    tenantId,
-    "owner",
-    messageText,
-    channel,
-    repliedToMessageId
-  );
+  // and so its id exists for reply-to resolution below. Skipped if the
+  // caller already did this itself (see the options doc above).
+  const ownerMessageRow = options.alreadyPersistedOwnerMessageId
+    ? { id: options.alreadyPersistedOwnerMessageId }
+    : await persistChatMessage(
+        tenantId,
+        "owner",
+        messageText,
+        channel,
+        repliedToMessageId
+      );
 
   /**
    * Everything that decides WHAT to say back to the owner lives inside

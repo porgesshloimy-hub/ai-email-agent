@@ -75,6 +75,8 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -111,6 +113,8 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
           setError(data.error);
         } else {
           setMessages(data.messages ?? []);
+          setHasMore(Boolean(data.hasMore));
+          requestAnimationFrame(() => scrollToBottom(false));
         }
       })
       .catch(() => {
@@ -125,9 +129,56 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
     };
   }, []);
 
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages]);
+  /**
+   * Loads an older page of history, per the request for the FULL
+   * conversation to be reachable in the UI — deliberately separate from
+   * lib/agent/chat-history's model-context cap (which stays small for
+   * cost reasons; see that module). Fetching more history for a human
+   * to read has no LLM-cost implication, so there's no reason to bound
+   * it the same way — this just paginates rather than loading
+   * everything in one request, which would be slow for a long-lived
+   * account.
+   */
+  async function loadOlderMessages() {
+    if (loadingMore || messages.length === 0) return;
+
+    setLoadingMore(true);
+    const oldest = messages[0];
+    const previousScrollHeight = scrollRef.current?.scrollHeight ?? 0;
+
+    try {
+      const res = await fetch(`/api/agent-chat?before=${encodeURIComponent(oldest.created_at)}`);
+      const data = await res.json();
+
+      if (data.error) {
+        setError(data.error);
+        return;
+      }
+
+      setMessages((prev) => [...(data.messages ?? []), ...prev]);
+      setHasMore(Boolean(data.hasMore));
+
+      // Preserve scroll position — without this, prepending older
+      // messages would visually yank the view down to match the new
+      // (taller) scroll height.
+      requestAnimationFrame(() => {
+        if (scrollRef.current) {
+          scrollRef.current.scrollTop = scrollRef.current.scrollHeight - previousScrollHeight;
+        }
+      });
+    } catch {
+      setError("Couldn't load earlier messages.");
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  function scrollToBottom(smooth = true) {
+    scrollRef.current?.scrollTo({
+      top: scrollRef.current.scrollHeight,
+      behavior: smooth ? "smooth" : "auto",
+    });
+  }
 
   function findMessageById(id: string | null): ChatMessage | undefined {
     if (!id) return undefined;
@@ -146,10 +197,9 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
     setInput("");
     setReplyingTo(null);
 
-    // Show the owner's own message immediately rather than waiting for
-    // the agent's reply — the temp id is reconciled with the real
-    // persisted row once the request resolves, so reply-to targeting
-    // against it still works correctly afterward.
+    // Shown immediately, dimmed, while we confirm it was actually
+    // saved — a genuinely unconfirmed state, not just "waiting on the
+    // agent." See the two-phase flow below for what resolves it.
     const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const optimisticMessage: ChatMessage = {
       id: tempId,
@@ -160,41 +210,84 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
       pending: true,
     };
     setMessages((prev) => [...prev, optimisticMessage]);
+    requestAnimationFrame(() => scrollToBottom(true));
+
+    /**
+     * PHASE 1 — fast, separate confirmation that the message was
+     * actually saved. Answers a real question directly: previously
+     * there was no way to know a message was reliably sent separately
+     * from knowing the agent had finished its whole turn, since one
+     * request did both. This is intentionally the smallest possible
+     * round trip — no LLM call, just a database write — so the owner's
+     * bubble turns solid the moment delivery is actually confirmed,
+     * not whenever the agent eventually finishes thinking.
+     */
+    let confirmedOwnerMessage: ChatMessage;
 
     try {
-      const res = await fetch("/api/agent-chat", {
+      const sendRes = await fetch("/api/agent-chat/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: trimmed, repliedToMessageId: replyId }),
       });
 
-      const data = await res.json();
+      const sendData = await sendRes.json();
 
-      if (!res.ok || data.error) {
-        setError(data.error ?? "Something went wrong sending that.");
-        // Roll back the optimistic message and restore the draft so
-        // nothing typed is lost on failure.
+      if (!sendRes.ok || sendData.error) {
+        setError(sendData.error ?? "Something went wrong sending that.");
         setMessages((prev) => prev.filter((m) => m.id !== tempId));
         setInput(trimmed);
         setReplyingTo(repliedToSnapshot);
+        setSending(false);
         return;
       }
 
-      // Replace the optimistic placeholder with the real persisted row
-      // (real id, real timestamp) and append every agent-reply message
-      // for this turn — a reply can arrive as more than one message
-      // (see lib/agent/chat.ts's message-splitting comment), each
-      // rendered as its own bubble in order.
+      confirmedOwnerMessage = sendData.ownerMessage;
+
+      // Swap the dimmed placeholder for the real, confirmed row —
+      // full color from here on, regardless of how long the agent
+      // takes to reply next.
       setMessages((prev) => [
         ...prev.filter((m) => m.id !== tempId),
-        data.ownerMessage,
-        ...(data.agentMessages ?? []),
+        confirmedOwnerMessage,
       ]);
     } catch {
-      setError("Couldn't reach the agent — check your connection and try again.");
+      setError("Couldn't reach the server — check your connection and try again.");
       setMessages((prev) => prev.filter((m) => m.id !== tempId));
       setInput(trimmed);
       setReplyingTo(repliedToSnapshot);
+      setSending(false);
+      return;
+    }
+
+    /**
+     * PHASE 2 — the actual agent turn. The owner's message is already
+     * confirmed and rendered normally at this point; this only ever
+     * adds the agent's reply (or reports a failure to reply, which is
+     * a different, separate failure from "did my message send").
+     */
+    try {
+      const res = await fetch("/api/agent-chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: trimmed,
+          repliedToMessageId: replyId,
+          ownerMessageId: confirmedOwnerMessage.id,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || data.error) {
+        setError(data.error ?? "Your message sent, but the agent couldn't reply — try again.");
+        return;
+      }
+
+      setMessages((prev) => [...prev, ...(data.agentMessages ?? [])]);
+      requestAnimationFrame(() => scrollToBottom(true));
+    } catch {
+      setError("Your message sent, but couldn't reach the agent for a reply — try again.");
     } finally {
       setSending(false);
     }
@@ -220,7 +313,20 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
             Nothing here yet — ask about a booking, a reminder, or anything pending.
           </p>
         ) : (
-          messages.map((msg, index) => {
+          <>
+            {hasMore && (
+              <div className="flex justify-center pb-2">
+                <button
+                  type="button"
+                  onClick={loadOlderMessages}
+                  disabled={loadingMore}
+                  className="focus-ring cursor-pointer rounded-control px-3 py-1 text-xs font-medium text-muted hover:text-accent-ink disabled:cursor-default disabled:opacity-50"
+                >
+                  {loadingMore ? "Loading…" : "Load earlier messages"}
+                </button>
+              </div>
+            )}
+            {messages.map((msg, index) => {
             const isOwner = msg.role === "owner";
             const repliedTo = findMessageById(msg.replied_to_message_id);
 
@@ -246,7 +352,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
 
             return (
               <div key={msg.id} className={`group flex min-w-0 ${isOwner ? "justify-end" : "justify-start"}`}>
-                <div className={`flex min-w-0 max-w-[85%] flex-col gap-1 ${isOwner ? "items-end" : "items-start"}`}>
+                <div className={`flex min-w-0 max-w-[85%] flex-col ${isOwner ? "items-end" : "items-start"} ${showTimestamp ? "gap-1" : "gap-0.5"}`}>
                   {repliedTo && (
                     <div className="max-w-full rounded-control border-l-2 border-line bg-surface-2 px-2.5 py-1 text-xs text-muted break-words">
                       {repliedTo.content.slice(0, 60)}
@@ -254,32 +360,46 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
                     </div>
                   )}
 
-                  <div
-                    className={`max-w-full whitespace-pre-wrap break-words rounded-panel px-3.5 py-2.5 text-sm leading-relaxed shadow-panel ${
-                      isOwner
-                        ? "bg-accent text-white"
-                        : "border border-line bg-surface text-ink"
-                    } ${msg.pending ? "opacity-60" : ""}`}
-                  >
-                    {renderInlineMarkdown(msg.content)}
-                  </div>
+                  {/*
+                    Reply moved off the document flow entirely (absolute
+                    positioning on this relative wrapper) so it costs
+                    zero layout space — previously a permanent row below
+                    every bubble, which kept grouped/same-time bubbles
+                    visibly apart even with the timestamp hidden. It now
+                    overlays the bubble's outer corner, appearing only
+                    on hover of that specific message.
+                  */}
+                  <div className="relative max-w-full">
+                    <div
+                      className={`max-w-full whitespace-pre-wrap break-words rounded-panel px-3.5 py-2.5 text-sm leading-relaxed shadow-panel ${
+                        isOwner
+                          ? "bg-accent text-white"
+                          : "border border-line bg-surface text-ink"
+                      } ${msg.pending ? "opacity-60" : ""}`}
+                    >
+                      {renderInlineMarkdown(msg.content)}
+                    </div>
 
-                  <div className="flex items-center gap-2 px-1">
-                    {showTimestamp && (
-                      <span className="text-[11px] text-muted">{formatTimeLabel(msg.created_at)}</span>
-                    )}
                     <button
                       type="button"
                       onClick={() => setReplyingTo(msg)}
-                      className="focus-ring cursor-pointer rounded-control text-[11px] font-medium text-muted opacity-0 transition-opacity hover:text-accent-ink group-hover:opacity-100"
+                      aria-label="Reply to this message"
+                      className={`focus-ring absolute -bottom-1.5 z-10 flex h-6 w-6 cursor-pointer items-center justify-center rounded-full border border-line bg-surface text-[12px] text-muted opacity-0 shadow-panel transition-opacity hover:text-accent-ink group-hover:opacity-100 ${
+                        isOwner ? "-left-1.5" : "-right-1.5"
+                      }`}
                     >
-                      Reply
+                      ↩
                     </button>
                   </div>
+
+                  {showTimestamp && (
+                    <span className="px-1 text-[11px] text-muted">{formatTimeLabel(msg.created_at)}</span>
+                  )}
                 </div>
               </div>
             );
-          })
+          })}
+          </>
         )}
       </div>
 

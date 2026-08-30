@@ -47,24 +47,57 @@ async function getAuthenticatedTenantId(): Promise<string> {
  * in the UI, with real row ids so the "reply to this message" action
  * has something to attach to.
  */
-export async function GET() {
+/**
+ * Returns owner chat history for the widget's display — sourced
+ * directly from owner_chat_messages (migration 013), a completely
+ * different, much larger window than lib/agent/chat-history's
+ * fetchChatHistoryTurns(), which trims to ~10 messages / 30 hours
+ * specifically to bound what's re-sent to the LLM on every call (a
+ * real, recurring token cost). Showing a human the fuller transcript
+ * has no LLM-cost implication at all — it's just a database read and a
+ * render — so the two are deliberately NOT the same cap.
+ *
+ * Supports `?before=<ISO timestamp>` for keyset pagination, so a very
+ * long-lived account's full history is reachable without ever loading
+ * thousands of rows in one request. Raised the single-page size from
+ * the original 50 to 100 as a reasonable default; the client requests
+ * older pages via `before` as the owner scrolls up, rather than this
+ * route trying to guess a "whole history" cutoff.
+ */
+export async function GET(request: NextRequest) {
   try {
     const tenantId = await getAuthenticatedTenantId();
     const supabase = createServiceSupabase();
 
-    const { data, error } = await supabase
+    const before = request.nextUrl.searchParams.get("before");
+
+    let query = supabase
       .from("owner_chat_messages")
       .select("id, role, content, replied_to_message_id, created_at")
       .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false })
-      .limit(50);
+      .limit(100);
+
+    if (before) {
+      query = query.lt("created_at", before);
+    }
+
+    const { data, error } = await query;
 
     if (error) {
       console.error("FAILED TO FETCH CHAT WIDGET HISTORY:", error);
       return NextResponse.json({ error: "Failed to load chat history" }, { status: 500 });
     }
 
-    return NextResponse.json({ messages: (data ?? []).slice().reverse() });
+    const rows = data ?? [];
+
+    return NextResponse.json({
+      messages: rows.slice().reverse(),
+      // True when this page was exactly full — a strong hint there may
+      // be more/older messages the client can page back for via
+      // `?before=` set to the oldest row's created_at in this batch.
+      hasMore: rows.length === 100,
+    });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Unknown error" },
@@ -80,6 +113,11 @@ export async function GET() {
  * message-splitting comment), so the client has real database ids to
  * hang a future "reply to this" action off of and can render each part
  * as its own bubble.
+ *
+ * Accepts an optional `ownerMessageId` — set by the widget after it's
+ * already persisted the owner's own message via the fast
+ * POST /api/agent-chat/send endpoint, so this route (and
+ * handleChatMessage() underneath it) doesn't persist it a second time.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -89,6 +127,8 @@ export async function POST(request: NextRequest) {
     const message = typeof body?.message === "string" ? body.message.trim() : "";
     const repliedToMessageId =
       typeof body?.repliedToMessageId === "string" ? body.repliedToMessageId : null;
+    const alreadyPersistedOwnerMessageId =
+      typeof body?.ownerMessageId === "string" ? body.ownerMessageId : undefined;
 
     if (!message) {
       return NextResponse.json({ error: "Message is required" }, { status: 400 });
@@ -97,6 +137,7 @@ export async function POST(request: NextRequest) {
     const result = await handleChatMessage(tenantId, message, {
       channel: "web",
       repliedToMessageId,
+      alreadyPersistedOwnerMessageId,
     });
 
     const supabase = createServiceSupabase();

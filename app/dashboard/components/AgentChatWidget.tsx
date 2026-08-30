@@ -42,7 +42,7 @@ export default function AgentChatWidget() {
               <button
                 type="button"
                 onClick={() => setOpen(false)}
-                className="focus-ring rounded-control px-2 py-1 text-muted hover:text-ink"
+                className="focus-ring cursor-pointer rounded-control px-2 py-1 text-muted hover:text-ink"
                 aria-label="Close chat"
               >
                 ✕
@@ -59,7 +59,7 @@ export default function AgentChatWidget() {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="focus-ring flex h-12 w-12 items-center justify-center rounded-full bg-accent text-white shadow-pop transition-transform hover:scale-105"
+        className="focus-ring flex h-12 w-12 cursor-pointer items-center justify-center rounded-full bg-accent text-white shadow-pop transition-transform hover:scale-105"
         aria-label={open ? "Close assistant chat" : "Open assistant chat"}
       >
         {open ? (

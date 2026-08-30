@@ -195,15 +195,15 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
           </p>
         ) : (
           messages.map((msg) => {
-            const repliedTo = findMessageById(msg.replied_to_message_id);
             const isOwner = msg.role === "owner";
+            const repliedTo = findMessageById(msg.replied_to_message_id);
 
             return (
               <div key={msg.id} className={`group flex min-w-0 ${isOwner ? "justify-end" : "justify-start"}`}>
                 <div className={`flex min-w-0 max-w-[85%] flex-col gap-1 ${isOwner ? "items-end" : "items-start"}`}>
                   {repliedTo && (
-                    <div className="max-w-full rounded-control border border-line bg-surface-2 px-2.5 py-1 text-xs text-muted break-words">
-                      Replying to: {repliedTo.content.slice(0, 60)}
+                    <div className="max-w-full rounded-control border-l-2 border-line bg-surface-2 px-2.5 py-1 text-xs text-muted break-words">
+                      {repliedTo.content.slice(0, 60)}
                       {repliedTo.content.length > 60 ? "…" : ""}
                     </div>
                   )}
@@ -223,7 +223,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
                     <button
                       type="button"
                       onClick={() => setReplyingTo(msg)}
-                      className="focus-ring rounded-control text-[11px] font-medium text-muted opacity-0 transition-opacity hover:text-accent-ink group-hover:opacity-100"
+                      className="focus-ring cursor-pointer rounded-control text-[11px] font-medium text-muted opacity-0 transition-opacity hover:text-accent-ink group-hover:opacity-100"
                     >
                       Reply
                     </button>
@@ -243,15 +243,15 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
 
       <div className="border-t border-line bg-surface px-3 py-3">
         {replyingTo && (
-          <div className="mb-2 flex items-center justify-between rounded-control border border-line bg-surface-2 px-2.5 py-1.5 text-xs text-ink-2">
+          <div className="mb-2 flex items-center justify-between rounded-control border-l-2 border-line bg-surface-2 px-2.5 py-1.5 text-xs text-ink-2">
             <span className="truncate">
-              Replying to: {replyingTo.content.slice(0, 70)}
+              {replyingTo.content.slice(0, 70)}
               {replyingTo.content.length > 70 ? "…" : ""}
             </span>
             <button
               type="button"
               onClick={() => setReplyingTo(null)}
-              className="focus-ring ml-2 shrink-0 rounded-control text-muted hover:text-ink"
+              className="focus-ring ml-2 shrink-0 cursor-pointer rounded-control text-muted hover:text-ink"
               aria-label="Cancel reply"
             >
               ✕
@@ -264,7 +264,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ask, tell it something, or set a reminder…"
+            placeholder="Say something"
             rows={1}
             disabled={sending}
             className="focus-ring min-h-[40px] flex-1 resize-none rounded-control border border-line bg-surface px-3 py-2 text-sm text-ink placeholder:text-muted"
@@ -273,7 +273,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
             type="button"
             onClick={sendMessage}
             disabled={sending || !input.trim()}
-            className="focus-ring shrink-0 rounded-control bg-accent px-4 py-2 text-sm font-medium text-white shadow-panel transition-opacity disabled:opacity-40"
+            className="focus-ring shrink-0 cursor-pointer rounded-control bg-accent px-4 py-2 text-sm font-medium text-white shadow-panel transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
           >
             Send
           </button>

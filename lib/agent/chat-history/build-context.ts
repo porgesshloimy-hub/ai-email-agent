@@ -68,6 +68,22 @@ export function stripLeakedTimestampPrefix(text: string): string {
 }
 
 /**
+ * Second bug found: the leading-anchored strip above only catches a
+ * leaked timestamp at the very START of a string — correct for
+ * cleaning a whole reply or a whole history row, but a new symptom
+ * showed the leak appearing MID-message, apparently where a "|||"
+ * split delimiter should have gone instead ("...combined bubble
+ * instead of separate ones  [Today, 11:52 PM] That's inconsistent...").
+ * This global (non-anchored) variant strips every occurrence anywhere
+ * in the text, applied to each already-split part in chat.ts as an
+ * extra defensive layer — the anchored version above still runs first
+ * for the common leading case, this catches anything else.
+ */
+export function stripAllLeakedTimestamps(text: string): string {
+  return text.replace(/\[(?:Today|Yesterday|\d+\s+days?\s+ago)[^\]]*\]\s*/gi, "");
+}
+
+/**
  * Same UTC-midnight-anchor trick used by lib/agent/date-context.ts, so
  * "how many days ago" is computed from calendar dates in the tenant's
  * own timezone rather than raw millisecond differences (which would

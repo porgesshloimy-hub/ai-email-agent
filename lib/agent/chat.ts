@@ -27,7 +27,7 @@ import {
   narrowSendCapability,
 } from "@/lib/agent/personas/apply-overrides";
 import { persistChatMessage, linkPendingConfirmationToMessage } from "@/lib/agent/chat-history/persist";
-import { fetchChatHistoryTurns, stripLeakedTimestampPrefix } from "@/lib/agent/chat-history/build-context";
+import { fetchChatHistoryTurns, stripLeakedTimestampPrefix, stripAllLeakedTimestamps } from "@/lib/agent/chat-history/build-context";
 
 /**
  * Handles a single message from the business owner via Google Chat. This is
@@ -422,6 +422,17 @@ export async function handleChatMessage(
             ? "The messages below include recent conversation history, each prefixed with when it was sent — use that to maintain continuity with what's already been discussed, and to judge how recent or stale something is. That bracketed timestamp is metadata added for your reference only — never include a timestamp or bracketed time label at the start of your own reply; just answer normally."
             : "",
           "Break up your replies into multiple short messages using \"|||\" between them — the way a real person actually texts, sending one idea per message rather than one long paragraph. Treat each distinct idea, statement, or question as its own message, and split liberally rather than sparingly — most multi-part replies should be split. Example: instead of 'I can't send emails directly, but I can draft one for you. Want me to create a draft asking if they're coming?', write it as three separate texts: 'I can't send emails directly ||| but I can draft one for you to review ||| want me to put that together?' Only keep something as a single message when it's genuinely one short, indivisible thought.",
+          /**
+           * Found in production: a leaked timestamp appeared MID-reply,
+           * apparently where a "|||" split delimiter should have gone
+           * instead — the model appears to sometimes conflate "start a
+           * new message" with "insert a timestamp like the ones I see
+           * in history," since both instructions above are new and
+           * relate to message boundaries. Made explicit to close that
+           * gap directly rather than hoping the two instructions above
+           * are correctly kept separate on their own.
+           */
+          "To be completely explicit: \"|||\" is the ONLY way to start a new message. A bracketed timestamp like \"[Today, 3:24 PM]\" is never something you write yourself, under any circumstance, including as an attempt to separate messages — that bracket format only ever appears in the history shown to you, never in your own output, anywhere, at the start, middle, or end of a message.",
         ]
           .filter(Boolean)
           .join("\n"),
@@ -504,7 +515,7 @@ export async function handleChatMessage(
   }
 
   const rawResponseText = await computeResponse();
-  const cleanedResponseText = stripLeakedTimestampPrefix(rawResponseText);
+  const cleanedResponseText = stripAllLeakedTimestamps(stripLeakedTimestampPrefix(rawResponseText));
 
   /**
    * Message splitting: the model is instructed (system prompt below) to
@@ -512,17 +523,21 @@ export async function handleChatMessage(
    * way a person might send a couple of short texts in a row instead of
    * one long paragraph, e.g. "I don't have access to X ||| For Y you'd
    * need to check directly ||| Anything else?" becomes three separate
-   * bubbles instead of one block. Each part is stripped individually
-   * too, since a leaked timestamp could in principle appear at the
-   * start of any part, not just the very first one. Capped at 6 parts
-   * (raised from 4 once the instruction above was changed to encourage
-   * more frequent splitting) and empty/whitespace-only splits are
-   * dropped, so a stray or over-eager delimiter can't fragment a reply
-   * into unbounded noise.
+   * bubbles instead of one block. Each part gets BOTH strips applied —
+   * the anchored one for a leading leak, and stripAllLeakedTimestamps
+   * for anything mid-string — after a real symptom showed a leaked
+   * timestamp appearing in the MIDDLE of a reply, apparently where a
+   * "|||" delimiter should have gone (the model seems to occasionally
+   * conflate "start a new message" with "insert a timestamp like the
+   * ones I see in history" — see the explicit disambiguation added to
+   * the system prompt below). Capped at 6 parts (raised from 4 once the
+   * instruction above was changed to encourage more frequent splitting)
+   * and empty/whitespace-only splits are dropped, so a stray or
+   * over-eager delimiter can't fragment a reply into unbounded noise.
    */
   const parts = cleanedResponseText
     .split("|||")
-    .map((part) => stripLeakedTimestampPrefix(part.trim()))
+    .map((part) => stripAllLeakedTimestamps(stripLeakedTimestampPrefix(part.trim())).trim())
     .filter((part) => part.length > 0)
     .slice(0, 6);
 

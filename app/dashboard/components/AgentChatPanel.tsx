@@ -73,7 +73,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
   const [input, setInput] = useState("");
   const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
   const [loading, setLoading] = useState(true);
-  const [sending, setSending] = useState(false);
+  const [activeSends, setActiveSends] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -187,9 +187,14 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
 
   async function sendMessage() {
     const trimmed = input.trim();
-    if (!trimmed || sending) return;
+    if (!trimmed) return;
 
-    setSending(true);
+    // Deliberately NOT a shared blocking flag — allows sending another
+    // message while a previous one's agent reply is still in flight.
+    // Each call is self-contained (its own tempId/closures), and all
+    // shared-state updates use the functional setState form, so
+    // multiple overlapping sends are safe to run concurrently.
+    setActiveSends((n) => n + 1);
     setError(null);
 
     const replyId = replyingTo?.id ?? null;
@@ -238,7 +243,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
         setMessages((prev) => prev.filter((m) => m.id !== tempId));
         setInput(trimmed);
         setReplyingTo(repliedToSnapshot);
-        setSending(false);
+        setActiveSends((n) => n - 1);
         return;
       }
 
@@ -256,7 +261,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
       setMessages((prev) => prev.filter((m) => m.id !== tempId));
       setInput(trimmed);
       setReplyingTo(repliedToSnapshot);
-      setSending(false);
+      setActiveSends((n) => n - 1);
       return;
     }
 
@@ -264,7 +269,10 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
      * PHASE 2 — the actual agent turn. The owner's message is already
      * confirmed and rendered normally at this point; this only ever
      * adds the agent's reply (or reports a failure to reply, which is
-     * a different, separate failure from "did my message send").
+     * a different, separate failure from "did my message send"). Not
+     * gated on any shared flag, so the owner is free to send another
+     * message (starting its own independent Phase 1 + Phase 2) while
+     * this one is still waiting on the agent.
      */
     try {
       const res = await fetch("/api/agent-chat", {
@@ -289,7 +297,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
     } catch {
       setError("Your message sent, but couldn't reach the agent for a reply — try again.");
     } finally {
-      setSending(false);
+      setActiveSends((n) => n - 1);
     }
   }
 
@@ -304,7 +312,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
     <div className="flex h-full flex-col">
       <div
         ref={scrollRef}
-        className={`flex-1 space-y-3 overflow-y-auto overflow-x-hidden ${compact ? "px-3 py-3" : "px-6 py-6"}`}
+        className={`flex-1 overflow-y-auto overflow-x-hidden ${compact ? "px-3 py-3" : "px-6 py-6"}`}
       >
         {loading ? (
           <p className="text-sm text-muted">Loading conversation…</p>
@@ -350,9 +358,29 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
               nextMsg.role !== msg.role ||
               formatTimeLabel(nextMsg.created_at) !== formatTimeLabel(msg.created_at);
 
+            /**
+             * Bug fix: the scroll container previously used Tailwind's
+             * `space-y-3`, which applies a uniform margin between EVERY
+             * message via a sibling selector — so grouped bubbles still
+             * looked visibly apart even after the inner gap below was
+             * tightened, since that outer spacing dominated. Replaced
+             * with manual per-message top margin: tight when grouped
+             * with the previous message, normal otherwise.
+             */
+            const prevMsg = messages[index - 1];
+            const isGroupedWithPrevious =
+              Boolean(prevMsg) &&
+              prevMsg.role === msg.role &&
+              formatTimeLabel(prevMsg.created_at) === formatTimeLabel(msg.created_at);
+
+            const topMargin = index === 0 ? "" : isGroupedWithPrevious ? "mt-0.5" : "mt-3";
+
             return (
-              <div key={msg.id} className={`group flex min-w-0 ${isOwner ? "justify-end" : "justify-start"}`}>
-                <div className={`flex min-w-0 max-w-[85%] flex-col ${isOwner ? "items-end" : "items-start"} ${showTimestamp ? "gap-1" : "gap-0.5"}`}>
+              <div
+                key={msg.id}
+                className={`group flex min-w-0 ${topMargin} ${isOwner ? "justify-end" : "justify-start"}`}
+              >
+                <div className={`flex min-w-0 max-w-[85%] flex-col ${isOwner ? "items-end" : "items-start"} ${showTimestamp ? "gap-1" : "gap-0"}`}>
                   {repliedTo && (
                     <div className="max-w-full rounded-control border-l-2 border-line bg-surface-2 px-2.5 py-1 text-xs text-muted break-words">
                       {repliedTo.content.slice(0, 60)}
@@ -383,6 +411,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
                     <button
                       type="button"
                       onClick={() => setReplyingTo(msg)}
+                      title="Quote in reply"
                       aria-label="Reply to this message"
                       className={`focus-ring absolute -bottom-1.5 z-10 flex h-6 w-6 cursor-pointer items-center justify-center rounded-full border border-line bg-surface text-[12px] text-muted opacity-0 shadow-panel transition-opacity hover:text-accent-ink group-hover:opacity-100 ${
                         isOwner ? "-left-1.5" : "-right-1.5"
@@ -435,18 +464,22 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
             onKeyDown={handleKeyDown}
             placeholder="Say something"
             rows={1}
-            disabled={sending}
             className="focus-ring max-h-[160px] flex-1 resize-none rounded-control border border-line bg-surface px-3 py-2 text-sm text-ink placeholder:text-muted"
           />
           <button
             type="button"
             onClick={sendMessage}
-            disabled={sending || !input.trim()}
+            disabled={!input.trim()}
             className="focus-ring shrink-0 cursor-pointer rounded-control bg-accent px-4 py-2 text-sm font-medium text-white shadow-panel transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
           >
             Send
           </button>
         </div>
+        {activeSends > 0 && (
+          <p className="mt-1.5 px-1 text-[11px] text-muted">
+            {activeSends === 1 ? "Waiting on a reply…" : `Waiting on ${activeSends} replies…`}
+          </p>
+        )}
       </div>
     </div>
   );

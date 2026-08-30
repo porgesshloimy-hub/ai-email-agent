@@ -42,6 +42,20 @@ export interface ToolPermissions {
    */
   gmailReadAllowed: boolean;
 
+  /**
+   * NEW: whether the owner-chat surface may compose a brand-new
+   * outbound email draft (not a reply — see
+   * lib/agent/tools/compose-email-draft.ts). Found missing while
+   * investigating a real false claim: the model told the owner "I can
+   * draft one for you to review" with no tool on the chat surface that
+   * could actually do that (create_draft/send_reply are both
+   * surfaces: ["email"] only). This reuses the same "send"|
+   * "draft_only"|"none" resolution resolveSendCapability() already
+   * produces for the email surface — a tenant with gmail.draft allowed
+   * (or gmail.send allowed) can compose via chat too.
+   */
+  emailDraftCapability: "send" | "draft_only" | "none";
+
   calendarWriteCapability: "write" | "propose_only" | "none";
 
   zoomCapability: "write" | "propose_only" | "none";
@@ -83,6 +97,22 @@ export interface ToolContext {
   tenantId: string;
   supabase: SupabaseServiceClient;
   permissions: ToolPermissions;
+
+  /**
+   * Set true only by chat.ts's confirmed-execution path (after the
+   * owner replies "yes" to a sync_confirm prompt). Bug fix: without
+   * this, a tool that internally calls resolveOwnerApprovalPath()
+   * (create_calendar_event, send_email) would re-run that check on the
+   * CONFIRMED execution too — and since the confirm-path context has no
+   * ownerMessageText, that re-check would score as not-explicit and
+   * create ANOTHER pending confirmation instead of actually executing,
+   * looping forever on every single confirmation. When this flag is
+   * true, those tools skip the approval check entirely and just
+   * perform the action — resolution already happened once, when the
+   * pending confirmation was first created.
+   */
+  preApprovedAction?: boolean;
+
   email?: ToolEmailContext;
   chat?: ToolChatContext;
 }

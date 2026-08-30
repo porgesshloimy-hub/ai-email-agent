@@ -241,49 +241,60 @@ export const createCalendarEventChatTool: ToolDefinition = {
    */
   async execute(args: Record<string, any>, context: ToolContext) {
     const { supabase, tenantId } = context;
-    const ownerMessageText = context.chat?.ownerMessageText ?? "";
 
-    const resolution = resolveOwnerApprovalPath("create_calendar_event", ownerMessageText);
+    /**
+     * Bug fix: this function is called twice for a sync_confirm action
+     * — once when the model first proposes it (needs the approval
+     * check), and again after the owner replies "yes" (already
+     * resolved, must NOT re-check, since the confirm-path context has
+     * no ownerMessageText and would score as not-explicit, creating
+     * another pending confirmation instead of actually booking it).
+     * context.preApprovedAction distinguishes the two.
+     */
+    if (!context.preApprovedAction) {
+      const ownerMessageText = context.chat?.ownerMessageText ?? "";
+      const resolution = resolveOwnerApprovalPath("create_calendar_event", ownerMessageText);
 
-    await supabase.from("owner_directed_action_log").insert({
-      tenant_id: tenantId,
-      tool_name: "create_calendar_event",
-      explicitness_heuristic_score: resolution.explicitnessScore,
-      executed_directly: resolution.path === "execute",
-      content_snapshot: JSON.stringify(args),
-      source_channel: "chat",
-    });
+      await supabase.from("owner_directed_action_log").insert({
+        tenant_id: tenantId,
+        tool_name: "create_calendar_event",
+        explicitness_heuristic_score: resolution.explicitnessScore,
+        executed_directly: resolution.path === "execute",
+        content_snapshot: JSON.stringify(args),
+        source_channel: "chat",
+      });
 
-    if (resolution.path === "sync_confirm") {
-      const confirmationMessage =
-        `Just to confirm before I book it — "${args.summary}" from ${args.startTime} to ${args.endTime}. ` +
-        `Go ahead?`;
+      if (resolution.path === "sync_confirm") {
+        const confirmationMessage =
+          `Just to confirm before I book it — "${args.summary}" from ${args.startTime} to ${args.endTime}. ` +
+          `Go ahead?`;
 
-      const { error: pendingError } = await supabase
-        .from("pending_owner_confirmations")
-        .insert({
-          tenant_id: tenantId,
-          tool_name: "create_calendar_event",
-          args,
-          confirmation_message: confirmationMessage,
-          explicitness_score: resolution.explicitnessScore,
-        });
+        const { error: pendingError } = await supabase
+          .from("pending_owner_confirmations")
+          .insert({
+            tenant_id: tenantId,
+            tool_name: "create_calendar_event",
+            args,
+            confirmation_message: confirmationMessage,
+            explicitness_score: resolution.explicitnessScore,
+          });
 
-      if (pendingError) {
-        /**
-         * Fail open toward the SAFER behavior here — if we can't even
-         * record that a confirmation is pending, executing anyway would
-         * defeat the entire point of this check. Report the failure
-         * back to the owner rather than silently booking the event.
-         */
-        console.error("FAILED TO STORE PENDING OWNER CONFIRMATION:", {
-          tenantId,
-          error: pendingError,
-        });
-        return "I wasn't able to set that up for confirmation — please try again.";
+        if (pendingError) {
+          /**
+           * Fail open toward the SAFER behavior here — if we can't even
+           * record that a confirmation is pending, executing anyway would
+           * defeat the entire point of this check. Report the failure
+           * back to the owner rather than silently booking the event.
+           */
+          console.error("FAILED TO STORE PENDING OWNER CONFIRMATION:", {
+            tenantId,
+            error: pendingError,
+          });
+          return "I wasn't able to set that up for confirmation — please try again.";
+        }
+
+        return confirmationMessage;
       }
-
-      return confirmationMessage;
     }
 
     const { createEvent } = await import("@/lib/calendar/client");

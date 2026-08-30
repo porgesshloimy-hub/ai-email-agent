@@ -15,6 +15,8 @@ import {
 } from "./propose-zoom-meeting";
 import { checkCalendarAvailabilityTool } from "./check-calendar-availability";
 import { checkRecentEmailsTool } from "./check-recent-emails";
+import { composeEmailDraftTool } from "./compose-email-draft";
+import { sendEmailTool } from "./send-email";
 import { checkPendingApprovalsTool } from "./check-pending-approvals";
 import { requestAdditionalCapabilityTool } from "./request-additional-capability";
 import { noActionRequiredTool } from "./no-action-required";
@@ -43,6 +45,8 @@ export const ALL_TOOLS: ToolDefinition[] = [
   proposeCalendarEventProposeOnlyTool,
   checkCalendarAvailabilityTool,
   checkRecentEmailsTool,
+  composeEmailDraftTool,
+  sendEmailTool,
   createZoomMeetingTool,
   proposeZoomMeetingWriteTool,
   proposeZoomMeetingProposeOnlyTool,

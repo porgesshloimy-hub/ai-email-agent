@@ -881,6 +881,123 @@ export async function watchGmail(
  * originalMessageId is optional because some older callers may
  * not provide it.
  */
+/**
+ * NEW: composes a brand-new outbound email draft, not a reply within an
+ * existing thread. createDraft() above requires a threadId and builds
+ * In-Reply-To/References headers — correct for the email pipeline's
+ * "draft a reply to this inbound customer email" use case, but unusable
+ * for the owner-chat surface asking the agent to compose a fresh email
+ * to someone (found while wiring up owner-chat email drafting — the
+ * agent had been claiming it could "draft one for you to review" with
+ * no tool that could actually do that at all).
+ */
+export async function createNewDraft(
+  tenantId: string,
+  to: string,
+  subject: string,
+  body: string
+) {
+  const gmail = await getGmailClient(tenantId);
+
+  console.log("GMAIL CREATE NEW DRAFT:", {
+    tenantId,
+    to,
+    subject,
+    bodyLength: body.length,
+  });
+
+  try {
+    const rawMessage = Buffer.from(
+      [`To: ${to}`, `Subject: ${subject}`, "", body].join("\r\n"),
+      "utf8"
+    ).toString("base64url");
+
+    const draft = await gmail.users.drafts.create({
+      userId: "me",
+      requestBody: {
+        message: {
+          raw: rawMessage,
+        },
+      },
+    });
+
+    console.log("GMAIL CREATE NEW DRAFT SUCCESS:", {
+      tenantId,
+      draftId: draft.data.id,
+    });
+
+    return draft.data;
+  } catch (error: any) {
+    console.error("GMAIL CREATE NEW DRAFT FAILED:", {
+      tenantId,
+      errorCode: error?.code,
+      errorMessage: error?.message,
+      status: error?.response?.status,
+      statusText: error?.response?.statusText,
+      responseData: error?.response?.data,
+    });
+
+    throw error;
+  }
+}
+
+/**
+ * NEW: composes and immediately sends a brand-new outbound email in one
+ * call — not a reply within an existing thread, and not routed through
+ * a draft first. Only ever reached via an owner-directed instruction
+ * that was scored as fully explicit (see
+ * lib/agent/approval/resolve.ts and lib/agent/tools/send-email.ts) —
+ * anything less explicit goes through createNewDraft() above instead,
+ * for human review before it goes out.
+ */
+export async function sendNewMessage(
+  tenantId: string,
+  to: string,
+  subject: string,
+  body: string
+) {
+  const gmail = await getGmailClient(tenantId);
+
+  console.log("GMAIL SEND NEW MESSAGE:", {
+    tenantId,
+    to,
+    subject,
+    bodyLength: body.length,
+  });
+
+  try {
+    const rawMessage = Buffer.from(
+      [`To: ${to}`, `Subject: ${subject}`, "", body].join("\r\n"),
+      "utf8"
+    ).toString("base64url");
+
+    const sent = await gmail.users.messages.send({
+      userId: "me",
+      requestBody: {
+        raw: rawMessage,
+      },
+    });
+
+    console.log("GMAIL SEND NEW MESSAGE SUCCESS:", {
+      tenantId,
+      messageId: sent.data.id,
+    });
+
+    return sent.data;
+  } catch (error: any) {
+    console.error("GMAIL SEND NEW MESSAGE FAILED:", {
+      tenantId,
+      errorCode: error?.code,
+      errorMessage: error?.message,
+      status: error?.response?.status,
+      statusText: error?.response?.statusText,
+      responseData: error?.response?.data,
+    });
+
+    throw error;
+  }
+}
+
 export async function createDraft(
   tenantId: string,
   threadId: string,

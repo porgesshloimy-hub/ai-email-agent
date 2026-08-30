@@ -28,6 +28,55 @@ export interface ExplicitnessResult {
 const EXPLICITNESS_THRESHOLD = 0.6;
 
 /**
+ * A concrete email address in the owner's own message — the strongest
+ * possible recipient signal, since it requires no resolution/inference
+ * at all.
+ */
+const EMAIL_ADDRESS_PATTERN = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
+
+/**
+ * Quoted text — the owner dictating actual words to relay, rather than
+ * describing intent for the model to phrase itself. Matches either
+ * straight or curly double quotes.
+ */
+const QUOTED_CONTENT_PATTERN = /["“][^"”]{8,}["”]/;
+
+/**
+ * Scores how explicit an owner's raw chat message was for actually
+ * SENDING an email (as opposed to drafting one). Deliberately more
+ * conservative than scoreCalendarInstructionExplicitness() above: a
+ * wrong calendar entry is trivially correctable, but a wrongly-sent
+ * email has already reached a real third party and can't be undone.
+ * Both a clear recipient AND owner-dictated content are required —
+ * either alone is not enough to skip confirmation.
+ */
+export function scoreEmailInstructionExplicitness(
+  ownerMessageText: string
+): ExplicitnessResult {
+  const reasons: string[] = [];
+
+  const hasExplicitRecipient = EMAIL_ADDRESS_PATTERN.test(ownerMessageText);
+  const hasDictatedContent = QUOTED_CONTENT_PATTERN.test(ownerMessageText);
+
+  if (hasExplicitRecipient) {
+    reasons.push("owner's message contains an explicit email address");
+  }
+  if (hasDictatedContent) {
+    reasons.push("owner's message contains quoted/dictated content to relay");
+  }
+
+  // Both required — see reasoning above. Neither alone crosses the
+  // threshold, by design.
+  const score = hasExplicitRecipient && hasDictatedContent ? 1 : hasExplicitRecipient || hasDictatedContent ? 0.4 : 0;
+
+  return {
+    score,
+    isExplicit: score >= EXPLICITNESS_THRESHOLD,
+    reasons,
+  };
+}
+
+/**
  * A specific clock time ("3pm", "15:00", "3:30 PM") or an ISO-ish
  * date/time fragment. Deliberately loose — false positives here just
  * mean "treat as explicit" more often, which is the safer direction to

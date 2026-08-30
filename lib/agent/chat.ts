@@ -341,7 +341,55 @@ export async function handleChatMessage(
       return result.content ?? "Done.";
     }
 
-    return await toolDef.execute(args, toolContext);
+    const toolResult = await toolDef.execute(args, toolContext);
+
+    /**
+     * Bug found in production: check_calendar_availability (and any
+     * future informational, read-only tool) returns a structured
+     * object meant to be READ and phrased into English by a model —
+     * exactly what lib/agent/run.ts's multi-step email loop does by
+     * feeding the tool result back as a "tool" role message and
+     * completing again. chat.ts never did this — it returned whatever
+     * execute() produced directly as the final user-facing text, which
+     * is correct for a tool like create_calendar_event (it hand-writes
+     * a plain string, e.g. "Done — booked ..."), but surfaced raw JSON
+     * to the owner for any tool that returns data instead of prose.
+     *
+     * Fix: if the tool's result is already a plain string, use it as-is
+     * (unchanged behavior). If it's anything else, do exactly one more
+     * model call — not a full loop, chat.ts is deliberately single-shot
+     * — with the tool result appended the same way run.ts does
+     * (JSON.stringify'd, as a "tool" role message), and use that
+     * completion's text as the final reply instead.
+     */
+    if (typeof toolResult === "string") {
+      return toolResult;
+    }
+
+    const followUpMessages: LlmMessage[] = [
+      ...messages,
+      {
+        role: "assistant",
+        content: result.content,
+        toolCalls: [toolCall],
+      },
+      {
+        role: "tool",
+        toolCallId: toolCall.id,
+        name: toolCall.name,
+        content: JSON.stringify(toolResult),
+      },
+    ];
+
+    const followUp = await runChatCompletion(aiProvider, {
+      model: aiModel,
+      messages: followUpMessages,
+      tools,
+    });
+
+    await meterChatUsage(tenantId, aiProvider, aiModel, followUp.usage);
+
+    return followUp.content ?? "Done.";
   }
 
   const responseText = await computeResponse();

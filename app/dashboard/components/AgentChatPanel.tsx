@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 
 export interface ChatMessage {
   id: string;
@@ -8,6 +8,41 @@ export interface ChatMessage {
   content: string;
   replied_to_message_id: string | null;
   created_at: string;
+  /** Client-only flag for an optimistically-rendered message not yet confirmed by the server. */
+  pending?: boolean;
+}
+
+/**
+ * The agent's replies come back with markdown-style emphasis
+ * (**bold**, *italic*, `code`) — found in production when a calendar
+ * summary rendered with literal asterisks instead of bold text. Rather
+ * than pull in a full markdown library for what's just inline emphasis
+ * inside a chat bubble (no headers, lists, links, or tables needed
+ * here), this is a small, dependency-free tokenizer. It builds React
+ * elements directly rather than using dangerouslySetInnerHTML, so
+ * there's no HTML-injection surface even though this content comes
+ * from the model rather than a trusted static string.
+ */
+function renderInlineMarkdown(text: string): React.ReactNode[] {
+  const pattern = /(\*\*[^*]+\*\*|`[^`]+`|\*[^*]+\*)/g;
+  const parts = text.split(pattern);
+
+  return parts.map((part, i) => {
+    if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+      return <strong key={i}>{part.slice(2, -2)}</strong>;
+    }
+    if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
+      return (
+        <code key={i} className="rounded bg-surface-2 px-1 py-0.5 font-mono text-[0.85em]">
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    if (part.startsWith("*") && part.endsWith("*") && part.length > 2) {
+      return <em key={i}>{part.slice(1, -1)}</em>;
+    }
+    return <Fragment key={i}>{part}</Fragment>;
+  });
 }
 
 function formatTimeLabel(iso: string): string {
@@ -84,8 +119,24 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
     setError(null);
 
     const replyId = replyingTo?.id ?? null;
+    const repliedToSnapshot = replyingTo;
     setInput("");
     setReplyingTo(null);
+
+    // Show the owner's own message immediately rather than waiting for
+    // the agent's reply — the temp id is reconciled with the real
+    // persisted row once the request resolves, so reply-to targeting
+    // against it still works correctly afterward.
+    const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const optimisticMessage: ChatMessage = {
+      id: tempId,
+      role: "owner",
+      content: trimmed,
+      replied_to_message_id: replyId,
+      created_at: new Date().toISOString(),
+      pending: true,
+    };
+    setMessages((prev) => [...prev, optimisticMessage]);
 
     try {
       const res = await fetch("/api/agent-chat", {
@@ -98,15 +149,26 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
 
       if (!res.ok || data.error) {
         setError(data.error ?? "Something went wrong sending that.");
-        // Restore the draft so nothing typed is lost on failure.
+        // Roll back the optimistic message and restore the draft so
+        // nothing typed is lost on failure.
+        setMessages((prev) => prev.filter((m) => m.id !== tempId));
         setInput(trimmed);
+        setReplyingTo(repliedToSnapshot);
         return;
       }
 
-      setMessages((prev) => [...prev, data.ownerMessage, data.agentMessage]);
+      // Replace the optimistic placeholder with the real persisted row
+      // (real id, real timestamp) and append the agent's reply.
+      setMessages((prev) => [
+        ...prev.filter((m) => m.id !== tempId),
+        data.ownerMessage,
+        data.agentMessage,
+      ]);
     } catch {
       setError("Couldn't reach the agent — check your connection and try again.");
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
       setInput(trimmed);
+      setReplyingTo(repliedToSnapshot);
     } finally {
       setSending(false);
     }
@@ -123,7 +185,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
     <div className="flex h-full flex-col">
       <div
         ref={scrollRef}
-        className={`flex-1 space-y-3 overflow-y-auto ${compact ? "px-3 py-3" : "px-6 py-6"}`}
+        className={`flex-1 space-y-3 overflow-y-auto overflow-x-hidden ${compact ? "px-3 py-3" : "px-6 py-6"}`}
       >
         {loading ? (
           <p className="text-sm text-muted">Loading conversation…</p>
@@ -137,23 +199,23 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
             const isOwner = msg.role === "owner";
 
             return (
-              <div key={msg.id} className={`group flex ${isOwner ? "justify-end" : "justify-start"}`}>
-                <div className={`max-w-[85%] ${isOwner ? "items-end" : "items-start"} flex flex-col gap-1`}>
+              <div key={msg.id} className={`group flex min-w-0 ${isOwner ? "justify-end" : "justify-start"}`}>
+                <div className={`flex min-w-0 max-w-[85%] flex-col gap-1 ${isOwner ? "items-end" : "items-start"}`}>
                   {repliedTo && (
-                    <div className="rounded-control border border-line bg-surface-2 px-2.5 py-1 text-xs text-muted">
+                    <div className="max-w-full rounded-control border border-line bg-surface-2 px-2.5 py-1 text-xs text-muted break-words">
                       Replying to: {repliedTo.content.slice(0, 60)}
                       {repliedTo.content.length > 60 ? "…" : ""}
                     </div>
                   )}
 
                   <div
-                    className={`rounded-panel px-3.5 py-2.5 text-sm leading-relaxed shadow-panel ${
+                    className={`max-w-full whitespace-pre-wrap break-words rounded-panel px-3.5 py-2.5 text-sm leading-relaxed shadow-panel ${
                       isOwner
                         ? "bg-accent text-white"
                         : "border border-line bg-surface text-ink"
-                    }`}
+                    } ${msg.pending ? "opacity-60" : ""}`}
                   >
-                    {msg.content}
+                    {renderInlineMarkdown(msg.content)}
                   </div>
 
                   <div className="flex items-center gap-2 px-1">

@@ -455,6 +455,7 @@ export async function processIncomingEmail(
         sendAllowed: effectiveSendAllowed,
         calendarReadAllowed,
         gmailReadAllowed,
+        emailDraftCapability: sendCapability,
         calendarWriteCapability,
         zoomCapability,
       },

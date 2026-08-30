@@ -75,12 +75,11 @@ export async function GET() {
 
 /**
  * Sends one owner message to the agent and returns both the owner's own
- * persisted row and the agent's reply row, so the client has real
- * database ids to hang a future "reply to this" action off of —
- * handleChatMessage() itself only returns the reply's plain text (its
- * signature is shared with the Google Chat webhook, which has no use
- * for anything richer), so this route re-fetches the two most recently
- * created rows for this tenant immediately after the call completes.
+ * persisted row and every agent-reply row created this turn (a reply
+ * can become more than one message — see lib/agent/chat.ts's
+ * message-splitting comment), so the client has real database ids to
+ * hang a future "reply to this" action off of and can render each part
+ * as its own bubble.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -95,21 +94,31 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Message is required" }, { status: 400 });
     }
 
-    await handleChatMessage(tenantId, message, {
+    const result = await handleChatMessage(tenantId, message, {
       channel: "web",
       repliedToMessageId,
     });
 
     const supabase = createServiceSupabase();
 
-    const { data: recent, error } = await supabase
+    const idsToFetch = [result.ownerMessageId, ...result.messageIds].filter(
+      (id): id is string => Boolean(id)
+    );
+
+    if (idsToFetch.length === 0) {
+      console.error("HANDLE CHAT MESSAGE RETURNED NO PERSISTED ROW IDS:", { tenantId });
+      return NextResponse.json(
+        { error: "Message sent, but couldn't confirm it — refresh to see the latest." },
+        { status: 500 }
+      );
+    }
+
+    const { data: rows, error } = await supabase
       .from("owner_chat_messages")
       .select("id, role, content, replied_to_message_id, created_at")
-      .eq("tenant_id", tenantId)
-      .order("created_at", { ascending: false })
-      .limit(2);
+      .in("id", idsToFetch);
 
-    if (error || !recent || recent.length < 2) {
+    if (error || !rows) {
       console.error("FAILED TO RE-FETCH JUST-SENT CHAT MESSAGES:", { tenantId, error });
       return NextResponse.json(
         { error: "Message sent, but couldn't confirm it — refresh to see the latest." },
@@ -117,11 +126,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // recent[0] is the agent's reply (most recent), recent[1] is the
-    // owner's own message that triggered it.
-    const [agentMessage, ownerMessage] = recent;
+    const ownerMessage = rows.find((r) => r.id === result.ownerMessageId) ?? null;
 
-    return NextResponse.json({ ownerMessage, agentMessage });
+    // Preserve the original creation order from result.messageIds
+    // rather than trusting the DB query's row order.
+    const agentMessages = result.messageIds
+      .map((id) => rows.find((r) => r.id === id))
+      .filter((r): r is NonNullable<typeof r> => Boolean(r));
+
+    return NextResponse.json({ ownerMessage, agentMessages });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Unknown error" },

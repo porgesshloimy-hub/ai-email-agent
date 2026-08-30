@@ -95,8 +95,10 @@ console.error("===== END GOOGLE CHAT EVENT =====");
       "Google Chat: Calling handleChatMessage..."
     );
 
-    const reply =
+    const result =
       await handleChatMessage(tenantId, messageText);
+
+    const reply = result.text;
 
     console.error(
       "Google Chat: handleChatMessage completed"

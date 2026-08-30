@@ -1,5 +1,5 @@
 import { createServiceSupabase } from "@/lib/supabase/server";
-import { tenantHasCalendarAccess } from "@/lib/google/authClient";
+import { tenantHasCalendarAccess, tenantHasGmailAccess } from "@/lib/google/authClient";
 import type {
   AgentAction,
   GmailAction,
@@ -235,6 +235,36 @@ export async function resolveZoomCapability(
  * above, for the same reason: a configured permission level with no
  * actual Calendar connection behind it is not real access.
  */
+/**
+ * NEW: previously there was no resolver at all for gmail.read — the
+ * agent could draft/send email (resolveSendCapability) but had no
+ * connection-checked way to be GRANTED read access to the inbox itself,
+ * and no tool ever asked for it. Found because the owner-chat surface
+ * had no way to check incoming email at all — it could only report on
+ * drafts already awaiting approval. Mirrors canReadCalendar() exactly:
+ * a configured level alone is not enough, real connected access must
+ * exist too.
+ */
+export async function canReadGmail(
+  tenantId: string
+): Promise<boolean> {
+  const hasGmailAccess = await tenantHasGmailAccess(tenantId);
+
+  if (!hasGmailAccess) {
+    return false;
+  }
+
+  const level = await getPermissionLevel(
+    tenantId,
+    "gmail.read"
+  );
+
+  return (
+    level === "allowed" ||
+    level === "approval_required"
+  );
+}
+
 export async function canReadCalendar(
   tenantId: string
 ): Promise<boolean> {

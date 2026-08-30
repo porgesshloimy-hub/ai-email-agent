@@ -5,6 +5,7 @@ import {
   resolveCalendarWriteCapability,
   resolveZoomCapability,
   canReadCalendar,
+  canReadGmail,
   checkRulesForTopic,
 } from "@/lib/agent/permissions";
 
@@ -257,6 +258,11 @@ export async function processIncomingEmail(
         email.tenantId
       );
 
+    const gmailReadAllowedReal =
+      await canReadGmail(
+        email.tenantId
+      );
+
     /**
      * --------------------------------------------------------
      * PERSONA (migration 010 — agent_personas)
@@ -289,6 +295,11 @@ export async function processIncomingEmail(
       calendarReadAllowedReal,
       persona,
       "calendar.read"
+    );
+    const gmailReadAllowed = narrowReadCapability(
+      gmailReadAllowedReal,
+      persona,
+      "gmail.read"
     );
 
     /**
@@ -443,6 +454,7 @@ export async function processIncomingEmail(
       permissions: {
         sendAllowed: effectiveSendAllowed,
         calendarReadAllowed,
+        gmailReadAllowed,
         calendarWriteCapability,
         zoomCapability,
       },

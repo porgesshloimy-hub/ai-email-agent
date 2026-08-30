@@ -83,13 +83,14 @@ export const checkCalendarAvailabilityTool: ToolDefinition = {
       throw new Error("check_calendar_availability requires endTime");
     }
 
-    const { findAvailability } = await import("@/lib/calendar/client");
-
-    const busy = await findAvailability(
-      tenantId,
-      args.startTime,
-      args.endTime
+    const { findAvailability, listEventsInRange } = await import(
+      "@/lib/calendar/client"
     );
+
+    const [busy, events] = await Promise.all([
+      findAvailability(tenantId, args.startTime, args.endTime),
+      listEventsInRange(tenantId, args.startTime, args.endTime),
+    ]);
 
     return {
       success: true,
@@ -97,11 +98,20 @@ export const checkCalendarAvailabilityTool: ToolDefinition = {
       startTime: args.startTime,
       endTime: args.endTime,
       busy,
+      /**
+       * Bug fix: findAvailability() (freebusy.query) only ever returns
+       * busy/free time ranges — Google's API for that endpoint has no
+       * concept of a title or description. Without this, the agent
+       * could confirm something was blocking a time slot but had no way
+       * to say WHAT it was. events comes from a separate events.list
+       * call and includes each event's actual summary/description.
+       */
+      events,
       isFullyFree: busy.length === 0,
       message:
         busy.length === 0
           ? "No existing events overlap this time range — it is currently free on the calendar."
-          : "One or more existing events overlap this time range. Do not treat this time as available; the busy blocks are listed in `busy`.",
+          : "One or more existing events overlap this time range. Do not treat this time as available — see `events` for their titles and descriptions, and `busy` for the exact blocked time ranges.",
     };
   },
 };

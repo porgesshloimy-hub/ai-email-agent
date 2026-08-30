@@ -158,11 +158,14 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
       }
 
       // Replace the optimistic placeholder with the real persisted row
-      // (real id, real timestamp) and append the agent's reply.
+      // (real id, real timestamp) and append every agent-reply message
+      // for this turn — a reply can arrive as more than one message
+      // (see lib/agent/chat.ts's message-splitting comment), each
+      // rendered as its own bubble in order.
       setMessages((prev) => [
         ...prev.filter((m) => m.id !== tempId),
         data.ownerMessage,
-        data.agentMessage,
+        ...(data.agentMessages ?? []),
       ]);
     } catch {
       setError("Couldn't reach the agent — check your connection and try again.");

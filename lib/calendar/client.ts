@@ -92,6 +92,44 @@ export async function findAvailability(
 }
 
 /**
+ * Lists actual event details (title, description, start/end) within a
+ * time range.
+ *
+ * Bug fix: findAvailability() above uses Google's freebusy.query API,
+ * which by design only ever returns busy/free time ranges — it never
+ * includes an event's title or description, since that's a genuine
+ * limitation of that specific Google Calendar endpoint, not something
+ * fixable by changing how it's called. The agent was reporting "there's
+ * an event blocking this time" with no way to say what the event
+ * actually was. This uses events.list instead, which does return real
+ * event details, so check_calendar_availability can surface both:
+ * exact busy/free time ranges (findAvailability) and what's actually on
+ * the calendar during that range (this function).
+ */
+export async function listEventsInRange(
+  tenantId: string,
+  timeMinISO: string,
+  timeMaxISO: string
+) {
+  const calendar = await getCalendarClient(tenantId);
+
+  const res = await calendar.events.list({
+    calendarId: "primary",
+    timeMin: timeMinISO,
+    timeMax: timeMaxISO,
+    singleEvents: true,
+    orderBy: "startTime",
+  });
+
+  return (res.data.items ?? []).map((event) => ({
+    summary: event.summary ?? "(untitled event)",
+    description: event.description ?? null,
+    start: event.start?.dateTime ?? event.start?.date ?? null,
+    end: event.end?.dateTime ?? event.end?.date ?? null,
+  }));
+}
+
+/**
  * Creates a Google Calendar event.
  *
  * Supports:

@@ -198,6 +198,94 @@ export async function readMessage(
 }
 
 /**
+ * NEW: lists recent inbox messages with real metadata (sender, subject,
+ * date, snippet, unread status) — not tied to any specific known
+ * message/thread id the way readThread()/readMessage() are.
+ *
+ * Found missing entirely while wiring up owner-chat email access: the
+ * only Gmail functions that existed all required already knowing a
+ * specific thread/message id (readThread, readMessage) or were push-
+ * event-driven (getHistoryChanges) — there was no general "what's
+ * recently in the inbox" lookup a chat conversation could call on
+ * demand. Gated by lib/agent/permissions.ts's canReadGmail(), a real
+ * connection-checked resolver that also didn't exist before this.
+ */
+export async function searchRecentMessages(
+  tenantId: string,
+  maxResults = 10,
+  query = "in:inbox"
+) {
+  const gmail = await getGmailClient(tenantId);
+
+  console.log("GMAIL SEARCH RECENT MESSAGES:", {
+    tenantId,
+    maxResults,
+    query,
+  });
+
+  try {
+    const listRes = await gmail.users.messages.list({
+      userId: "me",
+      maxResults,
+      q: query,
+    });
+
+    const messageRefs = listRes.data.messages ?? [];
+
+    const messages = await Promise.all(
+      messageRefs.map(async (ref) => {
+        if (!ref.id) return null;
+
+        const full = await gmail.users.messages.get({
+          userId: "me",
+          id: ref.id,
+          format: "metadata",
+          metadataHeaders: ["From", "Subject", "Date"],
+        });
+
+        const headers = full.data.payload?.headers ?? [];
+        const getHeader = (name: string) =>
+          headers.find(
+            (h) => h.name?.toLowerCase() === name.toLowerCase()
+          )?.value ?? null;
+
+        return {
+          id: ref.id,
+          threadId: full.data.threadId ?? null,
+          from: getHeader("From"),
+          subject: getHeader("Subject"),
+          date: getHeader("Date"),
+          snippet: full.data.snippet ?? null,
+          isUnread: full.data.labelIds?.includes("UNREAD") ?? false,
+        };
+      })
+    );
+
+    const results = messages.filter(
+      (m): m is NonNullable<typeof m> => m !== null
+    );
+
+    console.log("GMAIL SEARCH RECENT MESSAGES SUCCESS:", {
+      tenantId,
+      resultCount: results.length,
+    });
+
+    return results;
+  } catch (error: any) {
+    console.error("GMAIL SEARCH RECENT MESSAGES FAILED:", {
+      tenantId,
+      errorCode: error?.code,
+      errorMessage: error?.message,
+      status: error?.response?.status,
+      statusText: error?.response?.statusText,
+      responseData: error?.response?.data,
+    });
+
+    throw error;
+  }
+}
+
+/**
  * Get new Gmail messages since a previous historyId.
  *
  * Gmail's History API tells us which messages changed.

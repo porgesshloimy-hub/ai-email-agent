@@ -1,5 +1,5 @@
 import { createServiceSupabase } from "@/lib/supabase/server";
-import { resolveCalendarWriteCapability, canReadCalendar } from "@/lib/agent/permissions";
+import { resolveCalendarWriteCapability, canReadCalendar, canReadGmail } from "@/lib/agent/permissions";
 import { recordUsage } from "@/lib/billing/meter";
 import { calculateModelCost } from "@/lib/billing/pricing";
 import {
@@ -26,7 +26,7 @@ import {
   narrowReadCapability,
 } from "@/lib/agent/personas/apply-overrides";
 import { persistChatMessage, linkPendingConfirmationToMessage } from "@/lib/agent/chat-history/persist";
-import { fetchChatHistoryTurns } from "@/lib/agent/chat-history/build-context";
+import { fetchChatHistoryTurns, stripLeakedTimestampPrefix } from "@/lib/agent/chat-history/build-context";
 
 /**
  * Handles a single message from the business owner via Google Chat. This is
@@ -39,13 +39,23 @@ import { fetchChatHistoryTurns } from "@/lib/agent/chat-history/build-context";
  * (lib/agent/run.ts) — see lib/agent/models.ts. One model selection per
  * tenant covers both surfaces, rather than a second independent setting.
  *
- * Returns the text to send back as the synchronous Chat response.
+ * Returns { text, messageIds, ownerMessageId }: `text` is every part of
+ * the reply joined into one string (what a plain-text-only caller like
+ * the Google Chat webhook sends back as its single response);
+ * `messageIds` is the id of each individual owner_chat_messages row
+ * persisted for the agent's reply this turn, in order — a caller that
+ * can render multiple bubbles (the web widget) uses these to fetch and
+ * display each part separately instead of one long block.
+ * `ownerMessageId` is the id of the owner's own just-persisted message,
+ * so a caller doesn't have to guess or re-query for it. See the
+ * message-splitting comment at the bottom of this function for why a
+ * reply can become more than one message.
  */
 export async function handleChatMessage(
   tenantId: string,
   messageText: string,
   options: { channel?: string; repliedToMessageId?: string | null } = {}
-): Promise<string> {
+): Promise<{ text: string; messageIds: string[]; ownerMessageId: string | null }> {
   const channel = options.channel ?? "chat";
   const repliedToMessageId = options.repliedToMessageId ?? null;
 
@@ -54,7 +64,13 @@ export async function handleChatMessage(
   // Persist the incoming owner message immediately, before any
   // processing — so it's captured even if something downstream throws,
   // and so its id exists for reply-to resolution below.
-  await persistChatMessage(tenantId, "owner", messageText, channel, repliedToMessageId);
+  const ownerMessageRow = await persistChatMessage(
+    tenantId,
+    "owner",
+    messageText,
+    channel,
+    repliedToMessageId
+  );
 
   /**
    * Everything that decides WHAT to say back to the owner lives inside
@@ -130,6 +146,7 @@ export async function handleChatMessage(
             permissions: {
               sendAllowed: false,
               calendarReadAllowed: true,
+              gmailReadAllowed: false,
               calendarWriteCapability: "write",
               zoomCapability: "none",
             },
@@ -209,6 +226,7 @@ export async function handleChatMessage(
     }
 
     const calendarReadAllowedReal = await canReadCalendar(tenantId);
+    const gmailReadAllowedReal = await canReadGmail(tenantId);
     const calendarWriteCapabilityReal = await resolveCalendarWriteCapability(tenantId);
 
     /**
@@ -227,6 +245,11 @@ export async function handleChatMessage(
       calendarReadAllowedReal,
       persona,
       "calendar.read"
+    );
+    const gmailReadAllowed = narrowReadCapability(
+      gmailReadAllowedReal,
+      persona,
+      "gmail.read"
     );
     const calendarWriteCapability = narrowWriteCapability(
       calendarWriteCapabilityReal,
@@ -270,6 +293,7 @@ export async function handleChatMessage(
       permissions: {
         sendAllowed: false,
         calendarReadAllowed,
+        gmailReadAllowed,
         calendarWriteCapability,
         zoomCapability: "none",
       },
@@ -300,17 +324,33 @@ export async function handleChatMessage(
       {
         role: "system",
         content: [
-          `You are the AI assistant for ${tenant?.business_name ?? "this business"}, talking directly with the ` +
-            `business owner over chat (not a customer). Be concise — this is a chat conversation, not email.`,
+          /**
+           * Resolves the Phase 4 deferral: the seeded owner persona's
+           * system_prompt (migration 011, later customized per-tenant
+           * via migration 014 or, once built, the personas dashboard —
+           * see Phase 7.1) is now the actual voice/tone source for
+           * chat, taking precedence over this hardcoded generic line.
+           * The hardcoded line only fires as a fallback if persona
+           * resolution somehow failed and returned the synthetic
+           * default (empty systemPrompt), so a persona-lookup error
+           * degrades to the old behavior rather than an empty prompt.
+           */
+          persona.systemPrompt ||
+            `You are the AI assistant for ${tenant?.business_name ?? "this business"}, talking directly with the ` +
+              `business owner over chat (not a customer). Be concise — this is a chat conversation, not email.`,
           buildCurrentDateContext(tenant?.timezone),
           tenant?.business_description ?? "",
           agentConfig?.custom_instructions ?? "",
           `There are currently ${pendingEmailCount ?? 0} email drafts awaiting the owner's review.`,
+          gmailReadAllowed
+            ? "You can also check the actual inbox directly — use check_recent_emails if asked about incoming/recent emails, unread messages, or what's come in. Don't assume you only know about drafts; you have real read access to the inbox."
+            : "You do not have access to check the inbox directly — only drafts already awaiting review are visible to you.",
           calendarReadAllowed ? "You can discuss calendar availability if asked." : "",
           videoMeetingGuidance,
           historyTurns.length > 0
-            ? "The messages below include recent conversation history, each prefixed with when it was sent — use that to maintain continuity with what's already been discussed, and to judge how recent or stale something is."
+            ? "The messages below include recent conversation history, each prefixed with when it was sent — use that to maintain continuity with what's already been discussed, and to judge how recent or stale something is. That bracketed timestamp is metadata added for your reference only — never include a timestamp or bracketed time label at the start of your own reply; just answer normally."
             : "",
+          "If your reply has more than one genuinely separate, standalone statement — the way a person might send a couple of short texts in a row instead of one long paragraph — separate them with \"|||\" so each becomes its own message. Use this sparingly: most replies are one message. Don't split a single flowing thought into pieces, and don't use this just to break up a long-but-single point — only for statements that are actually distinct from each other.",
         ]
           .filter(Boolean)
           .join("\n"),
@@ -392,19 +432,53 @@ export async function handleChatMessage(
     return followUp.content ?? "Done.";
   }
 
-  const responseText = await computeResponse();
+  const rawResponseText = await computeResponse();
+  const cleanedResponseText = stripLeakedTimestampPrefix(rawResponseText);
 
-  const agentMessageRow = await persistChatMessage(tenantId, "agent", responseText, channel);
+  /**
+   * Message splitting: the model is instructed (system prompt below) to
+   * separate genuinely distinct standalone statements with "|||" — the
+   * way a person might send a couple of short texts in a row instead of
+   * one long paragraph, e.g. "I don't have access to X ||| For Y you'd
+   * need to check directly ||| Anything else?" becomes three separate
+   * bubbles instead of one block. Each part is stripped individually
+   * too, since a leaked timestamp could in principle appear at the
+   * start of any part, not just the very first one. Capped at 4 parts
+   * and empty/whitespace-only splits are dropped, so a stray or
+   * over-eager delimiter can't fragment a reply into noise.
+   */
+  const parts = cleanedResponseText
+    .split("|||")
+    .map((part) => stripLeakedTimestampPrefix(part.trim()))
+    .filter((part) => part.length > 0)
+    .slice(0, 4);
+
+  const finalParts = parts.length > 0 ? parts : [cleanedResponseText.trim() || "Done."];
+
+  const agentMessageIds: string[] = [];
+  let lastAgentMessageRow: Awaited<ReturnType<typeof persistChatMessage>> = null;
+
+  for (const part of finalParts) {
+    const row = await persistChatMessage(tenantId, "agent", part, channel);
+    if (row) {
+      agentMessageIds.push(row.id);
+      lastAgentMessageRow = row;
+    }
+  }
 
   // No-op unless a tool call during computeResponse() just created a new
   // pending_owner_confirmations row (see lib/agent/tools/create-calendar-event.ts's
-  // sync_confirm path) — links it to the message that just announced it,
-  // so a reply-to on THIS message resolves back to that pending item.
-  if (agentMessageRow) {
-    await linkPendingConfirmationToMessage(tenantId, agentMessageRow.id);
+  // sync_confirm path) — links it to the LAST part persisted, so a
+  // reply-to on that final message resolves back to that pending item.
+  if (lastAgentMessageRow) {
+    await linkPendingConfirmationToMessage(tenantId, lastAgentMessageRow.id);
   }
 
-  return responseText;
+  return {
+    text: finalParts.join("\n\n"),
+    messageIds: agentMessageIds,
+    ownerMessageId: ownerMessageRow?.id ?? null,
+  };
 }
 
 async function meterChatUsage(

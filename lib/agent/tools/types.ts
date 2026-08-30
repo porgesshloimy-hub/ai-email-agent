@@ -34,6 +34,14 @@ export interface ToolPermissions {
 
   calendarReadAllowed: boolean;
 
+  /**
+   * NEW: whether this tenant's real, connection-checked gmail.read
+   * capability is granted (lib/agent/permissions.ts's canReadGmail()).
+   * Previously nothing resolved this at all — email search/read tools
+   * didn't exist, so nothing needed gating on it.
+   */
+  gmailReadAllowed: boolean;
+
   calendarWriteCapability: "write" | "propose_only" | "none";
 
   zoomCapability: "write" | "propose_only" | "none";

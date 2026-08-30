@@ -52,6 +52,22 @@ function isClosingAcknowledgment(content: string): boolean {
 }
 
 /**
+ * Bug fix: prefixing history turns with "[Today, 3:24 AM] ..." (below)
+ * taught the model that this was the SHAPE of its own messages, and it
+ * started prepending timestamps to brand-new replies too — a
+ * self-reinforcing leak, since a contaminated reply gets persisted,
+ * then shows up in a future history window and reinforces the same
+ * pattern again. Used two ways: cleaning already-persisted content
+ * before re-showing it as history (so old leaks stop compounding), and
+ * as a defensive strip on the model's live output in chat.ts (so even
+ * if it still tries to mimic the pattern despite the explicit
+ * instruction below, the leaked prefix never reaches the user).
+ */
+export function stripLeakedTimestampPrefix(text: string): string {
+  return text.replace(/^\[(?:Today|Yesterday|\d+\s+days?\s+ago)[^\]]*\]\s*/i, "");
+}
+
+/**
  * Same UTC-midnight-anchor trick used by lib/agent/date-context.ts, so
  * "how many days ago" is computed from calendar dates in the tenant's
  * own timezone rather than raw millisecond differences (which would
@@ -158,6 +174,6 @@ export async function fetchChatHistoryTurns(
     .reverse()
     .map((row) => ({
       role: row.role === "owner" ? "user" : "assistant",
-      content: `[${formatRelativeTimestamp(new Date(row.created_at), now, timezone)}] ${row.content}`,
+      content: `[${formatRelativeTimestamp(new Date(row.created_at), now, timezone)}] ${stripLeakedTimestampPrefix(row.content)}`,
     }));
 }

@@ -270,6 +270,41 @@ export async function clearGoogleReauthRequired(
  * Returns whether this tenant has Calendar permission recorded
  * on the shared Google OAuth connection.
  */
+/**
+ * Whether this tenant has a real Gmail connection at all — the base
+ * scope of the shared Gmail/Calendar OAuth consent, checked by row
+ * existence rather than the calendar-specific scope flag
+ * tenantHasCalendarAccess() checks. New, added alongside
+ * canReadGmail() (lib/agent/permissions.ts) — previously nothing in
+ * this codebase resolved a real, connection-checked gmail.read
+ * capability the way calendar.read and zoom.meet already were.
+ */
+export async function tenantHasGmailAccess(
+  tenantId: string
+): Promise<boolean> {
+  const supabase = createServiceSupabase();
+
+  const { data, error } = await supabase
+    .from("gmail_connections")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .single();
+
+  if (error) {
+    console.error(
+      "GMAIL ACCESS CHECK FAILED:",
+      {
+        tenantId,
+        error,
+      }
+    );
+
+    return false;
+  }
+
+  return Boolean(data);
+}
+
 export async function tenantHasCalendarAccess(
   tenantId: string
 ): Promise<boolean> {

@@ -1,6 +1,7 @@
 import { createServerSupabase } from "@/lib/supabase/server";
 import UserMenu from "./components/UserMenu";
 import DashboardNav from "./components/DashboardNav";
+import AgentChatWidget from "./components/AgentChatWidget";
 
 export default async function DashboardLayout({
   children,
@@ -49,6 +50,8 @@ export default async function DashboardLayout({
       </header>
 
       {children}
+
+      <AgentChatWidget />
     </div>
   );
 }

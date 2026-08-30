@@ -1,5 +1,5 @@
 import { createServiceSupabase } from "@/lib/supabase/server";
-import { resolveCalendarWriteCapability, canReadCalendar, canReadGmail } from "@/lib/agent/permissions";
+import { resolveCalendarWriteCapability, canReadCalendar, canReadGmail, resolveSendCapability } from "@/lib/agent/permissions";
 import { recordUsage } from "@/lib/billing/meter";
 import { calculateModelCost } from "@/lib/billing/pricing";
 import {
@@ -24,6 +24,7 @@ import { resolvePersona } from "@/lib/agent/personas/resolve";
 import {
   narrowWriteCapability,
   narrowReadCapability,
+  narrowSendCapability,
 } from "@/lib/agent/personas/apply-overrides";
 import { persistChatMessage, linkPendingConfirmationToMessage } from "@/lib/agent/chat-history/persist";
 import { fetchChatHistoryTurns, stripLeakedTimestampPrefix } from "@/lib/agent/chat-history/build-context";
@@ -140,14 +141,37 @@ export async function handleChatMessage(
         if (isAffirmative) {
           await supabase.from("pending_owner_confirmations").delete().eq("id", pending.id);
 
+          /**
+           * Real capability re-check, not a hardcoded guess — the
+           * earlier hardcoded "write"/"none" values here were flagged
+           * as a known simplification for calendar, but for
+           * send_email specifically a hardcoded "none" would silently
+           * block every confirmed send from ever executing at all
+           * (isAvailable() requires emailDraftCapability === "send").
+           * Re-resolving for real here closes both the calendar
+           * staleness gap and the send_email blocking bug in one fix.
+           *
+           * Note: this does NOT apply persona narrowing (`persona` is
+           * resolved later, in the normal-path section below, not
+           * reachable from here) — a real tenant-level capability, not
+           * a persona-narrowed one. Low-risk today since no persona
+           * override UI exists yet (Phase 7.1 was never built) so
+           * overrides are always empty in practice, but worth fixing
+           * properly if/when that UI ships.
+           */
+          const confirmCalendarWriteCapability = await resolveCalendarWriteCapability(tenantId);
+          const confirmEmailDraftCapability = await resolveSendCapability(tenantId);
+
           const confirmToolContext: ToolContext = {
             tenantId,
             supabase,
+            preApprovedAction: true,
             permissions: {
               sendAllowed: false,
               calendarReadAllowed: true,
               gmailReadAllowed: false,
-              calendarWriteCapability: "write",
+              emailDraftCapability: confirmEmailDraftCapability,
+              calendarWriteCapability: confirmCalendarWriteCapability,
               zoomCapability: "none",
             },
           };
@@ -227,6 +251,7 @@ export async function handleChatMessage(
 
     const calendarReadAllowedReal = await canReadCalendar(tenantId);
     const gmailReadAllowedReal = await canReadGmail(tenantId);
+    const emailDraftCapabilityReal = await resolveSendCapability(tenantId);
     const calendarWriteCapabilityReal = await resolveCalendarWriteCapability(tenantId);
 
     /**
@@ -250,6 +275,10 @@ export async function handleChatMessage(
       gmailReadAllowedReal,
       persona,
       "gmail.read"
+    );
+    const emailDraftCapability = narrowSendCapability(
+      emailDraftCapabilityReal,
+      persona
     );
     const calendarWriteCapability = narrowWriteCapability(
       calendarWriteCapabilityReal,
@@ -294,6 +323,7 @@ export async function handleChatMessage(
         sendAllowed: false,
         calendarReadAllowed,
         gmailReadAllowed,
+        emailDraftCapability,
         calendarWriteCapability,
         zoomCapability: "none",
       },
@@ -345,12 +375,18 @@ export async function handleChatMessage(
           gmailReadAllowed
             ? "You can also check the actual inbox directly — use check_recent_emails if asked about incoming/recent emails, unread messages, or what's come in. Don't assume you only know about drafts; you have real read access to the inbox."
             : "You do not have access to check the inbox directly — only drafts already awaiting review are visible to you.",
+          emailDraftCapability !== "none"
+            ? "If the owner asks you to email, message, or write to someone, use compose_email_draft — it composes a brand-new email and saves it as a real Gmail draft for them to review and send. This is a real tool you can actually call; don't just describe what you'd do, use it. You can never send an email directly yourself — only create the draft."
+            : "You cannot compose or send email at all right now — say so plainly if asked, rather than describing what you'd do if you could.",
+          emailDraftCapability === "send"
+            ? "You also have send_email, which sends immediately — reserve it strictly for when the owner gives you a specific recipient AND the actual wording to send (dictated or quoted). If they've only stated intent and you'd be composing the wording yourself, use compose_email_draft instead, even if send_email is available. Never call send_email based on your own judgment that sending seems appropriate — only when directly asked."
+            : "",
           calendarReadAllowed ? "You can discuss calendar availability if asked." : "",
           videoMeetingGuidance,
           historyTurns.length > 0
             ? "The messages below include recent conversation history, each prefixed with when it was sent — use that to maintain continuity with what's already been discussed, and to judge how recent or stale something is. That bracketed timestamp is metadata added for your reference only — never include a timestamp or bracketed time label at the start of your own reply; just answer normally."
             : "",
-          "If your reply has more than one genuinely separate, standalone statement — the way a person might send a couple of short texts in a row instead of one long paragraph — separate them with \"|||\" so each becomes its own message. Use this sparingly: most replies are one message. Don't split a single flowing thought into pieces, and don't use this just to break up a long-but-single point — only for statements that are actually distinct from each other.",
+          "If your reply has more than one genuinely separate, standalone statement — the way a person might send a couple of short texts in a row instead of one long paragraph — separate them with \"|||\" so each becomes its own message. Use this sparingly: most replies are one message. Don't split a single flowing thought into pieces, and don't use this just to break up a long-but-single point — only for statements that are actually distinct from each other. A common case: don't stack two separate questions in one message (\"Want me to do X? Anything else you want me to include?\") — split them with \"|||\" or just ask the one that matters most.",
         ]
           .filter(Boolean)
           .join("\n"),

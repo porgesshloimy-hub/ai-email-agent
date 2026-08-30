@@ -76,6 +76,29 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  /**
+   * Auto-grows the composer with the amount of text entered, up to
+   * MAX_TEXTAREA_HEIGHT, beyond which it scrolls internally instead of
+   * continuing to grow — previously fixed at one row, relying entirely
+   * on native scroll for anything longer. Resetting height to "auto"
+   * before measuring scrollHeight is required each time: without it,
+   * the browser only ever reports the CURRENT height back, so the box
+   * would never shrink again after being grown once (e.g. after
+   * clearing the input on send).
+   */
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+
+    const MAX_TEXTAREA_HEIGHT = 160; // px, roughly 7 lines
+
+    el.style.height = "auto";
+    const nextHeight = Math.min(el.scrollHeight, MAX_TEXTAREA_HEIGHT);
+    el.style.height = `${nextHeight}px`;
+    el.style.overflowY = el.scrollHeight > MAX_TEXTAREA_HEIGHT ? "auto" : "hidden";
+  }, [input]);
 
   useEffect(() => {
     let cancelled = false;
@@ -197,9 +220,29 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
             Nothing here yet — ask about a booking, a reminder, or anything pending.
           </p>
         ) : (
-          messages.map((msg) => {
+          messages.map((msg, index) => {
             const isOwner = msg.role === "owner";
             const repliedTo = findMessageById(msg.replied_to_message_id);
+
+            /**
+             * Collapses the timestamp across a consecutive run of
+             * same-role messages sent at the same displayed time (the
+             * common case: a single split reply persisted as several
+             * rows a few milliseconds apart — see lib/agent/chat.ts's
+             * message-splitting comment). Only the LAST message in such
+             * a run shows a time label, matching how most chat apps
+             * group a rapid-fire burst under one timestamp rather than
+             * repeating it under every bubble. The Reply button is
+             * unaffected by this — it still renders on every message
+             * individually, since replying to the second message in a
+             * burst rather than the last one is still a meaningful,
+             * distinct action.
+             */
+            const nextMsg = messages[index + 1];
+            const showTimestamp =
+              !nextMsg ||
+              nextMsg.role !== msg.role ||
+              formatTimeLabel(nextMsg.created_at) !== formatTimeLabel(msg.created_at);
 
             return (
               <div key={msg.id} className={`group flex min-w-0 ${isOwner ? "justify-end" : "justify-start"}`}>
@@ -222,7 +265,9 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
                   </div>
 
                   <div className="flex items-center gap-2 px-1">
-                    <span className="text-[11px] text-muted">{formatTimeLabel(msg.created_at)}</span>
+                    {showTimestamp && (
+                      <span className="text-[11px] text-muted">{formatTimeLabel(msg.created_at)}</span>
+                    )}
                     <button
                       type="button"
                       onClick={() => setReplyingTo(msg)}
@@ -264,13 +309,14 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
 
         <div className="flex items-end gap-2">
           <textarea
+            ref={textareaRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="Say something"
             rows={1}
             disabled={sending}
-            className="focus-ring min-h-[40px] flex-1 resize-none rounded-control border border-line bg-surface px-3 py-2 text-sm text-ink placeholder:text-muted"
+            className="focus-ring max-h-[160px] flex-1 resize-none rounded-control border border-line bg-surface px-3 py-2 text-sm text-ink placeholder:text-muted"
           />
           <button
             type="button"

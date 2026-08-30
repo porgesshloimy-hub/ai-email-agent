@@ -17,22 +17,24 @@ import { resolveOwnerApprovalPath } from "@/lib/agent/approval/resolve";
  *
  * Even when available, this NEVER sends purely because the model
  * decided to call it — resolveOwnerApprovalPath() (using
- * scoreEmailInstructionExplicitness(), deliberately more conservative
- * than the calendar heuristic given a sent email can't be undone the
- * way a calendar entry can) checks whether the owner's own message
- * actually supplied a real recipient AND dictated/quoted content.
- * Anything less specific — including a clear intent with composed
- * wording left to the model — is held for an explicit "go ahead?"
- * confirmation in the same chat, exactly like create_calendar_event's
- * sync_confirm path. There is no path in this tool that sends without
- * either the owner's own explicit dictation or an explicit
- * confirmation reply.
+ * scoreEmailInstructionExplicitness()) checks whether the owner
+ * actually gave a clear, direct instruction to send. That check was
+ * originally stricter — requiring dictated/quoted wording on top of a
+ * real recipient — but that meant even an unambiguous "send it" still
+ * got held for a second confirmation purely because the wording wasn't
+ * dictated verbatim. Loosened after explicit feedback: the actual thing
+ * worth protecting against is the model sending with no real owner
+ * request behind it at all, which can't happen here regardless, since
+ * this tool is only ever reached in response to the owner's own
+ * message. A clear send directive is now sufficient on its own —
+ * composing the wording is fine as long as sending was actually
+ * requested, not just discussed.
  */
 export const sendEmailTool: ToolDefinition = {
   name: "send_email",
 
   description:
-    "Send a real email immediately — not a draft. Only use this when the owner has given you a specific recipient and the actual content to send (dictated or quoted). If the owner's request is a general intent without dictated wording (e.g. \"ask John if he's coming\"), use compose_email_draft instead so they can review it first — do not try to make this tool's confirmation step happen by inventing wording yourself.",
+    "Send a real email immediately — not a draft. Use this whenever the owner has given you a clear, direct instruction to send (e.g. \"send it\", \"go ahead and send\") — composing the wording yourself is fine as long as sending was actually requested. Use compose_email_draft instead only when the owner has expressed general intent without actually telling you to send (e.g. mentioning someone should be emailed, without asking you to do it).",
 
   parameters: {
     type: "object",

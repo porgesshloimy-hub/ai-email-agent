@@ -42,22 +42,51 @@ const EMAIL_ADDRESS_PATTERN = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
 const QUOTED_CONTENT_PATTERN = /["“][^"”]{8,}["”]/;
 
 /**
+ * A direct, unambiguous instruction to actually send — not just discuss
+ * or draft. Added after explicit feedback: requiring dictated wording
+ * on top of a clear send command was too restrictive for how the owner
+ * actually wanted to use this — "send it, word it however you
+ * understand" is a real, clear request to send, even though it
+ * delegates the wording. The gate this project actually cares about is
+ * "did the owner clearly ask to send," not "did the owner write the
+ * email themselves."
+ */
+const SEND_DIRECTIVE_PATTERN =
+  /\b(send it|send this|send that|send the email|send now|go ahead and send|please send|just send|yes,? send)\b/i;
+
+/**
  * Scores how explicit an owner's raw chat message was for actually
- * SENDING an email (as opposed to drafting one). Deliberately more
- * conservative than scoreCalendarInstructionExplicitness() above: a
- * wrong calendar entry is trivially correctable, but a wrongly-sent
- * email has already reached a real third party and can't be undone.
- * Both a clear recipient AND owner-dictated content are required —
- * either alone is not enough to skip confirmation.
+ * SENDING an email (as opposed to drafting one).
+ *
+ * Loosened per explicit request: previously required BOTH a concrete
+ * recipient AND dictated/quoted content before skipping confirmation —
+ * reasonable caution in the abstract, but in practice it meant even a
+ * clear, direct "send it" from the owner still got held for a second
+ * confirmation, purely because the wording wasn't dictated verbatim.
+ * That's not the risk this check is meant to guard against — the real
+ * concern is the model sending on ITS OWN inferred judgment with no
+ * real owner request behind it at all, which can't happen here since
+ * this tool is only ever reached in response to an owner's own message
+ * in the first place (see send-email.ts's module comment).
+ *
+ * A clear, direct send command is now sufficient on its own. An
+ * explicit recipient plus dictated content remains an alternate, even
+ * stronger path to the same result — useful for a genuinely
+ * first-touch "send jane@x.com: '...'" instruction with no prior
+ * back-and-forth to imply intent from.
  */
 export function scoreEmailInstructionExplicitness(
   ownerMessageText: string
 ): ExplicitnessResult {
   const reasons: string[] = [];
 
+  const hasSendDirective = SEND_DIRECTIVE_PATTERN.test(ownerMessageText);
   const hasExplicitRecipient = EMAIL_ADDRESS_PATTERN.test(ownerMessageText);
   const hasDictatedContent = QUOTED_CONTENT_PATTERN.test(ownerMessageText);
 
+  if (hasSendDirective) {
+    reasons.push("owner gave a clear, direct instruction to send");
+  }
   if (hasExplicitRecipient) {
     reasons.push("owner's message contains an explicit email address");
   }
@@ -65,13 +94,12 @@ export function scoreEmailInstructionExplicitness(
     reasons.push("owner's message contains quoted/dictated content to relay");
   }
 
-  // Both required — see reasoning above. Neither alone crosses the
-  // threshold, by design.
-  const score = hasExplicitRecipient && hasDictatedContent ? 1 : hasExplicitRecipient || hasDictatedContent ? 0.4 : 0;
+  const isExplicit = hasSendDirective || (hasExplicitRecipient && hasDictatedContent);
+  const score = isExplicit ? 1 : hasExplicitRecipient || hasDictatedContent ? 0.4 : 0;
 
   return {
     score,
-    isExplicit: score >= EXPLICITNESS_THRESHOLD,
+    isExplicit,
     reasons,
   };
 }

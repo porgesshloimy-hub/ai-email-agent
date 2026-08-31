@@ -27,34 +27,55 @@ export default function AgentChatWidget() {
 
   return (
     <div className="fixed bottom-5 right-5 z-40 flex flex-col items-end">
-      {open && (
-        <div className="mb-3 flex h-[520px] w-[360px] flex-col overflow-hidden rounded-panel border border-line bg-surface shadow-pop">
-          <div className="flex items-center justify-between border-b border-line px-4 py-3">
-            <span className="font-display text-sm font-semibold text-ink">Assistant</span>
-            <div className="flex items-center gap-1">
-              <a
-                href="/dashboard/agent-chat"
-                className="focus-ring rounded-control px-2 py-1 text-xs font-medium text-muted hover:text-accent-ink"
-                title="Open full conversation"
-              >
-                Expand
-              </a>
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                className="focus-ring cursor-pointer rounded-control px-2 py-1 text-muted hover:text-ink"
-                aria-label="Close chat"
-              >
-                ✕
-              </button>
-            </div>
-          </div>
-
-          <div className="min-h-0 flex-1">
-            <AgentChatPanel compact />
+      {/**
+       * Bug fix: this used to be `{open && (<panel/>)}` — a genuine
+       * React conditional render, which fully UNMOUNTS AgentChatPanel
+       * the instant the popup closes. That silently abandons any
+       * in-flight polling (see AgentChatPanel.tsx's
+       * pollForNewMessages()) — its state updates become no-ops on an
+       * unmounted component, so a reply arriving while the popup was
+       * closed was simply dropped from that component instance's view
+       * entirely. Reopening then created a BRAND NEW instance that did
+       * a fresh full-history fetch, which looked "correct" only
+       * because it re-read everything from the database from scratch —
+       * not because the original poll ever actually delivered anything.
+       * Reported as "messages don't show up until I close and reopen."
+       *
+       * Fixed by always rendering the panel and only toggling
+       * visibility via CSS — it now stays mounted (and any in-flight
+       * poll loop keeps running and updating state) regardless of
+       * whether the popup is currently visible.
+       */}
+      <div
+        className={`mb-3 flex h-[520px] w-[360px] flex-col overflow-hidden rounded-panel border border-line bg-surface shadow-pop ${
+          open ? "" : "hidden"
+        }`}
+      >
+        <div className="flex items-center justify-between border-b border-line px-4 py-3">
+          <span className="font-display text-sm font-semibold text-ink">Assistant</span>
+          <div className="flex items-center gap-1">
+            <a
+              href="/dashboard/agent-chat"
+              className="focus-ring rounded-control px-2 py-1 text-xs font-medium text-muted hover:text-accent-ink"
+              title="Open full conversation"
+            >
+              Expand
+            </a>
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              className="focus-ring cursor-pointer rounded-control px-2 py-1 text-muted hover:text-ink"
+              aria-label="Close chat"
+            >
+              ✕
+            </button>
           </div>
         </div>
-      )}
+
+        <div className="min-h-0 flex-1">
+          <AgentChatPanel compact />
+        </div>
+      </div>
 
       <button
         type="button"

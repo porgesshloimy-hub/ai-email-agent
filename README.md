@@ -564,6 +564,30 @@ entirely). Fixed in both `lib/agent/chat.ts` and the lightweight
 yes/no response before it counts at all — an explicit reply-to still always honors the match
 regardless of wording, since that's a deliberate action, not a guess.
 
+**Two real bugs found and fixed after reports of the reply/typing indicator not appearing until
+closing and reopening the widget:**
+
+1. **The widget unmounted the panel every time it closed.** `AgentChatWidget.tsx` used to
+   conditionally render `AgentChatPanel` (`{open && (<panel/>)}`) — a genuine React unmount, not
+   just a visual hide. That silently abandoned any in-flight polling: the panel's state updates
+   became no-ops on the unmounted instance, so a reply arriving while the popup happened to be
+   closed was simply dropped from view entirely. Reopening created a brand-new instance that did
+   a fresh full-history fetch, which looked correct only because it re-read everything from the
+   database from scratch — not because the original poll ever actually delivered anything. Fixed
+   by always rendering the panel and toggling only its CSS visibility, so it now stays mounted
+   (and any in-flight poll keeps running and updating state) regardless of whether the popup is
+   currently visible.
+2. **The "replying" status floor was mathematically shorter than the poll interval.**
+   `MIN_REPLYING_DURATION_MS` was 1800ms against a 2000ms poll interval — since the guard window
+   was *shorter* than the gap between polls, there existed real phase alignments where every
+   single poll could land just outside it, not just unlucky timing. Raised the floor to 2500ms
+   and reduced the poll interval to 1000ms, which together give a hard mathematical guarantee (at
+   least ~1.5s of margin in the worst case) rather than a probabilistic hope.
+
+Previously-silent failure paths in the polling loop (`AgentChatPanel.tsx`) also now log real
+errors to the console instead of swallowing them, to make any future regression here actually
+diagnosable rather than another guessing exercise.
+
 ## Delayed, Typing-Aware Replies
 
 The agent waits before replying, rather than answering instantly, and the wait length depends on

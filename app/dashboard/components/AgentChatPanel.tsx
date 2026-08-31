@@ -372,6 +372,8 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
     const POLL_INTERVAL_MS = 1000;
     const MAX_POLL_MS = 120_000;
 
+    console.log("POLLING STARTED:", { sinceTimestamp });
+
     const startedAt = Date.now();
     let cursor = sinceTimestamp;
     let everSeenReplying = false;
@@ -382,9 +384,18 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
 
         try {
           const res = await fetch(`/api/agent-chat?after=${encodeURIComponent(cursor)}`);
+
+          if (!res.ok) {
+            console.error("POLL REQUEST FAILED:", { status: res.status, statusText: res.statusText });
+            continue;
+          }
+
           const data = await res.json();
 
-          if (data.error) continue; // transient — keep polling rather than surfacing every hiccup
+          if (data.error) {
+            console.error("POLL RESPONSE ERROR:", data.error);
+            continue; // transient — keep polling rather than surfacing every hiccup
+          }
 
           const agentReplying = Boolean(data.agentReplying);
           setIsAgentTyping(agentReplying);
@@ -393,6 +404,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
           const newMessages: ChatMessage[] = data.messages ?? [];
 
           if (newMessages.length > 0) {
+            console.log("POLL FOUND NEW MESSAGES:", { count: newMessages.length });
             setMessages((prev) => {
               const existingIds = new Set(prev.map((m) => m.id));
               const toAdd = newMessages.filter((m) => !existingIds.has(m.id));
@@ -407,15 +419,20 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
           // stopped — the reply is complete. An exact signal, not a
           // guess about timing.
           if (everSeenReplying && !agentReplying) {
+            console.log("POLLING COMPLETE: reply finished normally");
             return;
           }
-        } catch {
-          // Network hiccup — keep polling rather than giving up on one
-          // failed check.
+        } catch (err) {
+          // Previously fully silent — made visible now specifically
+          // because "messages don't show up until closing and
+          // reopening the widget" needs real evidence to diagnose
+          // further, not another guess.
+          console.error("POLL REQUEST THREW:", err);
         }
       }
 
       if (!everSeenReplying) {
+        console.warn("POLLING TIMED OUT: never observed agentReplying=true within MAX_POLL_MS");
         setError("The agent is taking longer than expected — it may still reply shortly.");
       }
     } finally {

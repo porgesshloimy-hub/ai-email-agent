@@ -89,8 +89,28 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [isAgentTyping, setIsAgentTyping] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const lastTypingPingRef = useRef(0);
+
+  /**
+   * Pings the server that the owner is actively typing, throttled to
+   * at most once every ~2 seconds — the backend
+   * (lib/inngest/functions.ts's processDelayedChatReply) uses freshness
+   * of this signal to decide whether to keep waiting before responding,
+   * rather than just reacting to whether another message has actually
+   * been sent yet.
+   */
+  function pingTyping() {
+    const now = Date.now();
+    if (now - lastTypingPingRef.current < 2000) return;
+    lastTypingPingRef.current = now;
+    fetch("/api/agent-chat/typing", { method: "POST" }).catch(() => {
+      // Best-effort — a missed ping just means the server's typing
+      // freshness check expires a little early; not worth surfacing.
+    });
+  }
 
   /**
    * Auto-grows the composer with the amount of text entered, up to
@@ -212,6 +232,10 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
     const repliedToSnapshot = replyingTo;
     setInput("");
     setReplyingTo(null);
+    // Removes focus from the composer right after sending — the owner
+    // just finished a thought; the box shouldn't sit visually "active"
+    // while the reply is pending.
+    textareaRef.current?.blur();
 
     // Shown immediately, dimmed, while we confirm it was actually
     // saved — a genuinely unconfirmed state, not just "waiting on the
@@ -271,6 +295,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
         // row(s) once, immediately, rather than reusing the polling
         // loop below (which starts with a 2s sleep unsuited to
         // something that's already done).
+        setIsAgentTyping(true);
         try {
           const res = await fetch(
             `/api/agent-chat?after=${encodeURIComponent(confirmedOwnerMessage.created_at)}`
@@ -280,6 +305,8 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
           requestAnimationFrame(() => scrollToBottom(true));
         } catch {
           setError("Your message sent, but couldn't load the reply — refresh to see it.");
+        } finally {
+          setIsAgentTyping(false);
         }
         return;
       }
@@ -298,7 +325,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
   /**
    * PHASE 2 — polls for the agent's eventual reply rather than holding
    * one long HTTP request open. Necessary once replies became
-   * asynchronous (delayed 6-13s, batched with any follow-up sent
+   * asynchronous (a typing-aware wait, batched with any follow-up sent
    * during that window — see lib/inngest/functions.ts's
    * processDelayedChatReply): a single blocking request risks Vercel's
    * function duration limit once a follow-up message extends the
@@ -306,50 +333,80 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
    * messages sent close together) can't otherwise learn they were
    * merged into one combined reply server-side.
    *
-   * Polls every 2 seconds for up to ~90 seconds (comfortably covering
-   * the 6-13s base delay plus a couple of possible extensions from
-   * follow-up messages), stopping as soon as any new message appears.
+   * Keeps the typing indicator visible for the ENTIRE wait, including
+   * between individual parts of a split reply — the server already
+   * paces multi-part replies 2-4s apart (see lib/agent/chat.ts), so a
+   * quiet period of QUIET_AFTER_MESSAGE_MS with nothing new arriving,
+   * after at least one message has already been received, is treated
+   * as "the reply is actually finished" rather than assuming a fixed
+   * message count up front.
    */
   async function pollForNewMessages(sinceTimestamp: string) {
     const POLL_INTERVAL_MS = 2000;
     const MAX_POLL_MS = 90_000;
+    // Comfortably above the server's 2-4s inter-part pacing, so a
+    // slightly-delayed next part isn't mistaken for the reply being
+    // done.
+    const QUIET_AFTER_MESSAGE_MS = 6000;
+
     const startedAt = Date.now();
     let cursor = sinceTimestamp;
+    let lastReceivedAt: number | null = null;
 
-    while (Date.now() - startedAt < MAX_POLL_MS) {
-      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    setIsAgentTyping(true);
 
-      try {
-        const res = await fetch(`/api/agent-chat?after=${encodeURIComponent(cursor)}`);
-        const data = await res.json();
+    try {
+      while (Date.now() - startedAt < MAX_POLL_MS) {
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
 
-        if (data.error) continue; // transient — keep polling rather than surfacing every hiccup
+        try {
+          const res = await fetch(`/api/agent-chat?after=${encodeURIComponent(cursor)}`);
+          const data = await res.json();
 
-        const newMessages: ChatMessage[] = data.messages ?? [];
+          if (!data.error) {
+            const newMessages: ChatMessage[] = data.messages ?? [];
 
-        if (newMessages.length > 0) {
-          setMessages((prev) => {
-            const existingIds = new Set(prev.map((m) => m.id));
-            const toAdd = newMessages.filter((m) => !existingIds.has(m.id));
-            return [...prev, ...toAdd];
-          });
-          requestAnimationFrame(() => scrollToBottom(true));
+            if (newMessages.length > 0) {
+              setMessages((prev) => {
+                const existingIds = new Set(prev.map((m) => m.id));
+                const toAdd = newMessages.filter((m) => !existingIds.has(m.id));
+                return [...prev, ...toAdd];
+              });
+              requestAnimationFrame(() => scrollToBottom(true));
 
-          const agentMessageArrived = newMessages.some((m) => m.role === "agent");
-          if (agentMessageArrived) return;
+              cursor = newMessages[newMessages.length - 1].created_at;
 
-          // Only owner-role rows appeared (e.g. this device's own
-          // message echoed back some other way) — keep polling and
-          // advance the cursor.
-          cursor = newMessages[newMessages.length - 1].created_at;
+              const agentMessageArrived = newMessages.some((m) => m.role === "agent");
+              if (agentMessageArrived) {
+                lastReceivedAt = Date.now();
+              }
+            }
+          }
+        } catch {
+          // Network hiccup — keep polling rather than giving up on one
+          // failed check.
         }
-      } catch {
-        // Network hiccup — keep polling rather than giving up on one
-        // failed check.
-      }
-    }
 
-    setError("The agent is taking longer than expected — it may still reply shortly.");
+        // Checked AFTER each fetch attempt, not before — so a part
+        // arriving right at the edge of the quiet window is still
+        // picked up this same tick rather than missed.
+        if (
+          lastReceivedAt !== null &&
+          Date.now() - lastReceivedAt >= QUIET_AFTER_MESSAGE_MS
+        ) {
+          // Received at least one part, and enough quiet time has
+          // passed since the last one that further parts are unlikely
+          // — treat the reply as complete.
+          return;
+        }
+      }
+
+      if (lastReceivedAt === null) {
+        setError("The agent is taking longer than expected — it may still reply shortly.");
+      }
+    } finally {
+      setIsAgentTyping(false);
+    }
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -452,8 +509,8 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
                     <div
                       className={`max-w-full whitespace-pre-wrap break-words rounded-panel px-3.5 py-2.5 text-sm leading-relaxed shadow-panel ${
                         isOwner
-                          ? "bg-blue-100 text-ink"
-                          : "bg-gray-200 text-ink"
+                          ? "bg-blue-200 text-ink"
+                          : "bg-gray-100 text-ink"
                       } ${msg.pending ? "opacity-60" : ""}`}
                     >
                       {renderInlineMarkdown(msg.content)}
@@ -479,6 +536,15 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
               </div>
             );
           })}
+          {isAgentTyping && (
+            <div className="mt-3 flex justify-start">
+              <div className="flex items-center gap-1 rounded-panel bg-gray-100 px-3.5 py-2.5 shadow-panel">
+                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted [animation-delay:-0.3s]" />
+                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted [animation-delay:-0.15s]" />
+                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted" />
+              </div>
+            </div>
+          )}
           </>
         )}
       </div>
@@ -511,7 +577,10 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
           <textarea
             ref={textareaRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              if (e.target.value.trim()) pingTyping();
+            }}
             onKeyDown={handleKeyDown}
             placeholder="Say something"
             rows={1}

@@ -748,28 +748,33 @@ export const reconcilePendingDrafts = inngest.createFunction(
  * Delayed, batched owner-chat replies
  * ------------------------------------------------------------
  *
- * Built per explicit request: the agent should feel more natural by
- * waiting a random 6-13 seconds before replying (like a person taking
- * a moment), and — critically — a follow-up message sent DURING that
- * window should be answered together with the first, not trigger a
- * second, possibly-overlapping reply.
+ * A deliberately bounded, two-phase wait rather than an open-ended
+ * typing-tracking loop:
+ *
+ *   Phase A — wait a fixed 2-4 seconds after the message is sent.
+ *   Decision — did the owner start typing at any point during Phase A?
+ *     - Yes → Phase B is 5-9 seconds (they seem to be composing a
+ *       follow-up; give them real room to actually send it).
+ *     - No → Phase B is a shorter 2-4 seconds (just the ordinary
+ *       "let it feel like a person, not a bot firing back instantly"
+ *       pause).
+ *   Respond — once Phase B elapses, reply to everything sent since the
+ *   last reply.
+ *
+ * If the owner sends another message at ANY point (during Phase A or
+ * Phase B), this run stands down entirely and the new message's own
+ * triggered run starts the whole two-phase wait over again, relative
+ * to itself — exactly "start that over again." This also means the
+ * wait is naturally bounded (worst case ~4s + 9s ≈ 13s before a reply
+ * begins, per message that doesn't get superseded) — no open-ended
+ * loop, no separate safety cap needed the way a continuously-extending
+ * wait would require.
  *
  * Fires once per NEW owner message that isn't a reply to a pending
  * confirmation (app/api/agent-chat/send/route.ts decides that up
  * front — confirmation replies like "yes"/"cancel" stay instant,
  * since an artificial thinking-pause doesn't belong on a quick
  * acknowledgment).
- *
- * Debounce approach (hand-rolled rather than relying on Inngest's
- * built-in `debounce` trigger config, so this works regardless of
- * plan/version): every triggering event sleeps its own random delay,
- * then checks whether a NEWER unprocessed owner message exists for
- * this tenant. If one does, this run stands down — the newer
- * message's own triggered run will handle the whole batch once ITS
- * delay elapses. Only the run whose own message turns out to be the
- * most recent unprocessed one actually proceeds, gathering EVERY
- * unprocessed owner message (not just its own) into one combined
- * turn.
  */
 export const processDelayedChatReply = inngest.createFunction(
   {
@@ -792,56 +797,97 @@ export const processDelayedChatReply = inngest.createFunction(
   },
 
   async ({ event, step }) => {
-    const { tenantId, ownerMessageId, channel } = event.data as {
+    const { tenantId, ownerMessageId, ownerMessageCreatedAt, channel } = event.data as {
       tenantId: string;
       ownerMessageId: string;
+      ownerMessageCreatedAt: string;
       channel: string;
     };
 
-    const delaySeconds = await step.run("compute-delay", async () => {
-      // 6-13 seconds inclusive.
-      return 6 + Math.floor(Math.random() * 8);
+    /**
+     * Returns { standDown: true } if a newer unprocessed owner message
+     * exists (meaning this run's message has been superseded — its own
+     * newly-triggered run will handle everything from scratch), or the
+     * full unprocessed batch (including this message) if this run's
+     * message is still the most recent one.
+     */
+    async function checkLatest(stepId: string) {
+      return step.run(stepId, async () => {
+        const supabase = createServiceSupabase();
+
+        const { data: unprocessed, error } = await supabase
+          .from("owner_chat_messages")
+          .select("id, content, created_at")
+          .eq("tenant_id", tenantId)
+          .eq("role", "owner")
+          .eq("processed", false)
+          .order("created_at", { ascending: true });
+
+        if (error) {
+          throw new Error(`Failed to gather pending owner messages: ${error.message}`);
+        }
+
+        const rows = unprocessed ?? [];
+        const mostRecent = rows[rows.length - 1];
+
+        if (rows.length === 0 || mostRecent.id !== ownerMessageId) {
+          return { standDown: true as const, rows: [] };
+        }
+
+        return { standDown: false as const, rows };
+      });
+    }
+
+    // Phase A: fixed 2-4 second pause.
+    const phaseAMs = await step.run("compute-phase-a", async () => {
+      return (2 + Math.floor(Math.random() * 3)) * 1000; // 2-4s
     });
 
-    await step.sleep("wait-before-responding", `${delaySeconds}s`);
+    await step.sleep("phase-a-wait", `${phaseAMs}ms`);
 
-    const batch = await step.run("check-latest-and-gather-batch", async () => {
+    const afterPhaseA = await checkLatest("check-after-phase-a");
+
+    if (afterPhaseA.standDown) {
+      console.log("DELAYED CHAT REPLY: standing down after phase A, not the latest message", {
+        tenantId,
+        ownerMessageId,
+      });
+      return { processed: false };
+    }
+
+    // Did the owner start typing at any point between sending this
+    // message and now (the end of Phase A)? A point-in-time check, not
+    // a rolling freshness window — Phase A is a fixed, short duration,
+    // so "typing recorded after this message was sent" is exactly
+    // "did they start typing during phase A."
+    const startedTyping = await step.run("check-typing-after-phase-a", async () => {
       const supabase = createServiceSupabase();
 
-      const { data: unprocessed, error } = await supabase
-        .from("owner_chat_messages")
-        .select("id, content, created_at")
-        .eq("tenant_id", tenantId)
-        .eq("role", "owner")
-        .eq("processed", false)
-        .order("created_at", { ascending: true });
+      const { data: tenant } = await supabase
+        .from("tenants")
+        .select("owner_last_typing_at")
+        .eq("id", tenantId)
+        .single();
 
-      if (error) {
-        throw new Error(`Failed to gather pending owner messages: ${error.message}`);
-      }
+      if (!tenant?.owner_last_typing_at) return false;
 
-      const rows = unprocessed ?? [];
-
-      if (rows.length === 0) {
-        // Already handled by an earlier run (e.g. this run lost a race
-        // with another that already processed the batch).
-        return { shouldProcess: false, rows: [] };
-      }
-
-      const mostRecent = rows[rows.length - 1];
-
-      if (mostRecent.id !== ownerMessageId) {
-        // A newer message exists that this run doesn't know about yet
-        // — stand down. That message's own triggered run will handle
-        // the full batch (including this one) once its delay elapses.
-        return { shouldProcess: false, rows: [] };
-      }
-
-      return { shouldProcess: true, rows };
+      return new Date(tenant.owner_last_typing_at) > new Date(ownerMessageCreatedAt);
     });
 
-    if (!batch.shouldProcess || batch.rows.length === 0) {
-      console.log("DELAYED CHAT REPLY: standing down, not the latest message", {
+    // Phase B: 5-9s if the owner appeared to start composing a
+    // follow-up, otherwise a shorter 2-4s.
+    const phaseBMs = await step.run("compute-phase-b", async () => {
+      return startedTyping
+        ? (5 + Math.floor(Math.random() * 5)) * 1000 // 5-9s
+        : (2 + Math.floor(Math.random() * 3)) * 1000; // 2-4s
+    });
+
+    await step.sleep("phase-b-wait", `${phaseBMs}ms`);
+
+    const batch = await checkLatest("check-after-phase-b");
+
+    if (batch.standDown || batch.rows.length === 0) {
+      console.log("DELAYED CHAT REPLY: standing down after phase B, not the latest message", {
         tenantId,
         ownerMessageId,
       });
@@ -892,7 +938,9 @@ export const processDelayedChatReply = inngest.createFunction(
     console.log("DELAYED CHAT REPLY: processed batch", {
       tenantId,
       batchSize: batch.rows.length,
-      delaySeconds,
+      phaseAMs,
+      startedTyping,
+      phaseBMs,
     });
 
     return { processed: true, batchSize: batch.rows.length };

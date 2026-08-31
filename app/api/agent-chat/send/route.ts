@@ -41,7 +41,7 @@ async function getAuthenticatedTenantId(): Promise<string> {
  * fast, separate signal from "the agent replied."
  *
  * Also decides, right here and just as fast, whether this message will
- * be answered instantly or via the delayed-batch flow (6-13s "thinking"
+ * be answered instantly or via the delayed-batch flow (5-12s "thinking"
  * pause, folding in any follow-up sent during that window — see
  * lib/inngest/functions.ts's processDelayedChatReply):
  *
@@ -53,7 +53,7 @@ async function getAuthenticatedTenantId(): Promise<string> {
  *     with `scheduled: true` — critically, sending that event is a
  *     fast network call to Inngest, NOT a wait on the agent itself, so
  *     "this will be answered and won't get stuck" is confirmed right
- *     away, well before the actual 6-13 second delay even begins.
+ *     away, well before the actual 5-12 second delay even begins.
  *
  * The response shape tells the client which case happened:
  * `{ ownerMessage, immediateReply }` for the instant path (nothing more
@@ -103,7 +103,12 @@ export async function POST(request: NextRequest) {
 
     await inngest.send({
       name: "chat/owner-message.sent",
-      data: { tenantId, ownerMessageId: row.id, channel: "web" },
+      data: {
+        tenantId,
+        ownerMessageId: row.id,
+        ownerMessageCreatedAt: row.created_at,
+        channel: "web",
+      },
     });
 
     return NextResponse.json({ ownerMessage: row, scheduled: true });

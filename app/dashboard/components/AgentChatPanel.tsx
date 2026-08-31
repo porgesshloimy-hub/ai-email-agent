@@ -369,8 +369,8 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
    *     flips back to false — an exact signal, not a guess.
    */
   async function pollForNewMessages(sinceTimestamp: string) {
-    const POLL_INTERVAL_MS = 2000;
-    const MAX_POLL_MS = 90_000;
+    const POLL_INTERVAL_MS = 1000;
+    const MAX_POLL_MS = 120_000;
 
     const startedAt = Date.now();
     let cursor = sinceTimestamp;
@@ -492,7 +492,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
              * above is a separate, unrelated concern from this vertical
              * spacing — it's unaffected by this change.)
              */
-            const topMargin = index === 0 ? "" : "mt-2";
+            const topMargin = index === 0 ? "" : "mt-1";
 
             return (
               <div

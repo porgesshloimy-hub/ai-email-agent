@@ -609,17 +609,20 @@ export async function handleChatMessage(
    * delayed-batch path (lib/inngest/functions.ts) — both call this
    * same function, so both get correct status timing for free.
    *
-   * MIN_REPLYING_DURATION_MS guards against a different problem: the
-   * client polls this status every ~2s, so a very fast single-part
-   * reply (just one DB insert, no inter-part pause) could flip
-   * true→false entirely between two polls, and the client would never
-   * observe "replying" at all — the message would just appear with no
-   * visible typing moment. This guarantees at least one full poll
-   * cycle has a real chance to catch it, without faking anything
-   * client-side — the status is still a real, accurate signal, just
-   * not allowed to be shorter than it's useful.
+   * MIN_REPLYING_DURATION_MS guards against a real timing problem, not
+   * just bad luck: the client polls this status every ~1s (see
+   * AgentChatPanel.tsx's POLL_INTERVAL_MS). A "replying" window
+   * shorter than that poll interval isn't just unlikely to be caught —
+   * there EXIST phase alignments where it's mathematically impossible
+   * for any poll to land inside it. This floor must stay meaningfully
+   * LARGER than the poll interval, not just "long enough on average,"
+   * or the guarantee doesn't actually hold. Previously set to 1800ms
+   * against a 2000ms poll interval — shorter than the interval itself,
+   * which could genuinely miss every single poll depending on timing,
+   * not just occasionally. Raised well clear of the (now-also-reduced)
+   * poll interval for a real margin.
    */
-  const MIN_REPLYING_DURATION_MS = 1800;
+  const MIN_REPLYING_DURATION_MS = 2500;
   const replyingStartedAt = Date.now();
 
   const supabaseForStatus = createServiceSupabase();

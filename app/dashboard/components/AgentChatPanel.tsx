@@ -219,16 +219,14 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
 
     /**
      * PHASE 1 — fast, separate confirmation that the message was
-     * actually saved. Answers a real question directly: previously
-     * there was no way to know a message was reliably sent separately
-     * from knowing the agent had finished its whole turn, since one
-     * request did both. This is intentionally the smallest possible
-     * round trip — no LLM call, just a database write — so the owner's
-     * bubble turns solid the moment delivery is actually confirmed,
-     * not whenever the agent eventually finishes thinking.
+     * actually saved, AND that it's either being answered instantly
+     * (a confirmation reply) or has been reliably scheduled for a
+     * delayed reply (a genuine new message) — this endpoint now
+     * decides that too, and scheduling itself is a fast network call
+     * to Inngest, not a wait on the agent, so "this will be answered
+     * and won't get stuck" is known right away, well before any
+     * artificial delay begins.
      */
-    let confirmedOwnerMessage: ChatMessage;
-
     try {
       const sendRes = await fetch("/api/agent-chat/send", {
         method: "POST",
@@ -247,7 +245,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
         return;
       }
 
-      confirmedOwnerMessage = sendData.ownerMessage;
+      const confirmedOwnerMessage: ChatMessage = sendData.ownerMessage;
 
       // Swap the dimmed placeholder for the real, confirmed row —
       // full color from here on, regardless of how long the agent
@@ -256,49 +254,94 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
         ...prev.filter((m) => m.id !== tempId),
         confirmedOwnerMessage,
       ]);
+
+      if (sendData.immediateReply) {
+        // Confirmation-reply case: already generated and persisted
+        // synchronously by the send endpoint — fetch the resulting
+        // row(s) once, immediately, rather than reusing the polling
+        // loop below (which starts with a 2s sleep unsuited to
+        // something that's already done).
+        try {
+          const res = await fetch(
+            `/api/agent-chat?after=${encodeURIComponent(confirmedOwnerMessage.created_at)}`
+          );
+          const data = await res.json();
+          setMessages((prev) => [...prev, ...(data.messages ?? [])]);
+          requestAnimationFrame(() => scrollToBottom(true));
+        } catch {
+          setError("Your message sent, but couldn't load the reply — refresh to see it.");
+        }
+        return;
+      }
+
+      if (sendData.scheduled) {
+        await pollForNewMessages(confirmedOwnerMessage.created_at);
+      }
     } catch {
       setError("Couldn't reach the server — check your connection and try again.");
       setMessages((prev) => prev.filter((m) => m.id !== tempId));
       setInput(trimmed);
       setReplyingTo(repliedToSnapshot);
-      setActiveSends((n) => n - 1);
-      return;
-    }
-
-    /**
-     * PHASE 2 — the actual agent turn. The owner's message is already
-     * confirmed and rendered normally at this point; this only ever
-     * adds the agent's reply (or reports a failure to reply, which is
-     * a different, separate failure from "did my message send"). Not
-     * gated on any shared flag, so the owner is free to send another
-     * message (starting its own independent Phase 1 + Phase 2) while
-     * this one is still waiting on the agent.
-     */
-    try {
-      const res = await fetch("/api/agent-chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: trimmed,
-          repliedToMessageId: replyId,
-          ownerMessageId: confirmedOwnerMessage.id,
-        }),
-      });
-
-      const data = await res.json();
-
-      if (!res.ok || data.error) {
-        setError(data.error ?? "Your message sent, but the agent couldn't reply — try again.");
-        return;
-      }
-
-      setMessages((prev) => [...prev, ...(data.agentMessages ?? [])]);
-      requestAnimationFrame(() => scrollToBottom(true));
-    } catch {
-      setError("Your message sent, but couldn't reach the agent for a reply — try again.");
     } finally {
       setActiveSends((n) => n - 1);
     }
+  }
+
+  /**
+   * PHASE 2 — polls for the agent's eventual reply rather than holding
+   * one long HTTP request open. Necessary once replies became
+   * asynchronous (delayed 7-20s, batched with any follow-up sent
+   * during that window — see lib/inngest/functions.ts's
+   * processDelayedChatReply): a single blocking request risks Vercel's
+   * function duration limit once a follow-up message extends the
+   * effective wait, and two separate browser requests (for two
+   * messages sent close together) can't otherwise learn they were
+   * merged into one combined reply server-side.
+   *
+   * Polls every 2 seconds for up to ~90 seconds (comfortably covering
+   * the 7-20s base delay plus a couple of possible extensions from
+   * follow-up messages), stopping as soon as any new message appears.
+   */
+  async function pollForNewMessages(sinceTimestamp: string) {
+    const POLL_INTERVAL_MS = 2000;
+    const MAX_POLL_MS = 90_000;
+    const startedAt = Date.now();
+    let cursor = sinceTimestamp;
+
+    while (Date.now() - startedAt < MAX_POLL_MS) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+
+      try {
+        const res = await fetch(`/api/agent-chat?after=${encodeURIComponent(cursor)}`);
+        const data = await res.json();
+
+        if (data.error) continue; // transient — keep polling rather than surfacing every hiccup
+
+        const newMessages: ChatMessage[] = data.messages ?? [];
+
+        if (newMessages.length > 0) {
+          setMessages((prev) => {
+            const existingIds = new Set(prev.map((m) => m.id));
+            const toAdd = newMessages.filter((m) => !existingIds.has(m.id));
+            return [...prev, ...toAdd];
+          });
+          requestAnimationFrame(() => scrollToBottom(true));
+
+          const agentMessageArrived = newMessages.some((m) => m.role === "agent");
+          if (agentMessageArrived) return;
+
+          // Only owner-role rows appeared (e.g. this device's own
+          // message echoed back some other way) — keep polling and
+          // advance the cursor.
+          cursor = newMessages[newMessages.length - 1].created_at;
+        }
+      } catch {
+        // Network hiccup — keep polling rather than giving up on one
+        // failed check.
+      }
+    }
+
+    setError("The agent is taking longer than expected — it may still reply shortly.");
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -402,7 +445,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
                       className={`max-w-full whitespace-pre-wrap break-words rounded-panel px-3.5 py-2.5 text-sm leading-relaxed shadow-panel ${
                         isOwner
                           ? "bg-accent text-white"
-                          : "border border-line bg-surface text-ink"
+                          : "bg-surface-2 text-ink"
                       } ${msg.pending ? "opacity-60" : ""}`}
                     >
                       {renderInlineMarkdown(msg.content)}

@@ -38,16 +38,6 @@ async function getAuthenticatedTenantId(): Promise<string> {
 }
 
 /**
- * Returns recent owner chat history for the widget's initial render.
- * Sourced directly from owner_chat_messages (migration 013) rather than
- * lib/agent/chat-history's fetchChatHistoryTurns(), which is a
- * different, narrower thing — that function builds the trimmed,
- * cutoff-applied window handed to the MODEL as prompt context; this
- * route returns a plain, fuller transcript for a human to actually read
- * in the UI, with real row ids so the "reply to this message" action
- * has something to attach to.
- */
-/**
  * Returns owner chat history for the widget's display — sourced
  * directly from owner_chat_messages (migration 013), a completely
  * different, much larger window than lib/agent/chat-history's
@@ -63,6 +53,15 @@ async function getAuthenticatedTenantId(): Promise<string> {
  * the original 50 to 100 as a reasonable default; the client requests
  * older pages via `before` as the owner scrolls up, rather than this
  * route trying to guess a "whole history" cutoff.
+ *
+ * Also supports `?after=<ISO timestamp>`, added for the delayed-batch
+ * reply flow: since a reply may now arrive asynchronously (up to
+ * 7-20+ seconds later, via lib/inngest/functions.ts's
+ * processDelayedChatReply), the widget no longer holds one long
+ * request open waiting for it — it polls this endpoint with `after`
+ * set to the last message it already has, until the new reply shows
+ * up. Ascending order for `after` (oldest-of-the-new-batch first),
+ * versus `before`'s descending order for backward pagination.
  */
 export async function GET(request: NextRequest) {
   try {
@@ -70,6 +69,24 @@ export async function GET(request: NextRequest) {
     const supabase = createServiceSupabase();
 
     const before = request.nextUrl.searchParams.get("before");
+    const after = request.nextUrl.searchParams.get("after");
+
+    if (after) {
+      const { data, error } = await supabase
+        .from("owner_chat_messages")
+        .select("id, role, content, replied_to_message_id, created_at")
+        .eq("tenant_id", tenantId)
+        .gt("created_at", after)
+        .order("created_at", { ascending: true })
+        .limit(50);
+
+      if (error) {
+        console.error("FAILED TO POLL FOR NEW CHAT MESSAGES:", error);
+        return NextResponse.json({ error: "Failed to check for new messages" }, { status: 500 });
+      }
+
+      return NextResponse.json({ messages: data ?? [] });
+    }
 
     let query = supabase
       .from("owner_chat_messages")
@@ -118,6 +135,13 @@ export async function GET(request: NextRequest) {
  * already persisted the owner's own message via the fast
  * POST /api/agent-chat/send endpoint, so this route (and
  * handleChatMessage() underneath it) doesn't persist it a second time.
+ *
+ * NOT called by the widget's normal flow anymore as of the
+ * delayed-batch reply rearchitecture (see /send/route.ts and
+ * lib/inngest/functions.ts's processDelayedChatReply) — that endpoint
+ * now handles both the instant-confirmation-reply case and scheduling
+ * the delayed case directly. Left in place (unused by the UI, not
+ * removed) in case anything else calls this route directly.
  */
 export async function POST(request: NextRequest) {
   try {

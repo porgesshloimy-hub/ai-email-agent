@@ -62,6 +62,17 @@ import { fetchChatHistoryTurns, stripLeakedTimestampPrefix, stripAllLeakedTimest
  * "the agent replied" were the same event, so the owner's own bubble
  * looked unconfirmed for the full duration of the agent's processing,
  * not just until actual delivery was confirmed.
+ *
+ * options.skipPersistingOwnerMessage: for the delayed-batch flow (see
+ * lib/inngest/functions.ts's processDelayedChatReply) — when several
+ * owner messages arrive in quick succession, they're each already
+ * persisted individually as they come in, then combined into one
+ * synthesized `messageText` (see that function's batching comment) fed
+ * through this same pipeline so the reply can address all of them.
+ * That combined text doesn't correspond to any single stored row, so
+ * it must not be persisted at all — the constituent messages are
+ * already saved, and the batch processor marks them `processed`
+ * itself once a reply is generated.
  */
 export async function handleChatMessage(
   tenantId: string,
@@ -70,6 +81,7 @@ export async function handleChatMessage(
     channel?: string;
     repliedToMessageId?: string | null;
     alreadyPersistedOwnerMessageId?: string;
+    skipPersistingOwnerMessage?: boolean;
   } = {}
 ): Promise<{ text: string; messageIds: string[]; ownerMessageId: string | null }> {
   const channel = options.channel ?? "chat";
@@ -80,16 +92,20 @@ export async function handleChatMessage(
   // Persist the incoming owner message immediately, before any
   // processing — so it's captured even if something downstream throws,
   // and so its id exists for reply-to resolution below. Skipped if the
-  // caller already did this itself (see the options doc above).
-  const ownerMessageRow = options.alreadyPersistedOwnerMessageId
-    ? { id: options.alreadyPersistedOwnerMessageId }
-    : await persistChatMessage(
-        tenantId,
-        "owner",
-        messageText,
-        channel,
-        repliedToMessageId
-      );
+  // caller already did this itself, or if this is a synthesized batch
+  // with no single corresponding row at all (see the options doc
+  // above).
+  const ownerMessageRow = options.skipPersistingOwnerMessage
+    ? null
+    : options.alreadyPersistedOwnerMessageId
+      ? { id: options.alreadyPersistedOwnerMessageId }
+      : await persistChatMessage(
+          tenantId,
+          "owner",
+          messageText,
+          channel,
+          repliedToMessageId
+        );
 
   /**
    * Everything that decides WHAT to say back to the owner lives inside

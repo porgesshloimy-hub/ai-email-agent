@@ -7,6 +7,7 @@ import {
 } from "@/lib/gmail/client";
 import { processIncomingEmail } from "@/lib/agent/run";
 import { reconcileUnreportedUsage } from "@/lib/billing/meter";
+import { handleChatMessage } from "@/lib/agent/chat";
 
 /**
  * Fires on every Gmail push notification.
@@ -740,5 +741,160 @@ export const reconcilePendingDrafts = inngest.createFunction(
       deletedCount,
       unknownCount,
     };
+  }
+);
+/**
+ * ------------------------------------------------------------
+ * Delayed, batched owner-chat replies
+ * ------------------------------------------------------------
+ *
+ * Built per explicit request: the agent should feel more natural by
+ * waiting a random 7-20 seconds before replying (like a person taking
+ * a moment), and — critically — a follow-up message sent DURING that
+ * window should be answered together with the first, not trigger a
+ * second, possibly-overlapping reply.
+ *
+ * Fires once per NEW owner message that isn't a reply to a pending
+ * confirmation (app/api/agent-chat/send/route.ts decides that up
+ * front — confirmation replies like "yes"/"cancel" stay instant,
+ * since an artificial thinking-pause doesn't belong on a quick
+ * acknowledgment).
+ *
+ * Debounce approach (hand-rolled rather than relying on Inngest's
+ * built-in `debounce` trigger config, so this works regardless of
+ * plan/version): every triggering event sleeps its own random delay,
+ * then checks whether a NEWER unprocessed owner message exists for
+ * this tenant. If one does, this run stands down — the newer
+ * message's own triggered run will handle the whole batch once ITS
+ * delay elapses. Only the run whose own message turns out to be the
+ * most recent unprocessed one actually proceeds, gathering EVERY
+ * unprocessed owner message (not just its own) into one combined
+ * turn.
+ */
+export const processDelayedChatReply = inngest.createFunction(
+  {
+    id: "process-delayed-chat-reply",
+
+    /**
+     * Resource control only, not correctness — the "check if I'm the
+     * latest" step is what actually prevents duplicate/overlapping
+     * replies, the same way the Gmail history handler's comment above
+     * notes concurrency limits aren't relied on for correctness either.
+     */
+    concurrency: {
+      limit: 5,
+      key: "event.data.tenantId",
+    },
+  },
+
+  {
+    event: "chat/owner-message.sent",
+  },
+
+  async ({ event, step }) => {
+    const { tenantId, ownerMessageId, channel } = event.data as {
+      tenantId: string;
+      ownerMessageId: string;
+      channel: string;
+    };
+
+    const delaySeconds = await step.run("compute-delay", async () => {
+      // 7-20 seconds inclusive.
+      return 7 + Math.floor(Math.random() * 14);
+    });
+
+    await step.sleep("wait-before-responding", `${delaySeconds}s`);
+
+    const batch = await step.run("check-latest-and-gather-batch", async () => {
+      const supabase = createServiceSupabase();
+
+      const { data: unprocessed, error } = await supabase
+        .from("owner_chat_messages")
+        .select("id, content, created_at")
+        .eq("tenant_id", tenantId)
+        .eq("role", "owner")
+        .eq("processed", false)
+        .order("created_at", { ascending: true });
+
+      if (error) {
+        throw new Error(`Failed to gather pending owner messages: ${error.message}`);
+      }
+
+      const rows = unprocessed ?? [];
+
+      if (rows.length === 0) {
+        // Already handled by an earlier run (e.g. this run lost a race
+        // with another that already processed the batch).
+        return { shouldProcess: false, rows: [] };
+      }
+
+      const mostRecent = rows[rows.length - 1];
+
+      if (mostRecent.id !== ownerMessageId) {
+        // A newer message exists that this run doesn't know about yet
+        // — stand down. That message's own triggered run will handle
+        // the full batch (including this one) once its delay elapses.
+        return { shouldProcess: false, rows: [] };
+      }
+
+      return { shouldProcess: true, rows };
+    });
+
+    if (!batch.shouldProcess || batch.rows.length === 0) {
+      console.log("DELAYED CHAT REPLY: standing down, not the latest message", {
+        tenantId,
+        ownerMessageId,
+      });
+      return { processed: false };
+    }
+
+    /**
+     * Combined into ONE synthesized message rather than multiple
+     * separate trailing turns — reuses handleChatMessage()'s entire
+     * existing, tested pipeline (persona resolution, tool handling,
+     * message-splitting, persistence) with zero duplication, at the
+     * cost of the batched messages appearing as one turn's content
+     * instead of several consecutive user turns. The model still sees
+     * and can address every message — the "|||" splitting mechanism it
+     * already knows how to use lets it reply to each point separately
+     * if that reads more naturally.
+     */
+    const combinedText =
+      batch.rows.length === 1
+        ? batch.rows[0].content
+        : batch.rows
+            .map((row, i) =>
+              i === 0 ? row.content : `(They then added, before you could reply:)\n${row.content}`
+            )
+            .join("\n\n");
+
+    await step.run("generate-and-persist-reply", async () => {
+      await handleChatMessage(tenantId, combinedText, {
+        channel,
+        skipPersistingOwnerMessage: true,
+      });
+
+      const supabase = createServiceSupabase();
+
+      const { error } = await supabase
+        .from("owner_chat_messages")
+        .update({ processed: true })
+        .in(
+          "id",
+          batch.rows.map((r) => r.id)
+        );
+
+      if (error) {
+        throw new Error(`Failed to mark batch as processed: ${error.message}`);
+      }
+    });
+
+    console.log("DELAYED CHAT REPLY: processed batch", {
+      tenantId,
+      batchSize: batch.rows.length,
+      delaySeconds,
+    });
+
+    return { processed: true, batchSize: batch.rows.length };
   }
 );

@@ -492,7 +492,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
              * above is a separate, unrelated concern from this vertical
              * spacing — it's unaffected by this change.)
              */
-            const topMargin = index === 0 ? "" : "mt-3";
+            const topMargin = index === 0 ? "" : "mt-2";
 
             return (
               <div

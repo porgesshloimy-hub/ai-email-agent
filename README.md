@@ -30,6 +30,14 @@ the live agent path already closed, that "today" means the same thing to the age
 to the business, and that when the agent can't do exactly what was asked, it reaches for a real
 alternative instead of a dead end.
 
+A second, more recent phase of work built a real owner-facing chat assistant (persistent corner
+widget + full-page view, backed by `/api/agent-chat`) on top of that same trust model — a
+persona layer, owner-directed approval resolution (explicit instructions execute immediately;
+anything requiring the model to compose wording gets a synchronous confirmation in the same
+conversation), real inbox/calendar read access, and email sending scoped strictly to
+owner-requested, never autonomous. See "Owner Chat Assistant" below for the full picture,
+including what's real versus what's still schema-only.
+
 ---
 
 # Core Principles
@@ -150,7 +158,8 @@ Gmail / Google Chat / Twilio SMS
 ## Background Processing
 
 - Inngest — Gmail push events, scheduled Gmail watch renewal, scheduled draft-status
-  reconciliation, scheduled billing reconciliation
+  reconciliation, scheduled billing reconciliation, delayed/batched owner-chat replies (see
+  "Owner Chat Assistant")
 
 ## Billing
 
@@ -180,6 +189,8 @@ Routes (`app/dashboard/components/DashboardNav.tsx`):
 /dashboard                     Overview
 /dashboard/approvals           Approvals
 /dashboard/agent               Agent — instructions, model, permissions, preferences, rules, knowledge
+/dashboard/agent-chat           Owner Chat Assistant — full-page view (also available as a corner
+                                widget on every dashboard page)
 /dashboard/settings            Connections — Google / Zoom OAuth connect-disconnect, business timezone
 /dashboard/settings/knowledge  Knowledge (also reachable from the Agent page)
 /dashboard/billing             Usage & billing
@@ -470,6 +481,214 @@ the same connection-checked permission engine as Gmail. Calendar actions live in
 via the connected Gmail address or an explicit `tenants.owner_google_email` override. Shares the
 same tool registry and permission logic as the email surface (filtered to `surfaces: ["chat"]`).
 
+# Owner Chat Assistant
+
+A direct, conversational surface for the business owner — distinct from the customer-facing
+email pipeline above, though it shares the same permission engine, content-safety posture, and
+tool registry pattern. Reachable two ways: a persistent corner widget on every dashboard page
+(`app/dashboard/components/AgentChatWidget.tsx`), and a full-page view at `/dashboard/agent-chat`
+— both render the same conversation via `AgentChatPanel.tsx`, backed by `/api/agent-chat` and
+`/api/agent-chat/send`.
+
+## Personas
+
+`agent_personas` (migration 010) — mostly configuration, not code: name, system prompt,
+audience (`customer` / `owner` / `both`), allowed tool/connection categories, and
+`permission_overrides` that can only **narrow** what the tenant's real, connection-checked
+permissions already allow, never widen them. Every tenant is seeded with one `"Assistant"`
+persona per audience. `lib/agent/personas/resolve.ts` resolves which persona applies;
+`lib/agent/personas/apply-overrides.ts` does the narrowing. Designed so adding a second named
+persona later (a "Secretary," a "Bookkeeper") is a new config row plus a handful of
+persona-specific tools, not a new pipeline — no second persona has been built yet, this is
+the one-persona-per-audience foundation for that.
+
+## Owner-Directed Approval
+
+`lib/agent/approval/` — a capability's configured approval level isn't the only thing that
+decides whether an action executes immediately or gets held: when the OWNER is the one directing
+an action (not a customer email triggering it), the real question is whether they gave the
+model something explicit to act on, or delegated a judgment call.
+
+- **Explicit** (a real recipient plus dictated/quoted wording, or a clear direct command like
+  "send it," "go ahead and send") → executes immediately, even on an `approval_required`
+  capability.
+- **Anything less specific** (the model would be composing the actual wording/timing itself) →
+  held as a `pending_owner_confirmations` row (migration 012/013), and the agent asks
+  "go ahead?" synchronously in the same conversation — not routed to the async dashboard
+  approval queue, since the owner is already present and can answer instantly.
+
+Every owner-directed action — executed or held — is logged to `owner_directed_action_log`
+(migration 010), so nothing here is a silent, unauditable decision. Explicitness scoring
+(`lib/agent/approval/explicitness-heuristic.ts`) is deliberately backend pattern-matching, not
+the model's own self-report — the same "don't trust the model's claims about itself" principle
+the grounding guard applies to the email pipeline.
+
+Two tools currently go through this: `create_calendar_event` (chat surface) and `send_email`.
+`compose_email_draft` (draft-only, never sends) has no explicitness gate at all — a draft is
+always safe to create regardless of how vague the request was, since a human reviews it before
+anything goes out.
+
+## Chat Continuity, Reply-To, and Message Formatting
+
+`owner_chat_messages` (migration 013) — the full transcript, tagged by role/channel, with an
+optional `replied_to_message_id` for the UI's "reply to a specific message" action. Two
+deliberately different windows read from this same table:
+
+- **Model context** (`lib/agent/chat-history/build-context.ts`) — capped at ~10 messages / 30
+  hours, since this is re-sent to the LLM on every call and is a real, recurring token cost. The
+  time cutoff is waived entirely if the agent sent the last message (an open loop shouldn't
+  expire just because the owner takes a while to reply), and only applies when the owner's last
+  message reads as a genuine closing acknowledgment ("thanks," "sounds good") — a deferral like
+  "I'll think about it" keeps the window open.
+- **UI display** (`GET /api/agent-chat`) — a completely separate, much larger window (page size
+  100, real keyset pagination via `?before=`/`?after=`), since showing a human more history has
+  no LLM-cost implication at all.
+
+The model is instructed to split genuinely distinct statements into separate messages using a
+`|||` delimiter (capped at 6 parts per reply, each persisted as its own row with a natural 2-4
+second pause between them to mimic actual typing pace) rather than writing one long paragraph —
+and explicitly never to break a single message into multiple paragraphs internally.
+
+**Bug found and fixed: a stale pending confirmation could silently swallow unrelated new
+messages.** The fallback match (used when no explicit reply-to is given — see "Reply-To" above)
+previously matched ANY existing pending confirmation regardless of the new message's own
+content. Since a `pending_owner_confirmations` row can live for up to 30 minutes, this meant an
+entirely unrelated new question sent while one happened to still exist got routed into the
+confirmation-handling branch, didn't match affirmative or negative, and fell into the
+"ambiguous, re-ask" case — silently replacing the owner's actual new question with a repeat of
+the OLD confirmation prompt instead of ever answering it. Reported as the agent's response not
+appearing and a slow-feeling "message received" acknowledgment (this whole branch runs
+synchronously in `/api/agent-chat/send`, bypassing the normal async/typing-indicator path
+entirely). Fixed in both `lib/agent/chat.ts` and the lightweight
+`hasMatchingPendingConfirmation()` check by requiring the fallback match to actually look like a
+yes/no response before it counts at all — an explicit reply-to still always honors the match
+regardless of wording, since that's a deliberate action, not a guess.
+
+## Delayed, Typing-Aware Replies
+
+The agent waits before replying, rather than answering instantly, and the wait length depends on
+whether the owner appears to be composing a follow-up — not on whether one has actually arrived
+yet. Built as a real background job (`lib/inngest/functions.ts`'s `processDelayedChatReply`,
+event `chat/owner-message.sent`), not a blocking HTTP request — this project has no
+`maxDuration` configured anywhere, so a request sitting through even the base wait would risk
+Vercel's default function timeout.
+
+**The wait itself — a deliberately bounded two-phase structure, not an open-ended loop:**
+
+1. **Phase A** — a fixed 2-4 second pause after the message is sent.
+2. **Decision** — did the owner start typing at any point during Phase A? Checked via
+   `tenants.owner_last_typing_at` (migration 016, a single constantly-overwritten timestamp with
+   no history value once stale) against the message's own `created_at` — a point-in-time check,
+   not a rolling freshness window, since Phase A is a fixed short duration.
+3. **Phase B** — 5-9 seconds if typing was detected (they seem to be composing something; give
+   them real room to send it), otherwise a shorter 2-4 seconds.
+4. **Respond** — once Phase B elapses, reply to everything sent since the last reply.
+
+If the owner sends another message at any point during either phase, the run stands down
+entirely and the new message's own triggered run starts the whole two-phase wait over again,
+relative to itself. This keeps the wait naturally bounded (worst case ~4s + 9s ≈ 13 seconds
+before a reply begins, per message that doesn't get superseded) — no open-ended loop, no
+separate safety cap needed the way a continuously-extending "keep waiting while still typing"
+design would require.
+
+The composer pings `POST /api/agent-chat/typing` roughly every ~2 seconds (throttled
+client-side) while there's text in the box, feeding the check in step 2.
+
+**Batching:** a hand-rolled debounce (not dependent on Inngest's built-in `debounce` trigger, so
+it works regardless of plan/version) — at the end of each phase, the run checks whether a newer
+unprocessed owner message exists for the tenant. If so, it stands down, and the newer message's
+own scheduled run handles the **entire** batch once its own two-phase wait resolves. This means
+a follow-up sent while the agent is "thinking" gets folded into one combined reply instead of
+triggering a second, overlapping one.
+
+`/api/agent-chat/send` decides up front whether a message needs this wait at all — a reply to a
+pending confirmation ("yes," "cancel") is answered instantly, synchronously, since a quick
+acknowledgment shouldn't sit behind an artificial delay the way a genuine new question should.
+Either way, "the message was saved" and "the reply is reliably scheduled" are both confirmed to
+the client immediately — the widget polls (`GET /api/agent-chat?after=...`) for the eventual
+reply rather than holding one long request open.
+
+**The typing indicator is driven by a real server-reported status, not client-side timing
+guesses.** `tenants.chat_agent_replying` (migration 017) is owned by `lib/agent/chat.ts` itself
+— set `true` immediately before the reply-persisting loop begins, and back to `false` (via
+`try`/`finally`, so a failure can never leave it stuck `true`) once every part has been
+generated and persisted. This ownership matters: it's deliberately bracketed around only the
+"writing the reply out" phase, not the whole `handleChatMessage()` call — an earlier version
+toggled this from the Inngest orchestrator around the entire call, which meant the indicator
+stayed on through **tool execution too** (a calendar/Gmail API call, or the JSON-result
+loop-back completion for a read-only tool), reported as showing "typing" for the whole time the
+agent was doing something else entirely. Since `chat.ts` is called from both the delayed-batch
+path and the synchronous confirmation-reply path, both get this correct timing for free from one
+change. A `MIN_REPLYING_DURATION_MS` floor (1.8s) guards a separate, real problem: the client
+polls this status every ~2 seconds, so a very fast single-part reply could otherwise flip
+true→false entirely between two polls and never be observed at all — the floor guarantees at
+least one full poll cycle has a real chance to catch it, without faking anything client-side; the
+status is still exactly true when it says so, just never shorter than it's useful. This replaced
+two earlier client-side guesses that both had real, reported problems: a fixed delay before
+first showing "typing," and a quiet-period heuristic for deciding a multi-part reply had
+finished. The composer also loses focus immediately after sending, rather than staying visually
+"active" while a reply is pending.
+
+**Message splitting is now enforced mechanically, not left to prompt compliance alone.**
+Previously the model was only asked to insert a `"|||"` delimiter between distinct messages,
+which was reported as inconsistent — "splitting only sometimes; other times writes separate
+paragraphs all in one message." A blank line between paragraphs is something models produce
+reliably even when they forget an explicit marker, so `lib/agent/chat.ts` now splits on
+`"|||"` **or** a paragraph break (`\n\s*\n+`) — either one becomes a real, separate message,
+mechanically, regardless of which one the model happened to use. The system prompt was
+simplified accordingly: it no longer needs to separately forbid multi-paragraph messages, since
+a paragraph break now just *is* a message boundary either way.
+
+**The chat view auto-scrolls when the typing indicator appears, not only when a message
+arrives.** A dedicated effect in `AgentChatPanel.tsx`, independent of the message-append scroll
+calls elsewhere, closes a gap where the indicator (which typically appears before the first part
+of a reply has arrived) could show up outside the visible scroll area with nothing to trigger a
+scroll to it.
+
+**Spacing between consecutive same-time messages is now uniform, not tighter for grouped ones.**
+An earlier fix gave consecutive same-time messages a tighter top margin than normal, mainly
+affecting the agent's own multi-part split replies (the owner rarely sends two messages within
+the same displayed minute) — reported as the agent's side feeling more cramped than the owner's.
+Every message now gets the same spacing regardless of grouping (`mt-2`, tightened slightly from
+`mt-3` per follow-up feedback that even the uniform version felt like too much — `mt-3` had been
+the owner side's value across every prior revision of this file, so numerically nothing had
+actually grown there beyond making the agent's side match it, but the value was tightened anyway
+on request).
+
+## Real Capabilities Available to the Owner-Chat Surface
+
+- **`check_recent_emails`** — real, read-only Gmail inbox search (sender, subject, date,
+  snippet, unread status), gated on a real `gmail.read` connection check
+  (`lib/agent/permissions.ts`'s `canReadGmail()`) that didn't exist anywhere in this codebase
+  before this work — previously the agent could only report on drafts already awaiting review.
+- **`compose_email_draft`** — composes a brand-new outbound email (not a reply within an
+  existing thread — a different code path from the email pipeline's reply-drafting tool) and
+  saves it as a real Gmail draft. Never sends.
+- **`send_email`** — real, immediate sending, gated on `emailDraftCapability === "send"` and
+  owner-directed approval resolution (see above). Only ever reachable in response to the
+  owner's own message — there is no path from customer-facing email into this tool, and no
+  autonomous, unprompted use was built or considered further after explicit discussion ruled it
+  out.
+- **`check_calendar_availability`** now also returns each event's real `description` and
+  `conferenceLink` (extracted from Calendar's `conferenceData`, covering natively-attached
+  Google Meet/Zoom links as well as a manually-pasted link in the description text) — added
+  after an incident where the agent gave a correct Zoom link in one conversation, then
+  incorrectly told the owner in a later conversation that it had "made it up." The first answer
+  was almost certainly genuine (pulled from real event data); the second was the model
+  misdescribing its own capabilities, not an actual bug — the tool description and system prompt
+  were both tightened so it stops confusing itself about this.
+
+## What's Still Just Schema
+
+`agent_memories` (migration 009) exists as a table — scope (`tenant`/`customer`), slots,
+provenance, decay tracking — but has no extraction, retrieval, or write path implemented
+anywhere in code. An owner or customer stating something explicitly memorable today is not
+saved anywhere durable. Same for reminders, watches, and self-observations as originally
+designed — the tables exist, nothing writes to or reads from them for that purpose. This is a
+real, known gap, not an oversight being hidden: the durable cross-session memory system was the
+original goal of this line of work, but build effort shifted early toward the persona/approval/
+chat-interface foundation above, which the memory system was always meant to sit on top of.
+
 # SMS (Twilio)
 
 `/api/twilio/incoming` currently understands a fixed APPROVE/DENY/permission-toggle command
@@ -492,12 +711,28 @@ Supabase/PostgreSQL. Base schema in `db/schema.sql`; incremental changes in `db/
 **`db/schema.sql` is known to drift behind what's actually deployed** — several migrations exist
 specifically to close gaps between the two (see `004_add_zoom_connections.sql`,
 `005_multi_llm_support.sql`, `006 additional migration for multi LLM support.sql`,
-`approvals calendar actions and status fixes.sql`, `007_tenant_timezone.sql`, and
-`008_tool_preferences_and_meet_selection.sql`). Re-check actual deployed schema via migrations,
-not `schema.sql` alone, before relying on a column/enum value being present. **Always run the
-specific migration file against an existing database — never `schema.sql` itself, which
-`CREATE TABLE`s from scratch and will fail (or worse, on some hosts, silently skip) against
-tables that already have real data.** `schema.sql` is only for a genuinely fresh install.
+`approvals calendar actions and status fixes.sql`, `007_tenant_timezone.sql`,
+`008_tool_preferences_and_meet_selection.sql`, and `009` through `017` — see below). Re-check
+actual deployed schema via migrations, not `schema.sql` alone, before relying on a column/enum
+value being present. **Always run the specific migration file against an existing database —
+never `schema.sql` itself, which `CREATE TABLE`s from scratch and will fail (or worse, on some
+hosts, silently skip) against tables that already have real data.** `schema.sql` is only for a
+genuinely fresh install.
+
+Migrations `009`-`015` (owner chat assistant, see that section above):
+
+```
+009  agent_memories extensions (scope/slots/provenance/decay — schema only, unused by any code)
+010  agent_personas, connector_credentials, owner_directed_action_log, tenants channel columns
+011  Seeds one "owner"-audience persona per tenant
+012  pending_owner_confirmations
+013  owner_chat_messages, relaxes pending_owner_confirmations to allow more than one at a time
+014  Appends casual-writing-style guidance to the owner persona's system_prompt
+015  owner_chat_messages.processed (tracks which owner messages a reply has already covered)
+016  tenants.owner_last_typing_at (feeds the typing-aware delayed-reply wait)
+017  tenants.chat_agent_replying (real "actively generating a reply right now" status, replacing
+     client-side timing guesses for the typing indicator)
+```
 
 Key tables:
 
@@ -506,7 +741,8 @@ tenants                  agent_configs             agent_permissions
 gmail_connections        zoom_connections          calendar_events_cache
 knowledge_documents      knowledge_chunks          agent_memories
 email_actions            approvals                 calendar_actions
-usage_events
+usage_events             agent_personas            connector_credentials
+owner_directed_action_log   pending_owner_confirmations   owner_chat_messages
 ```
 
 Notable columns added after the base schema (see the migration list above for exact
@@ -705,8 +941,9 @@ Multi-provider model switching           Router false-exclusion rate (tool the
 - A generalized capability-router pattern for future connectors beyond Calendar/Zoom
 - WhatsApp as a messaging surface (deferred — would need its own inbound handler, likely via
   Twilio's WhatsApp Business API or Meta's Cloud API directly)
-- Better agent conversation history / customer memory (`agent_memories` table exists; usage is
-  still limited)
+- Better agent conversation history / customer memory (`agent_memories` table exists; no
+  extraction, retrieval, or write path has actually been built yet — see "Owner Chat Assistant"
+  → "What's Still Just Schema" for the full status)
 - More detailed billing controls, better approval notifications, automatic follow-ups
 - Production monitoring/Sentry, more robust onboarding, subscription/checkout UX
 
@@ -778,10 +1015,17 @@ Webhooks    /app/api/webhooks/gmail
             /app/api/webhooks/stripe
             /app/api/twilio/incoming
 
+Chat        /app/api/agent-chat            History (GET, paginated) + legacy send path (POST,
+                                            unused by the current widget flow)
+            /app/api/agent-chat/send       Fast persist + instant-vs-scheduled decision (POST)
+            /app/api/agent-chat/typing     Owner typing-activity signal (POST), feeds the
+                                            typing-aware delayed-reply wait
+
 Inngest     /app/api/inngest
 
 Dashboard   /dashboard
             /dashboard/agent
+            /dashboard/agent-chat
             /dashboard/settings
             /dashboard/settings/knowledge
             /dashboard/approvals
@@ -796,11 +1040,20 @@ Dashboard   /dashboard
 lib/
 ├── agent/
 │   ├── run.ts                    Email agent loop
-│   ├── chat.ts                   Google Chat agent (shares tool registry with run.ts)
+│   ├── chat.ts                   Owner-facing chat agent — personas, owner-directed approval
+│   │                             resolution, chat continuity, message splitting, delayed replies
+│   ├── personas/                 Persona resolution + permission-narrowing (see "Owner Chat
+│   │                             Assistant")
+│   ├── approval/                 Owner-directed explicitness heuristics + approval-path
+│   │                             resolution (calendar, email)
+│   ├── chat-history/              Persistence + the model-context window (distinct from the
+│   │                             UI's own, much larger display window)
 │   ├── permissions.ts            Permission engine (connection-checked)
 │   ├── content-safety.ts         Placeholder/hallucination text checks
 │   ├── grounding-guard.ts        LLM-based "was this actually done" check
-│   ├── date-context.ts           Timezone-aware date-resolution table for the model
+│   ├── date-context.ts           Timezone-aware date-resolution table, incl. an early-morning
+│   │                             rollover cutoff so "tomorrow" resolves correctly just after
+│   │                             midnight
 │   ├── models.ts                 Multi-provider model catalog
 │   ├── llm/                      Per-provider adapters (openai, anthropic, mistral)
 │   ├── router/                   Capability pre-router (heuristics + classifier)
@@ -809,12 +1062,14 @@ lib/
 │       └── ...                   One module per tool + the shared registry
 │
 ├── billing/                      meter.ts, pricing.ts, stripe.ts
-├── calendar/client.ts            Google Calendar API wrapper
-├── gmail/client.ts               Gmail API wrapper (centralized invalid_grant detection)
+├── calendar/client.ts            Google Calendar API wrapper (incl. real event
+│                                 description/conferenceLink access)
+├── gmail/client.ts               Gmail API wrapper (centralized invalid_grant detection, real
+│                                 inbox search, new-draft/new-message composition)
 ├── zoom/client.ts                Zoom API wrapper
 ├── google/authClient.ts          Shared Google OAuth token handling
 ├── googlechat/                   matchTenant.ts, verify.ts
-├── inngest/                      client.ts, functions.ts
+├── inngest/                      client.ts, functions.ts (incl. delayed/batched chat replies)
 ├── integrations/                 config.ts, icons.tsx (per-integration UI metadata)
 ├── timezones.ts                  Curated IANA timezone list + validation
 ├── supabase/server.ts
@@ -836,8 +1091,9 @@ customer-facing goes out, auditing, and billing.
 This separation is fundamental, and has been reinforced rather than loosened as the project has
 grown: every incident that's come up (a fabricated Zoom confirmation, a literal
 `{{meeting_link}}` placeholder reaching a customer, a permission level with no real connection
-behind it) has been fixed by adding another backend check the model can't talk its way around,
-not by trusting the model more carefully worded instructions.
+behind it, a model incorrectly claiming it lacked calendar-link access it actually had) has been
+fixed by adding another backend check or a clearer capability boundary the model can't talk its
+way around, not by trusting the model more carefully worded instructions.
 
 ---
 
@@ -882,8 +1138,17 @@ not by trusting the model more carefully worded instructions.
 | Twilio SMS (approval commands only) | ✅ Implemented (narrow scope) |
 | Usage metering / Stripe Billing Meters | ✅ Implemented       |
 | Knowledge/context system (pgvector) | ✅ Implemented          |
+| Owner chat assistant (widget + full page) | ✅ Implemented    |
+| Persona system (resolution + permission narrowing) | ✅ Implemented (one persona per audience; multi-persona UI not built) |
+| Owner-directed approval resolution (calendar, email) | ✅ Implemented |
+| Chat continuity / reply-to / message splitting | ✅ Implemented |
+| Delayed, batched chat replies (Inngest) | ✅ Implemented       |
+| Real inbox search from chat (`check_recent_emails`) | ✅ Implemented |
+| Email compose/send from chat | ✅ Implemented (send scoped to owner-directed only) |
+| Calendar event descriptions + meeting links | ✅ Implemented |
 | Email relevance filtering         | 🟡 In progress            |
 | `db/schema.sql` drift cleanup     | 🟡 In progress            |
+| Durable cross-session memory (`agent_memories`) | ⏳ Schema only — no extraction/retrieval code exists |
 | Drive/Dropbox connectors          | ⏳ Planned, not started   |
 | WhatsApp surface                  | ⏳ Deferred               |
 | Production monitoring/Sentry      | ⏳ Remaining              |

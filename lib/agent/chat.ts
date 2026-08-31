@@ -139,7 +139,19 @@ export async function handleChatMessage(
      *     else.
      *   - If no repliedToMessageId was given (a channel without reply
      *     UI, e.g. plain SMS), fall back to the single most recent
-     *     unexpired pending item for this tenant, as before.
+     *     unexpired pending item — but ONLY if this message actually
+     *     looks like a yes/no response to it. Bug fix: without this
+     *     check, ANY unrelated new message sent while a pending
+     *     confirmation happened to exist (up to 30 minutes old) got
+     *     swallowed into this branch and, since it didn't match
+     *     affirmative or negative, fell into the "ambiguous, re-ask"
+     *     case below — meaning the owner's actual new question was
+     *     never processed or answered at all, just silently replaced
+     *     with a repeat of the old confirmation prompt. Reported as
+     *     "the agent's response isn't showing" and a slow-feeling
+     *     "message received" ack (this whole branch runs synchronously
+     *     in app/api/agent-chat/send/route.ts, bypassing the normal
+     *     scheduled/async path entirely).
      */
     const pendingQuery = supabase
       .from("pending_owner_confirmations")
@@ -153,10 +165,22 @@ export async function handleChatMessage(
 
     const pending = pendingCandidates?.[0] ?? null;
 
+    const normalizedMessage = messageText.trim().toLowerCase();
+    const isAffirmative = /^(yes|yep|yeah|yup|confirm|confirmed|go ahead|do it|sounds good|ok|okay|sure)\b/.test(
+      normalizedMessage
+    );
+    const isNegative = /^(no|nope|cancel|don'?t|nevermind|never mind|stop)\b/.test(normalizedMessage);
+
     // A reply-to was given but didn't match any pending confirmation —
     // this is a reply to something else; don't fall back to "most
-    // recent pending" and risk answering the wrong item.
-    const shouldSkipPendingCheck = Boolean(repliedToMessageId) && !pending;
+    // recent pending" and risk answering the wrong item. Separately: a
+    // FALLBACK match (no reply-to at all) is only honored if the
+    // message actually looks like a yes/no answer — see the bug-fix
+    // comment above for why an arbitrary unrelated message must not be
+    // swallowed here.
+    const shouldSkipPendingCheck =
+      (Boolean(repliedToMessageId) && !pending) ||
+      (!repliedToMessageId && Boolean(pending) && !isAffirmative && !isNegative);
 
     if (pending && !shouldSkipPendingCheck) {
       if (new Date(pending.expires_at) < new Date()) {
@@ -165,13 +189,6 @@ export async function handleChatMessage(
         // a confirmation prompt sent over 30 minutes ago.
         await supabase.from("pending_owner_confirmations").delete().eq("id", pending.id);
       } else {
-        const normalized = messageText.trim().toLowerCase();
-
-        const isAffirmative = /^(yes|yep|yeah|yup|confirm|confirmed|go ahead|do it|sounds good|ok|okay|sure)\b/.test(
-          normalized
-        );
-        const isNegative = /^(no|nope|cancel|don'?t|nevermind|never mind|stop)\b/.test(normalized);
-
         if (isAffirmative) {
           await supabase.from("pending_owner_confirmations").delete().eq("id", pending.id);
 

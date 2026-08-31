@@ -139,10 +139,28 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
    * the browser only ever reports the CURRENT height back, so the box
    * would never shrink again after being grown once (e.g. after
    * clearing the input on send).
+   *
+   * Bug fix: AgentChatWidget.tsx now keeps this panel permanently
+   * mounted, toggling only CSS visibility (display:none) when the
+   * popup is closed — a real fix for a worse bug (polling being
+   * silently abandoned on unmount), but it introduced this one: a
+   * `display:none` element always reports `scrollHeight: 0`. If
+   * `input` happened to change (e.g. clearing to "" right after a
+   * send) while the widget was closed, this effect would compute
+   * against that bogus zero height and set a broken inline
+   * `style.height` that then persisted — visually corrupting the
+   * composer the moment the widget reopened, since an inline style
+   * isn't affected by the CSS class toggle that controls visibility.
+   * `el.offsetParent === null` reliably detects "this element (or an
+   * ancestor) is currently display:none," so the broken calculation is
+   * simply skipped while hidden — nothing needs correcting on reopen,
+   * since the height was already correct from before the widget closed
+   * and is no longer being overwritten with garbage in the meantime.
    */
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
+    if (el.offsetParent === null) return; // hidden — skip, see bug-fix note above
 
     const MAX_TEXTAREA_HEIGHT = 160; // px, roughly 7 lines
 

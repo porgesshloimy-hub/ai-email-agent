@@ -588,6 +588,17 @@ Previously-silent failure paths in the polling loop (`AgentChatPanel.tsx`) also 
 errors to the console instead of swallowing them, to make any future regression here actually
 diagnosable rather than another guessing exercise.
 
+**Follow-up bug from fix #1 above, found and fixed the same session:** keeping the panel
+permanently mounted (instead of unmounting on close) introduced a new problem — a
+`display:none` element always reports `scrollHeight: 0`, and the composer's auto-grow effect had
+no guard against running while hidden. If `input` happened to change (e.g. clearing to `""`
+right after a send) while the widget was closed, the effect computed against that bogus zero
+height and set a broken inline `style.height` that then visually corrupted the composer the
+moment the widget reopened — an inline style isn't affected by the CSS class toggle that
+controls visibility. Fixed with an `el.offsetParent === null` check (a reliable way to detect
+"this element or an ancestor is currently `display:none`"), skipping the calculation entirely
+while hidden rather than needing to correct it after the fact.
+
 ## Delayed, Typing-Aware Replies
 
 The agent waits before replying, rather than answering instantly, and the wait length depends on

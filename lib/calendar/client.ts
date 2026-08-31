@@ -121,12 +121,32 @@ export async function listEventsInRange(
     orderBy: "startTime",
   });
 
-  return (res.data.items ?? []).map((event) => ({
-    summary: event.summary ?? "(untitled event)",
-    description: event.description ?? null,
-    start: event.start?.dateTime ?? event.start?.date ?? null,
-    end: event.end?.dateTime ?? event.end?.date ?? null,
-  }));
+  return (res.data.items ?? []).map((event) => {
+    /**
+     * Investigated directly after a real, confusing incident: the
+     * agent once correctly supplied a real Zoom link (almost certainly
+     * pulled from `description`, below — a very common place for a
+     * manually-pasted Zoom link to live), then LATER incorrectly told
+     * the owner "I don't have access to that, I made it up." That
+     * second answer was itself wrong — a confused self-report, not an
+     * admission of an actual bug. But it did surface a real gap: a
+     * link attached via Calendar's own "Add video conferencing" button
+     * (native Google Meet, or a Zoom integration using conferenceData)
+     * lives in a completely different field this function never
+     * fetched at all. Added here so a meeting's real link is available
+     * regardless of which way it was attached to the event.
+     */
+    const conferenceLink =
+      event.conferenceData?.entryPoints?.find((ep) => ep.entryPointType === "video")?.uri ?? null;
+
+    return {
+      summary: event.summary ?? "(untitled event)",
+      description: event.description ?? null,
+      conferenceLink,
+      start: event.start?.dateTime ?? event.start?.date ?? null,
+      end: event.end?.dateTime ?? event.end?.date ?? null,
+    };
+  });
 }
 
 /**

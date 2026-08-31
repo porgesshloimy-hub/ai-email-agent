@@ -749,7 +749,7 @@ export const reconcilePendingDrafts = inngest.createFunction(
  * ------------------------------------------------------------
  *
  * Built per explicit request: the agent should feel more natural by
- * waiting a random 7-20 seconds before replying (like a person taking
+ * waiting a random 6-13 seconds before replying (like a person taking
  * a moment), and — critically — a follow-up message sent DURING that
  * window should be answered together with the first, not trigger a
  * second, possibly-overlapping reply.
@@ -799,8 +799,8 @@ export const processDelayedChatReply = inngest.createFunction(
     };
 
     const delaySeconds = await step.run("compute-delay", async () => {
-      // 7-20 seconds inclusive.
-      return 7 + Math.floor(Math.random() * 14);
+      // 6-13 seconds inclusive.
+      return 6 + Math.floor(Math.random() * 8);
     });
 
     await step.sleep("wait-before-responding", `${delaySeconds}s`);

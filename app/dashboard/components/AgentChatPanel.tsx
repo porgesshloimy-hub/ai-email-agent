@@ -24,7 +24,7 @@ export interface ChatMessage {
  * from the model rather than a trusted static string.
  */
 function renderInlineMarkdown(text: string): React.ReactNode[] {
-  const pattern = /(\*\*[^*]+\*\*|`[^`]+`|\*[^*]+\*)/g;
+  const pattern = /(\*\*[^*]+\*\*|`[^`]+`|\*[^*]+\*|https?:\/\/[^\s<]+[^\s<.,;:!?)\]'"])/g;
   const parts = text.split(pattern);
 
   return parts.map((part, i) => {
@@ -40,6 +40,19 @@ function renderInlineMarkdown(text: string): React.ReactNode[] {
     }
     if (part.startsWith("*") && part.endsWith("*") && part.length > 2) {
       return <em key={i}>{part.slice(1, -1)}</em>;
+    }
+    if (/^https?:\/\//.test(part)) {
+      return (
+        <a
+          key={i}
+          href={part}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="underline underline-offset-2 hover:opacity-80"
+        >
+          {part}
+        </a>
+      );
     }
     return <Fragment key={i}>{part}</Fragment>;
   });
@@ -73,7 +86,6 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
   const [input, setInput] = useState("");
   const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeSends, setActiveSends] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -194,7 +206,6 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
     // Each call is self-contained (its own tempId/closures), and all
     // shared-state updates use the functional setState form, so
     // multiple overlapping sends are safe to run concurrently.
-    setActiveSends((n) => n + 1);
     setError(null);
 
     const replyId = replyingTo?.id ?? null;
@@ -241,7 +252,6 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
         setMessages((prev) => prev.filter((m) => m.id !== tempId));
         setInput(trimmed);
         setReplyingTo(repliedToSnapshot);
-        setActiveSends((n) => n - 1);
         return;
       }
 
@@ -282,15 +292,13 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
       setMessages((prev) => prev.filter((m) => m.id !== tempId));
       setInput(trimmed);
       setReplyingTo(repliedToSnapshot);
-    } finally {
-      setActiveSends((n) => n - 1);
     }
   }
 
   /**
    * PHASE 2 — polls for the agent's eventual reply rather than holding
    * one long HTTP request open. Necessary once replies became
-   * asynchronous (delayed 7-20s, batched with any follow-up sent
+   * asynchronous (delayed 6-13s, batched with any follow-up sent
    * during that window — see lib/inngest/functions.ts's
    * processDelayedChatReply): a single blocking request risks Vercel's
    * function duration limit once a follow-up message extends the
@@ -299,7 +307,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
    * merged into one combined reply server-side.
    *
    * Polls every 2 seconds for up to ~90 seconds (comfortably covering
-   * the 7-20s base delay plus a couple of possible extensions from
+   * the 6-13s base delay plus a couple of possible extensions from
    * follow-up messages), stopping as soon as any new message appears.
    */
   async function pollForNewMessages(sinceTimestamp: string) {
@@ -444,8 +452,8 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
                     <div
                       className={`max-w-full whitespace-pre-wrap break-words rounded-panel px-3.5 py-2.5 text-sm leading-relaxed shadow-panel ${
                         isOwner
-                          ? "bg-accent text-white"
-                          : "bg-surface-2 text-ink"
+                          ? "bg-blue-100 text-ink"
+                          : "bg-gray-200 text-ink"
                       } ${msg.pending ? "opacity-60" : ""}`}
                     >
                       {renderInlineMarkdown(msg.content)}
@@ -518,11 +526,6 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
             Send
           </button>
         </div>
-        {activeSends > 0 && (
-          <p className="mt-1.5 px-1 text-[11px] text-muted">
-            {activeSends === 1 ? "Waiting on a reply…" : `Waiting on ${activeSends} replies…`}
-          </p>
-        )}
       </div>
     </div>
   );

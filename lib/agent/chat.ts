@@ -432,7 +432,9 @@ export async function handleChatMessage(
           emailDraftCapability === "send"
             ? "You also have send_email, which sends immediately — use it whenever the owner gives you a clear, direct instruction to send (\"send it\", \"go ahead and send\", \"just send it\"), even if they're leaving the exact wording to you. Composing the wording yourself is fine as long as they've clearly told you to send, not just discussed the idea. Use compose_email_draft instead only when the owner hasn't actually asked you to send — general intent with no send instruction at all (e.g. mentioning they should email someone, without telling you to do it). Never call send_email based on your own judgment that sending seems appropriate with no request behind it at all — only when the owner has actually asked."
             : "",
-          calendarReadAllowed ? "You can discuss calendar availability if asked." : "",
+          calendarReadAllowed
+            ? "You can discuss calendar availability if asked, and you DO have real access to meeting links (Zoom/Meet) attached to calendar events — check_calendar_availability returns each event's description and conferenceLink fields, either of which commonly contains the real link. If asked for a meeting link, or whether you have access to one, check_calendar_availability first before answering either way — never claim you lack this access without having checked, and never invent a link if neither field has one."
+            : "",
           videoMeetingGuidance,
           historyTurns.length > 0
             ? "The messages below include recent conversation history, each prefixed with when it was sent — use that to maintain continuity with what's already been discussed, and to judge how recent or stale something is. That bracketed timestamp is metadata added for your reference only — never include a timestamp or bracketed time label at the start of your own reply; just answer normally."
@@ -449,6 +451,7 @@ export async function handleChatMessage(
            * are correctly kept separate on their own.
            */
           "To be completely explicit: \"|||\" is the ONLY way to start a new message. A bracketed timestamp like \"[Today, 3:24 PM]\" is never something you write yourself, under any circumstance, including as an attempt to separate messages — that bracket format only ever appears in the history shown to you, never in your own output, anywhere, at the start, middle, or end of a message.",
+          "Never write multiple paragraphs (separated by a blank line) within a single message. If you have more than one distinct point, either combine them into one flowing paragraph of plain sentences, or split them into separate messages with \"|||\" — a real text message is never internally broken into paragraphs.",
         ]
           .filter(Boolean)
           .join("\n"),
@@ -562,8 +565,27 @@ export async function handleChatMessage(
   const agentMessageIds: string[] = [];
   let lastAgentMessageRow: Awaited<ReturnType<typeof persistChatMessage>> = null;
 
-  for (const part of finalParts) {
-    const row = await persistChatMessage(tenantId, "agent", part, channel);
+  for (let i = 0; i < finalParts.length; i++) {
+    /**
+     * A 2-4 second pause between successive parts of a split reply,
+     * mimicking the pace of a person actually typing out one message
+     * at a time rather than every part landing at once. Skipped before
+     * the FIRST part — the pause belongs between messages, not before
+     * the reply starts. This runs inside the delayed-batch Inngest job
+     * (see lib/inngest/functions.ts's processDelayedChatReply) for the
+     * normal case, so it adds no HTTP-request-duration risk there; the
+     * one exception is the synchronous confirmation-reply path
+     * (app/api/agent-chat/send/route.ts's instant branch), where a
+     * multi-part confirmation reply would extend that request by the
+     * same amount — accepted as low-risk since confirmation replies
+     * are rarely more than one part.
+     */
+    if (i > 0) {
+      const pauseMs = 2000 + Math.floor(Math.random() * 2000);
+      await new Promise((resolve) => setTimeout(resolve, pauseMs));
+    }
+
+    const row = await persistChatMessage(tenantId, "agent", finalParts[i], channel);
     if (row) {
       agentMessageIds.push(row.id);
       lastAgentMessageRow = row;

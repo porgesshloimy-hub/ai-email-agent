@@ -31,7 +31,7 @@ export const checkCalendarAvailabilityTool: ToolDefinition = {
   name: "check_calendar_availability",
 
   description:
-    "Check the account holder's real Google Calendar for existing (busy) events within a time range. Use this before creating or proposing a meeting whenever a specific date/time is involved — for example, before create_calendar_event, propose_calendar_event, create_zoom_meeting, or propose_zoom_meeting — so you don't schedule or confirm something that conflicts with an existing event, and before telling anyone a time is available. This tool only reports busy/free information; it never creates, modifies, or cancels anything. If the requested time overlaps a busy block, do not create or confirm a meeting at that time — either use propose_calendar_event/propose_zoom_meeting so the account holder can decide, or, if you can suggest a nearby free time you have actually checked, offer that instead. Do not assume a time is free without checking this tool first when the account holder's own availability matters.",
+    "Check the account holder's real Google Calendar for existing (busy) events within a time range. Use this before creating or proposing a meeting whenever a specific date/time is involved — for example, before create_calendar_event, propose_calendar_event, create_zoom_meeting, or propose_zoom_meeting — so you don't schedule or confirm something that conflicts with an existing event, and before telling anyone a time is available. This tool ALSO gives you real access to an event's meeting link, if it has one — either from its description text (where a manually-pasted Zoom link commonly lives) or its conferenceLink field (a natively-attached Google Meet/Zoom link). If asked for a meeting link, use this tool and check both fields before answering; if genuinely neither field has one, say so plainly — never invent or guess a link. This tool only reports information; it never creates, modifies, or cancels anything. If the requested time overlaps a busy block, do not create or confirm a meeting at that time — either use propose_calendar_event/propose_zoom_meeting so the account holder can decide, or, if you can suggest a nearby free time you have actually checked, offer that instead. Do not assume a time is free without checking this tool first when the account holder's own availability matters.",
 
   parameters: {
     type: "object",
@@ -111,7 +111,7 @@ export const checkCalendarAvailabilityTool: ToolDefinition = {
       message:
         busy.length === 0
           ? "No existing events overlap this time range — it is currently free on the calendar."
-          : "One or more existing events overlap this time range. Do not treat this time as available — see `events` for their titles and descriptions, and `busy` for the exact blocked time ranges.",
+          : "One or more existing events overlap this time range. Do not treat this time as available — see `events` for their titles, descriptions, and conferenceLink (a real meeting link, if the event has one — check both description and conferenceLink before saying no link exists), and `busy` for the exact blocked time ranges.",
     };
   },
 };

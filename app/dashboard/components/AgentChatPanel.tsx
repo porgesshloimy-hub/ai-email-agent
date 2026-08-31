@@ -95,6 +95,24 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
   const lastTypingPingRef = useRef(0);
 
   /**
+   * Scrolls into view the moment the typing indicator appears —
+   * previously it could show up (typically before any message has
+   * actually arrived yet) with no scroll triggered, since all the
+   * existing scroll calls were tied to messages being appended, not to
+   * the indicator's own visibility. This is a separate, dedicated
+   * effect specifically for that gap, independent of the
+   * message-append scroll calls elsewhere (which still need to stay
+   * separate — loadOlderMessages deliberately does NOT scroll to
+   * bottom, since it preserves scroll position when prepending older
+   * history instead).
+   */
+  useEffect(() => {
+    if (isAgentTyping) {
+      scrollToBottom(true);
+    }
+  }, [isAgentTyping]);
+
+  /**
    * Pings the server that the owner is actively typing, throttled to
    * at most once every ~2 seconds — the backend
    * (lib/inngest/functions.ts's processDelayedChatReply) uses freshness
@@ -333,27 +351,30 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
    * messages sent close together) can't otherwise learn they were
    * merged into one combined reply server-side.
    *
-   * Keeps the typing indicator visible for the ENTIRE wait, including
-   * between individual parts of a split reply — the server already
-   * paces multi-part replies 2-4s apart (see lib/agent/chat.ts), so a
-   * quiet period of QUIET_AFTER_MESSAGE_MS with nothing new arriving,
-   * after at least one message has already been received, is treated
-   * as "the reply is actually finished" rather than assuming a fixed
-   * message count up front.
+   * The typing indicator is driven entirely by the server's real
+   * `agentReplying` status (GET /api/agent-chat's `?after=` response),
+   * not client-side guessing. Two previous guesses are gone:
+   *   - A fixed 2-4s delay before first showing "typing" — wrong
+   *     whenever the server's Phase B turned out to be the longer
+   *     5-9s branch, since the client had no way to know which branch
+   *     the server picked. Now the indicator shows at the exact moment
+   *     `agentReplying` flips true, which is the exact moment
+   *     generation actually starts, regardless of how long the wait
+   *     before it was.
+   *   - A quiet-period heuristic ("no new part for ~4.5s ⇒ probably
+   *     done") for deciding a multi-part reply had finished — an
+   *     inherently imprecise guess that could show a dangling "typing"
+   *     after the true last part, or occasionally cut off early. Now
+   *     the reply is known to be finished the instant `agentReplying`
+   *     flips back to false — an exact signal, not a guess.
    */
   async function pollForNewMessages(sinceTimestamp: string) {
     const POLL_INTERVAL_MS = 2000;
     const MAX_POLL_MS = 90_000;
-    // Comfortably above the server's 2-4s inter-part pacing, so a
-    // slightly-delayed next part isn't mistaken for the reply being
-    // done.
-    const QUIET_AFTER_MESSAGE_MS = 6000;
 
     const startedAt = Date.now();
     let cursor = sinceTimestamp;
-    let lastReceivedAt: number | null = null;
-
-    setIsAgentTyping(true);
+    let everSeenReplying = false;
 
     try {
       while (Date.now() - startedAt < MAX_POLL_MS) {
@@ -363,45 +384,38 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
           const res = await fetch(`/api/agent-chat?after=${encodeURIComponent(cursor)}`);
           const data = await res.json();
 
-          if (!data.error) {
-            const newMessages: ChatMessage[] = data.messages ?? [];
+          if (data.error) continue; // transient — keep polling rather than surfacing every hiccup
 
-            if (newMessages.length > 0) {
-              setMessages((prev) => {
-                const existingIds = new Set(prev.map((m) => m.id));
-                const toAdd = newMessages.filter((m) => !existingIds.has(m.id));
-                return [...prev, ...toAdd];
-              });
-              requestAnimationFrame(() => scrollToBottom(true));
+          const agentReplying = Boolean(data.agentReplying);
+          setIsAgentTyping(agentReplying);
+          if (agentReplying) everSeenReplying = true;
 
-              cursor = newMessages[newMessages.length - 1].created_at;
+          const newMessages: ChatMessage[] = data.messages ?? [];
 
-              const agentMessageArrived = newMessages.some((m) => m.role === "agent");
-              if (agentMessageArrived) {
-                lastReceivedAt = Date.now();
-              }
-            }
+          if (newMessages.length > 0) {
+            setMessages((prev) => {
+              const existingIds = new Set(prev.map((m) => m.id));
+              const toAdd = newMessages.filter((m) => !existingIds.has(m.id));
+              return [...prev, ...toAdd];
+            });
+            requestAnimationFrame(() => scrollToBottom(true));
+
+            cursor = newMessages[newMessages.length - 1].created_at;
+          }
+
+          // Was actively replying at some point, and has now genuinely
+          // stopped — the reply is complete. An exact signal, not a
+          // guess about timing.
+          if (everSeenReplying && !agentReplying) {
+            return;
           }
         } catch {
           // Network hiccup — keep polling rather than giving up on one
           // failed check.
         }
-
-        // Checked AFTER each fetch attempt, not before — so a part
-        // arriving right at the edge of the quiet window is still
-        // picked up this same tick rather than missed.
-        if (
-          lastReceivedAt !== null &&
-          Date.now() - lastReceivedAt >= QUIET_AFTER_MESSAGE_MS
-        ) {
-          // Received at least one part, and enough quiet time has
-          // passed since the last one that further parts are unlikely
-          // — treat the reply as complete.
-          return;
-        }
       }
 
-      if (lastReceivedAt === null) {
+      if (!everSeenReplying) {
         setError("The agent is taking longer than expected — it may still reply shortly.");
       }
     } finally {
@@ -467,21 +481,18 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
               formatTimeLabel(nextMsg.created_at) !== formatTimeLabel(msg.created_at);
 
             /**
-             * Bug fix: the scroll container previously used Tailwind's
-             * `space-y-3`, which applies a uniform margin between EVERY
-             * message via a sibling selector — so grouped bubbles still
-             * looked visibly apart even after the inner gap below was
-             * tightened, since that outer spacing dominated. Replaced
-             * with manual per-message top margin: tight when grouped
-             * with the previous message, normal otherwise.
+             * Spacing fix: this used to give consecutive same-time
+             * messages a tighter "mt-1.5" margin (mainly affecting the
+             * agent's own multi-part split replies, since the owner
+             * rarely sends two messages within the same displayed
+             * minute) versus "mt-3" otherwise — reported as the agent's
+             * side feeling more cramped than the owner's. Now uniform:
+             * every message gets the same spacing regardless of
+             * grouping. (The forward-looking `showTimestamp` check
+             * above is a separate, unrelated concern from this vertical
+             * spacing — it's unaffected by this change.)
              */
-            const prevMsg = messages[index - 1];
-            const isGroupedWithPrevious =
-              Boolean(prevMsg) &&
-              prevMsg.role === msg.role &&
-              formatTimeLabel(prevMsg.created_at) === formatTimeLabel(msg.created_at);
-
-            const topMargin = index === 0 ? "" : isGroupedWithPrevious ? "mt-0.5" : "mt-3";
+            const topMargin = index === 0 ? "" : "mt-3";
 
             return (
               <div
@@ -509,8 +520,8 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
                     <div
                       className={`max-w-full whitespace-pre-wrap break-words rounded-panel px-3.5 py-2.5 text-sm leading-relaxed shadow-panel ${
                         isOwner
-                          ? "bg-blue-200 text-ink"
-                          : "bg-gray-100 text-ink"
+                          ? "bg-blue-100 text-ink"
+                          : "bg-[#ECEEF1] text-ink"
                       } ${msg.pending ? "opacity-60" : ""}`}
                     >
                       {renderInlineMarkdown(msg.content)}
@@ -538,7 +549,7 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
           })}
           {isAgentTyping && (
             <div className="mt-3 flex justify-start">
-              <div className="flex items-center gap-1 rounded-panel bg-gray-100 px-3.5 py-2.5 shadow-panel">
+              <div className="flex items-center gap-1 rounded-panel bg-[#ECEEF1] px-3.5 py-2.5 shadow-panel">
                 <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted [animation-delay:-0.3s]" />
                 <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted [animation-delay:-0.15s]" />
                 <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted" />

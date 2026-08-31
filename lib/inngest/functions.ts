@@ -915,6 +915,18 @@ export const processDelayedChatReply = inngest.createFunction(
             .join("\n\n");
 
     await step.run("generate-and-persist-reply", async () => {
+      /**
+       * chat_agent_replying (migration 017) is no longer toggled here.
+       * It moved into lib/agent/chat.ts itself, bracketing exactly the
+       * persist-loop phase — not this whole call, which also includes
+       * tool execution (a calendar/Gmail API call, or the JSON-result
+       * loop-back completion for a read-only tool). Toggling it here
+       * meant the typing indicator stayed on through tool-calling time
+       * too, reported as "I don't want it to show typing the entire
+       * time it takes to perform tools." Only handleChatMessage() knows
+       * the precise moment tool resolution ends and actual reply text
+       * begins, so it's the right place to own this now.
+       */
       await handleChatMessage(tenantId, combinedText, {
         channel,
         skipPersistingOwnerMessage: true,

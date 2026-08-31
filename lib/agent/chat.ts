@@ -451,7 +451,7 @@ export async function handleChatMessage(
            * are correctly kept separate on their own.
            */
           "To be completely explicit: \"|||\" is the ONLY way to start a new message. A bracketed timestamp like \"[Today, 3:24 PM]\" is never something you write yourself, under any circumstance, including as an attempt to separate messages — that bracket format only ever appears in the history shown to you, never in your own output, anywhere, at the start, middle, or end of a message.",
-          "Never write multiple paragraphs (separated by a blank line) within a single message. If you have more than one distinct point, either combine them into one flowing paragraph of plain sentences, or split them into separate messages with \"|||\" — a real text message is never internally broken into paragraphs.",
+          "A blank line between paragraphs works exactly the same as \"|||\" — either one starts a new message. Use whichever feels natural; you don't need to remember a special marker every time. Only keep something as a single message when it's genuinely one short, flowing thought with no natural break in it.",
         ]
           .filter(Boolean)
           .join("\n"),
@@ -554,8 +554,20 @@ export async function handleChatMessage(
    * and empty/whitespace-only splits are dropped, so a stray or
    * over-eager delimiter can't fragment a reply into unbounded noise.
    */
+  /**
+   * Bug fix: relying purely on the model remembering to insert "|||"
+   * was inconsistent in practice — reported as "splitting only
+   * sometimes; other times writes separate paragraphs all in one
+   * message." A blank line between paragraphs is something models
+   * produce reliably even when they forget an explicit delimiter, so
+   * it's now treated as an equally valid split signal, enforced here
+   * mechanically rather than left entirely to prompt compliance. This
+   * also simplifies the system prompt below — no longer needs to
+   * separately forbid multi-paragraph messages, since a paragraph
+   * break now just IS a message boundary either way.
+   */
   const parts = cleanedResponseText
-    .split("|||")
+    .split(/\|\|\||\n\s*\n+/)
     .map((part) => stripAllLeakedTimestamps(stripLeakedTimestampPrefix(part.trim())).trim())
     .filter((part) => part.length > 0)
     .slice(0, 6);
@@ -565,30 +577,77 @@ export async function handleChatMessage(
   const agentMessageIds: string[] = [];
   let lastAgentMessageRow: Awaited<ReturnType<typeof persistChatMessage>> = null;
 
-  for (let i = 0; i < finalParts.length; i++) {
-    /**
-     * A 2-4 second pause between successive parts of a split reply,
-     * mimicking the pace of a person actually typing out one message
-     * at a time rather than every part landing at once. Skipped before
-     * the FIRST part — the pause belongs between messages, not before
-     * the reply starts. This runs inside the delayed-batch Inngest job
-     * (see lib/inngest/functions.ts's processDelayedChatReply) for the
-     * normal case, so it adds no HTTP-request-duration risk there; the
-     * one exception is the synchronous confirmation-reply path
-     * (app/api/agent-chat/send/route.ts's instant branch), where a
-     * multi-part confirmation reply would extend that request by the
-     * same amount — accepted as low-risk since confirmation replies
-     * are rarely more than one part.
-     */
-    if (i > 0) {
-      const pauseMs = 2000 + Math.floor(Math.random() * 2000);
-      await new Promise((resolve) => setTimeout(resolve, pauseMs));
+  /**
+   * chat_agent_replying (migration 017) is set true HERE — right before
+   * actually writing out the reply — not any earlier. Previously this
+   * was toggled by the Inngest orchestrator (processDelayedChatReply)
+   * around the entire handleChatMessage() call, which meant it stayed
+   * true through tool execution too (a calendar/Gmail API call, or the
+   * JSON-result loop-back completion for a read-only tool) — reported
+   * as "I don't want it to show typing the entire time it takes to
+   * perform tools." Moved here since only this function knows the
+   * precise moment tool resolution is done and actual reply text is
+   * about to be produced. Applies equally to the confirmation-reply
+   * synchronous path (app/api/agent-chat/send/route.ts) and the
+   * delayed-batch path (lib/inngest/functions.ts) — both call this
+   * same function, so both get correct status timing for free.
+   *
+   * MIN_REPLYING_DURATION_MS guards against a different problem: the
+   * client polls this status every ~2s, so a very fast single-part
+   * reply (just one DB insert, no inter-part pause) could flip
+   * true→false entirely between two polls, and the client would never
+   * observe "replying" at all — the message would just appear with no
+   * visible typing moment. This guarantees at least one full poll
+   * cycle has a real chance to catch it, without faking anything
+   * client-side — the status is still a real, accurate signal, just
+   * not allowed to be shorter than it's useful.
+   */
+  const MIN_REPLYING_DURATION_MS = 1800;
+  const replyingStartedAt = Date.now();
+
+  const supabaseForStatus = createServiceSupabase();
+  const { error: startStatusError } = await supabaseForStatus
+    .from("tenants")
+    .update({ chat_agent_replying: true })
+    .eq("id", tenantId);
+
+  if (startStatusError) {
+    console.error("FAILED TO SET chat_agent_replying TRUE:", { tenantId, error: startStatusError });
+  }
+
+  try {
+    for (let i = 0; i < finalParts.length; i++) {
+      /**
+       * A 1-3 second pause between successive parts of a split reply,
+       * mimicking the pace of a person actually typing out one message
+       * at a time rather than every part landing at once. Skipped before
+       * the FIRST part — the pause belongs between messages, not before
+       * the reply starts.
+       */
+      if (i > 0) {
+        const pauseMs = 1000 + Math.floor(Math.random() * 2000);
+        await new Promise((resolve) => setTimeout(resolve, pauseMs));
+      }
+
+      const row = await persistChatMessage(tenantId, "agent", finalParts[i], channel);
+      if (row) {
+        agentMessageIds.push(row.id);
+        lastAgentMessageRow = row;
+      }
     }
 
-    const row = await persistChatMessage(tenantId, "agent", finalParts[i], channel);
-    if (row) {
-      agentMessageIds.push(row.id);
-      lastAgentMessageRow = row;
+    const elapsedMs = Date.now() - replyingStartedAt;
+    if (elapsedMs < MIN_REPLYING_DURATION_MS) {
+      await new Promise((resolve) => setTimeout(resolve, MIN_REPLYING_DURATION_MS - elapsedMs));
+    }
+  } finally {
+    const { error: endStatusError } = await supabaseForStatus
+      .from("tenants")
+      .update({ chat_agent_replying: false })
+      .eq("id", tenantId);
+
+    if (endStatusError) {
+      console.error("FAILED TO SET chat_agent_replying FALSE:", { tenantId, error: endStatusError });
     }
   }
 

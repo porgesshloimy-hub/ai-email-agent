@@ -81,7 +81,13 @@ function formatTimeLabel(iso: string): string {
  * /dashboard/agent-chat page, which just render this inside different
  * chrome (a floating card vs. a full-width page container).
  */
-export default function AgentChatPanel({ compact = false }: { compact?: boolean }) {
+export default function AgentChatPanel({
+  compact = false,
+  isOpen = true,
+}: {
+  compact?: boolean;
+  isOpen?: boolean;
+}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
@@ -93,6 +99,27 @@ export default function AgentChatPanel({ compact = false }: { compact?: boolean 
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lastTypingPingRef = useRef(0);
+
+  /**
+   * Bug fix: the initial "load history + scroll to bottom" effect
+   * below has an empty dependency array — it only ever fires once, on
+   * the panel's very first mount. That was fine when the widget
+   * unmounted/remounted the panel on every open (each open was a fresh
+   * mount, so it re-fired every time), but since the panel now stays
+   * permanently mounted (see AgentChatWidget.tsx's fix for the
+   * polling-abandonment bug), reopening the popup never re-triggered
+   * it — the scroll position just stayed wherever it was left, so a
+   * reopen could show the top of the conversation, with any new
+   * messages that arrived in the meantime sitting off-screen below,
+   * looking like they weren't showing up at all. This gives "the popup
+   * just opened" its own real trigger, mirroring the same pattern
+   * already used for the typing indicator's own appearance below.
+   */
+  useEffect(() => {
+    if (isOpen) {
+      requestAnimationFrame(() => scrollToBottom(false));
+    }
+  }, [isOpen]);
 
   /**
    * Scrolls into view the moment the typing indicator appears —

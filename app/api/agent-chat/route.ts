@@ -72,20 +72,42 @@ export async function GET(request: NextRequest) {
     const after = request.nextUrl.searchParams.get("after");
 
     if (after) {
-      const { data, error } = await supabase
-        .from("owner_chat_messages")
-        .select("id, role, content, replied_to_message_id, created_at")
-        .eq("tenant_id", tenantId)
-        .gt("created_at", after)
-        .order("created_at", { ascending: true })
-        .limit(50);
+      const [messagesResult, tenantResult] = await Promise.all([
+        supabase
+          .from("owner_chat_messages")
+          .select("id, role, content, replied_to_message_id, created_at")
+          .eq("tenant_id", tenantId)
+          .gt("created_at", after)
+          .order("created_at", { ascending: true })
+          .limit(50),
+        supabase.from("tenants").select("chat_agent_replying").eq("id", tenantId).single(),
+      ]);
 
-      if (error) {
-        console.error("FAILED TO POLL FOR NEW CHAT MESSAGES:", error);
+      if (messagesResult.error) {
+        console.error("FAILED TO POLL FOR NEW CHAT MESSAGES:", messagesResult.error);
         return NextResponse.json({ error: "Failed to check for new messages" }, { status: 500 });
       }
 
-      return NextResponse.json({ messages: data ?? [] });
+      if (tenantResult.error) {
+        // Doesn't fail the request — messages still matter more than the
+        // typing indicator — but this was previously silent, making a
+        // missing migration (e.g. chat_agent_replying not yet added)
+        // indistinguishable from "genuinely not replying right now."
+        console.error("FAILED TO READ chat_agent_replying STATUS:", {
+          tenantId,
+          error: tenantResult.error,
+        });
+      }
+
+      return NextResponse.json({
+        messages: messagesResult.data ?? [],
+        // Real signal from lib/inngest/functions.ts's processDelayedChatReply
+        // — true only while it's actively generating/persisting a reply
+        // right now. Replaces a previous client-side guess (a fixed
+        // delay before showing "typing," and a quiet-period heuristic
+        // for deciding a multi-part reply was finished).
+        agentReplying: tenantResult.data?.chat_agent_replying ?? false,
+      });
     }
 
     let query = supabase

@@ -73,7 +73,7 @@ export default function AgentChatWidget() {
         </div>
 
         <div className="min-h-0 flex-1">
-          <AgentChatPanel compact />
+          <AgentChatPanel compact isOpen={open} />
         </div>
       </div>
 

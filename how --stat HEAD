@@ -1,0 +1,16 @@
+[33mcommit ee373d116c33932257fd8690a041659240641404[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m
+Author: ALbumArtStudios <albumartstudios@gmail.com>
+Date:   Tue Sep 1 07:59:38 2026 +0300
+
+    recommiting all files to account for discrepancies
+
+ BUNDLE_MANIFEST.md                                |   81 [32m+[m
+ README.md                                         | 1814 [32m+++++++++++[m[31m----------[m
+ app/api/agent-chat/route.ts                       |   44 [32m+[m[31m-[m
+ app/api/agent-chat/send/route.ts                  |  223 [32m+[m[31m--[m
+ app/dashboard/components/AgentChatPanel.tsx       |   29 [32m+[m[31m-[m
+ app/dashboard/components/AgentChatWidget.tsx      |    2 [32m+[m[31m-[m
+ db/migrations/009_agent_memory_system.sql         |  204 [32m+++[m
+ db/migrations/010_personas_connections.sql        |  140 [32m++[m
+ db/migrations/014_owner_persona_writing_style.sql |   29 [32m+[m
+ 9 files changed, 1491 insertions(+), 1075 deletions(-)

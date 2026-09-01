@@ -183,3 +183,50 @@ export function scoreCalendarInstructionExplicitness(
     reasons,
   };
 }
+
+/**
+ * A clear delete/cancel intent verb — required before treating any
+ * message as an instruction to remove a calendar event at all. Without
+ * this, a message that merely MENTIONS a day/time (e.g. discussing
+ * availability) could otherwise satisfy the same day/time signal used
+ * for calendar creation and be mistaken for a delete instruction.
+ */
+const DELETE_VERB_PATTERN = /\b(delete|cancel|remove|get rid of)\b/i;
+
+/**
+ * Scores how explicit an owner's raw chat message was for DELETING a
+ * calendar event. Deletion is destructive and only trivially
+ * correctable by recreating the event from scratch (and even then,
+ * only if its exact original details are still known) — closer in
+ * risk to send_email than to creating a new event, so this requires
+ * both a clear delete verb AND identifying information (a day/time
+ * reference, matching the same patterns used for calendar creation, OR
+ * quoted/specific text naming the event) before treating an
+ * instruction as explicit enough to execute without confirmation.
+ * Neither signal alone is enough — see scoreEmailInstructionExplicitness's
+ * identical two-signals-required reasoning above.
+ */
+export function scoreDeleteInstructionExplicitness(
+  ownerMessageText: string
+): ExplicitnessResult {
+  const reasons: string[] = [];
+
+  const hasDeleteVerb = DELETE_VERB_PATTERN.test(ownerMessageText);
+  const hasTime = TIME_PATTERN.test(ownerMessageText);
+  const hasDay = DAY_PATTERN.test(ownerMessageText);
+  const hasQuotedName = QUOTED_CONTENT_PATTERN.test(ownerMessageText);
+
+  if (hasDeleteVerb) reasons.push("owner used a clear delete/cancel verb");
+  if (hasTime) reasons.push("owner's message contains a specific time");
+  if (hasDay) reasons.push("owner's message contains a specific day reference");
+  if (hasQuotedName) reasons.push("owner's message names the event specifically");
+
+  const hasIdentifyingInfo = hasTime || hasDay || hasQuotedName;
+  const isExplicit = hasDeleteVerb && hasIdentifyingInfo;
+
+  return {
+    score: isExplicit ? 1 : hasDeleteVerb || hasIdentifyingInfo ? 0.4 : 0,
+    isExplicit,
+    reasons,
+  };
+}

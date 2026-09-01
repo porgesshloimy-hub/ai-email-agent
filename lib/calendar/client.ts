@@ -140,6 +140,7 @@ export async function listEventsInRange(
       event.conferenceData?.entryPoints?.find((ep) => ep.entryPointType === "video")?.uri ?? null;
 
     return {
+      googleEventId: event.id ?? null,
       summary: event.summary ?? "(untitled event)",
       description: event.description ?? null,
       conferenceLink,

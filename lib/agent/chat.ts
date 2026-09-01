@@ -166,7 +166,7 @@ export async function handleChatMessage(
     const pending = pendingCandidates?.[0] ?? null;
 
     const normalizedMessage = messageText.trim().toLowerCase();
-    const isAffirmative = /^(yes|yep|yeah|yup|confirm|confirmed|go ahead|do it|sounds good|ok|okay|sure)\b/.test(
+    const isAffirmative = /^(yes|yep|yeah|yup|confirm|confirmed|go( ahead)?|do it|sounds good|ok|okay|sure)\b/.test(
       normalizedMessage
     );
     const isNegative = /^(no|nope|cancel|don'?t|nevermind|never mind|stop)\b/.test(normalizedMessage);
@@ -452,7 +452,22 @@ export async function handleChatMessage(
           calendarReadAllowed
             ? "You can discuss calendar availability if asked, and you DO have real access to meeting links (Zoom/Meet) attached to calendar events — check_calendar_availability returns each event's description and conferenceLink fields, either of which commonly contains the real link. If asked for a meeting link, or whether you have access to one, check_calendar_availability first before answering either way — never claim you lack this access without having checked, and never invent a link if neither field has one."
             : "",
+          calendarWriteCapability !== "none"
+            ? "You also have delete_calendar_event — you CAN delete/cancel real events on the calendar. Look up the event first with check_calendar_availability to get its real googleEventId (never invent one), then delete it. If asked whether you can delete an event, or asked to delete one, say yes and do it — don't claim you lack this ability."
+            : "",
           videoMeetingGuidance,
+          /**
+           * Found in production: after a calendar event was
+           * successfully booked, the owner said "thanks! I appreciate
+           * it" — two plain acknowledgments with no new instruction —
+           * and the model called create_calendar_event AGAIN, booking
+           * a duplicate. The tool's own result ("Done — booked...")
+           * sits in history as plain text, with nothing marking it as
+           * "already executed, do not repeat" from the model's
+           * perspective, so a vague or appreciative follow-up
+           * apparently got misread as license to redo the action.
+           */
+          "If you already completed an action (a tool call succeeded and you told the owner it's done), do NOT call that same tool again for the same thing just because they respond with thanks, appreciation, or any other acknowledgment. A plain 'thanks' or 'I appreciate it' is not a new instruction — only act again if the owner gives an actual new, specific request.",
           historyTurns.length > 0
             ? "The messages below include recent conversation history, each prefixed with when it was sent — use that to maintain continuity with what's already been discussed, and to judge how recent or stale something is. That bracketed timestamp is metadata added for your reference only — never include a timestamp or bracketed time label at the start of your own reply; just answer normally."
             : "",
@@ -595,79 +610,23 @@ export async function handleChatMessage(
   let lastAgentMessageRow: Awaited<ReturnType<typeof persistChatMessage>> = null;
 
   /**
-   * chat_agent_replying (migration 017) is set true HERE — right before
-   * actually writing out the reply — not any earlier. Previously this
-   * was toggled by the Inngest orchestrator (processDelayedChatReply)
-   * around the entire handleChatMessage() call, which meant it stayed
-   * true through tool execution too (a calendar/Gmail API call, or the
-   * JSON-result loop-back completion for a read-only tool) — reported
-   * as "I don't want it to show typing the entire time it takes to
-   * perform tools." Moved here since only this function knows the
-   * precise moment tool resolution is done and actual reply text is
-   * about to be produced. Applies equally to the confirmation-reply
-   * synchronous path (app/api/agent-chat/send/route.ts) and the
-   * delayed-batch path (lib/inngest/functions.ts) — both call this
-   * same function, so both get correct status timing for free.
-   *
-   * MIN_REPLYING_DURATION_MS guards against a real timing problem, not
-   * just bad luck: the client polls this status every ~1s (see
-   * AgentChatPanel.tsx's POLL_INTERVAL_MS). A "replying" window
-   * shorter than that poll interval isn't just unlikely to be caught —
-   * there EXIST phase alignments where it's mathematically impossible
-   * for any poll to land inside it. This floor must stay meaningfully
-   * LARGER than the poll interval, not just "long enough on average,"
-   * or the guarantee doesn't actually hold. Previously set to 1800ms
-   * against a 2000ms poll interval — shorter than the interval itself,
-   * which could genuinely miss every single poll depending on timing,
-   * not just occasionally. Raised well clear of the (now-also-reduced)
-   * poll interval for a real margin.
+   * Architecture change: this used to toggle `tenants.chat_agent_replying`
+   * (migration 017) and pace parts 1-3s apart, so the "typing" indicator
+   * could reflect genuine real-time server status. That's been replaced
+   * entirely — the client (AgentChatPanel.tsx) now calculates its own
+   * reveal delay from each message's length once the content already
+   * exists, rather than the indicator needing to track live server
+   * work. So this loop's only job now is to persist every part as fast
+   * as it actually can — no artificial pause, no status bookkeeping.
+   * `chat_agent_replying` itself is left in the schema (migration 017)
+   * but is no longer read or written anywhere — harmless to leave
+   * unused rather than requiring a further migration to remove it.
    */
-  const MIN_REPLYING_DURATION_MS = 2500;
-  const replyingStartedAt = Date.now();
-
-  const supabaseForStatus = createServiceSupabase();
-  const { error: startStatusError } = await supabaseForStatus
-    .from("tenants")
-    .update({ chat_agent_replying: true })
-    .eq("id", tenantId);
-
-  if (startStatusError) {
-    console.error("FAILED TO SET chat_agent_replying TRUE:", { tenantId, error: startStatusError });
-  }
-
-  try {
-    for (let i = 0; i < finalParts.length; i++) {
-      /**
-       * A 1-3 second pause between successive parts of a split reply,
-       * mimicking the pace of a person actually typing out one message
-       * at a time rather than every part landing at once. Skipped before
-       * the FIRST part — the pause belongs between messages, not before
-       * the reply starts.
-       */
-      if (i > 0) {
-        const pauseMs = 1000 + Math.floor(Math.random() * 2000);
-        await new Promise((resolve) => setTimeout(resolve, pauseMs));
-      }
-
-      const row = await persistChatMessage(tenantId, "agent", finalParts[i], channel);
-      if (row) {
-        agentMessageIds.push(row.id);
-        lastAgentMessageRow = row;
-      }
-    }
-
-    const elapsedMs = Date.now() - replyingStartedAt;
-    if (elapsedMs < MIN_REPLYING_DURATION_MS) {
-      await new Promise((resolve) => setTimeout(resolve, MIN_REPLYING_DURATION_MS - elapsedMs));
-    }
-  } finally {
-    const { error: endStatusError } = await supabaseForStatus
-      .from("tenants")
-      .update({ chat_agent_replying: false })
-      .eq("id", tenantId);
-
-    if (endStatusError) {
-      console.error("FAILED TO SET chat_agent_replying FALSE:", { tenantId, error: endStatusError });
+  for (let i = 0; i < finalParts.length; i++) {
+    const row = await persistChatMessage(tenantId, "agent", finalParts[i], channel);
+    if (row) {
+      agentMessageIds.push(row.id);
+      lastAgentMessageRow = row;
     }
   }
 

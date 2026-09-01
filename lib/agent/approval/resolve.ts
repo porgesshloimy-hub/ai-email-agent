@@ -31,7 +31,7 @@
  * owner-facing chat surface.
  */
 
-import { scoreCalendarInstructionExplicitness, scoreEmailInstructionExplicitness } from "@/lib/agent/approval/explicitness-heuristic";
+import { scoreCalendarInstructionExplicitness, scoreEmailInstructionExplicitness, scoreDeleteInstructionExplicitness } from "@/lib/agent/approval/explicitness-heuristic";
 
 export type ApprovalPath = "execute" | "sync_confirm";
 
@@ -63,6 +63,15 @@ export function resolveOwnerApprovalPath(
 
   if (toolName === "send_email") {
     const result = scoreEmailInstructionExplicitness(ownerMessageText);
+    return {
+      path: result.isExplicit ? "execute" : "sync_confirm",
+      explicitnessScore: result.score,
+      reasons: result.reasons,
+    };
+  }
+
+  if (toolName === "delete_calendar_event") {
+    const result = scoreDeleteInstructionExplicitness(ownerMessageText);
     return {
       path: result.isExplicit ? "execute" : "sync_confirm",
       explicitnessScore: result.score,

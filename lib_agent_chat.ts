@@ -452,6 +452,9 @@ export async function handleChatMessage(
           calendarReadAllowed
             ? "You can discuss calendar availability if asked, and you DO have real access to meeting links (Zoom/Meet) attached to calendar events — check_calendar_availability returns each event's description and conferenceLink fields, either of which commonly contains the real link. If asked for a meeting link, or whether you have access to one, check_calendar_availability first before answering either way — never claim you lack this access without having checked, and never invent a link if neither field has one."
             : "",
+          calendarWriteCapability !== "none"
+            ? "You also have delete_calendar_event — you CAN delete/cancel real events on the calendar. Look up the event first with check_calendar_availability to get its real googleEventId (never invent one), then delete it. If asked whether you can delete an event, or asked to delete one, say yes and do it — don't claim you lack this ability."
+            : "",
           videoMeetingGuidance,
           /**
            * Found in production: after a calendar event was

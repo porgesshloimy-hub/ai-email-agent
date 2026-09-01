@@ -660,6 +660,17 @@ artificial delay the way a genuine new question should. Either way, "the message
 polls (`GET /api/agent-chat?after=...`) for the eventual reply rather than holding one long
 request open.
 
+**Follow-up bug found and fixed the same round:** the confirmation-reply path
+(`AgentChatPanel.tsx`, the `immediateReply` branch) fetched its resulting message(s) and dumped
+them into `messages` state all at once, completely bypassing the reveal queue — reasonable when
+this path only ever produced a terse "Done — booked X" acknowledgment, but a confirmation reply
+can still produce a substantial explanatory answer (e.g. responding to a follow-up question), and
+that deserves the same reveal pacing as everything else. Now routes through the same
+`enqueueForReveal()` as the scheduled path. (An earlier attempted diagnosis for "the first
+message shows no typing" incorrectly assumed the first message must have been short enough to
+hit the reveal-delay floor — checked against a real reported case with a genuinely long first
+message and found wrong; this confirmation-reply bypass is the actual, verified cause instead.)
+
 ## The Typing Indicator — Simulated Reveal, Not Real-Time Status
 
 **Architecture change:** the indicator used to reflect genuine real-time server status —
@@ -727,14 +738,26 @@ Every message gets the same spacing regardless of grouping (`mt-2`).
   owner's own message — there is no path from customer-facing email into this tool, and no
   autonomous, unprompted use was built or considered further after explicit discussion ruled it
   out.
-- **`check_calendar_availability`** now also returns each event's real `description` and
+- **`check_calendar_availability`** now also returns each event's real `description`,
   `conferenceLink` (extracted from Calendar's `conferenceData`, covering natively-attached
-  Google Meet/Zoom links as well as a manually-pasted link in the description text) — added
-  after an incident where the agent gave a correct Zoom link in one conversation, then
-  incorrectly told the owner in a later conversation that it had "made it up." The first answer
-  was almost certainly genuine (pulled from real event data); the second was the model
-  misdescribing its own capabilities, not an actual bug — the tool description and system prompt
-  were both tightened so it stops confusing itself about this.
+  Google Meet/Zoom links as well as a manually-pasted link in the description text), and
+  `googleEventId` — added after an incident where the agent gave a correct Zoom link in one
+  conversation, then incorrectly told the owner in a later conversation that it had "made it
+  up." The first answer was almost certainly genuine (pulled from real event data); the second
+  was the model misdescribing its own capabilities, not an actual bug — the tool description
+  and system prompt were both tightened so it stops confusing itself about this.
+- **`delete_calendar_event`** — real event deletion, closing a genuine gap (unlike the meeting-
+  link incident above, the agent's earlier claim that it couldn't delete events was actually
+  true — `deleteEvent()` already existed in `lib/calendar/client.ts`, but no tool anywhere called
+  it). Requires the event's real `googleEventId`, obtained by calling
+  `check_calendar_availability` first — never invented. Goes through the same owner-directed
+  approval resolution as `create_calendar_event`/`send_email`
+  (`scoreDeleteInstructionExplicitness()` in `explicitness-heuristic.ts`): requires **both** a
+  clear delete/cancel verb and identifying information (a day/time reference or a quoted event
+  name) before executing directly — deletion is destructive and only trivially correctable by
+  recreating the event from scratch, closer in risk to `send_email` than to creating a new event.
+  "Delete the duplicate one" (no identifying specifics) holds for confirmation; "cancel my 3pm
+  meeting today" executes immediately.
 
 ## What's Still Just Schema
 

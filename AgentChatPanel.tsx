@@ -31,11 +31,25 @@ export interface ChatMessage {
  * same pace, and using one constant made consecutive messages feel
  * mechanically identical.
  */
-const MIN_REVEAL_DELAY_MS = 500;
-const MAX_REVEAL_DELAY_MS = 4500;
-/** Roughly a fast-but-human texting pace, varied per message. */
-const MIN_MS_PER_CHAR = 18;
-const MAX_MS_PER_CHAR = 42;
+/**
+ * Bug fix: MIN_REVEAL_DELAY_MS was 500ms — for a short first message
+ * (a brief opener like "Sure!", 5 characters), the calculated typing
+ * delay came out to roughly 90-210ms before being clamped UP to that
+ * floor, meaning the shortest messages always landed right at 500ms
+ * regardless of content. That's genuinely borderline-imperceptible
+ * once render/network timing jitter is factored in — reported as "the
+ * indicator only shows on the second message," which a short first
+ * message landing at the floor would produce even though the code
+ * technically does show it. Raised the floor and the whole
+ * per-character range so every message — including the shortest —
+ * gets a clearly noticeable typing duration, also addressing a
+ * separate complaint that the overall pacing felt a little short.
+ */
+const MIN_REVEAL_DELAY_MS = 1200;
+const MAX_REVEAL_DELAY_MS = 5500;
+/** Roughly a human texting pace, varied per message. */
+const MIN_MS_PER_CHAR = 25;
+const MAX_MS_PER_CHAR = 55;
 /** ~1-in-15 messages gets an extra "thinking mid-typing" pause. */
 const THINKING_PAUSE_CHANCE = 1 / 15;
 const THINKING_PAUSE_MIN_MS = 3000;
@@ -355,15 +369,47 @@ export default function AgentChatPanel({
   async function processRevealQueue() {
     isRevealingRef.current = true;
 
+    /**
+     * Bug fix: when multiple messages arrive together (typical now that
+     * server generation is unpaced — one poll often catches the whole
+     * reply at once), the indicator was set true before message 1,
+     * stayed true straight through message 1's reveal and into message
+     * 2's delay (setting a boolean to its existing value doesn't
+     * re-render), and only turned false after the last message. That
+     * reads as one continuous, uninterrupted indicator rather than a
+     * distinct pause per message — reported as "the second message did
+     * show a typing pause, just short," which lines up exactly: the
+     * only thing that visually registered as "a pause" was the portion
+     * between two now-visible bubbles, not the initial appearance
+     * before the first one. A brief, explicit "off" beat between
+     * reveals (skipped before the very first message, and after the
+     * very last) makes every message's pause read as its own distinct
+     * moment rather than blending into the one before or after it.
+     */
+    const BETWEEN_MESSAGE_GAP_MS = 400;
+
     try {
+      let isFirst = true;
+
       while (revealQueueRef.current.length > 0) {
         const next = revealQueueRef.current.shift();
         if (!next) continue;
 
-        setIsAgentTyping(true);
+        if (!isFirst) {
+          setIsAgentTyping(false);
+          await new Promise((resolve) => setTimeout(resolve, BETWEEN_MESSAGE_GAP_MS));
+        }
+        isFirst = false;
+
         const delay = calculateRevealDelay(next.content);
+        console.log("REVEAL QUEUE: showing typing indicator", {
+          contentLength: next.content.length,
+          delayMs: delay,
+        });
+        setIsAgentTyping(true);
         await new Promise((resolve) => setTimeout(resolve, delay));
 
+        console.log("REVEAL QUEUE: revealing message", { id: next.id });
         setMessages((prev) => {
           if (prev.some((m) => m.id === next.id)) return prev; // dedupe safety
           return [...prev, next];
@@ -454,23 +500,26 @@ export default function AgentChatPanel({
       ]);
 
       if (sendData.immediateReply) {
-        // Confirmation-reply case: already generated and persisted
-        // synchronously by the send endpoint — fetch the resulting
-        // row(s) once, immediately, rather than reusing the polling
-        // loop below (which starts with a 2s sleep unsuited to
-        // something that's already done).
-        setIsAgentTyping(true);
+        /**
+         * Bug fix: this used to fetch the confirmation-reply's
+         * message(s) and dump them all into `messages` state at once,
+         * completely bypassing the reveal queue — reasonable when this
+         * path only ever produced a terse "Done — booked X"
+         * acknowledgment, but a confirmation reply can still produce a
+         * substantial explanatory message (e.g. answering a follow-up
+         * question), and that deserves the same reveal pacing as
+         * everything else. Now routes through the same
+         * enqueueForReveal() as the scheduled path, so behavior is
+         * consistent regardless of which path produced the reply.
+         */
         try {
           const res = await fetch(
             `/api/agent-chat?after=${encodeURIComponent(confirmedOwnerMessage.created_at)}`
           );
           const data = await res.json();
-          setMessages((prev) => [...prev, ...(data.messages ?? [])]);
-          requestAnimationFrame(() => scrollToBottom(true));
+          enqueueForReveal(data.messages ?? []);
         } catch {
           setError("Your message sent, but couldn't load the reply — refresh to see it.");
-        } finally {
-          setIsAgentTyping(false);
         }
         return;
       }

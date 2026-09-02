@@ -1,5 +1,5 @@
 import type { ToolContext, ToolDefinition } from "./types";
-import { resolveOwnerApprovalPath } from "@/lib/agent/approval/resolve";
+import { resolveOwnerApprovalPath, createSyncConfirmHold } from "@/lib/agent/approval/resolve";
 
 /**
  * NEW TOOL — closes a real, confirmed gap: `deleteEvent()` already
@@ -105,15 +105,36 @@ export const deleteCalendarEventTool: ToolDefinition = {
             tenantId,
             error: pendingError,
           });
-          return "I wasn't able to set that up for confirmation — please try again.";
+          return createSyncConfirmHold("I wasn't able to set that up for confirmation — please try again.");
         }
 
-        return confirmationMessage;
+        return createSyncConfirmHold(confirmationMessage);
       }
     }
 
+    /**
+     * Bug found in production: this call had NO error handling at
+     * all. If Google's Calendar API throws for any reason — a stale or
+     * slightly-wrong event ID, the event already gone, a permissions
+     * hiccup, a transient network error — the exception propagated
+     * uncaught all the way up through this multi-step tool loop, into
+     * the Inngest step running the whole reply. Inngest retries a
+     * failing step; if the underlying cause is deterministic (a
+     * genuinely bad ID), every retry fails the same way and the entire
+     * function eventually fails — meaning NO reply gets persisted at
+     * all, not even an error message. That's indistinguishable from
+     * "the agent silently did nothing," which is exactly what got
+     * reported. Now caught and turned into an honest, specific message
+     * instead of a total silent failure.
+     */
     const { deleteEvent } = await import("@/lib/calendar/client");
-    await deleteEvent(tenantId, args.googleEventId);
+
+    try {
+      await deleteEvent(tenantId, args.googleEventId);
+    } catch (err) {
+      console.error("DELETE CALENDAR EVENT FAILED:", { tenantId, googleEventId: args.googleEventId, error: err });
+      return `I tried to delete "${args.summary}" but ran into an error — it may already be gone, or something went wrong on Google's end. Could you check your calendar directly, or ask me to try again?`;
+    }
 
     return `Done — deleted "${args.summary}" from your calendar.`;
   },

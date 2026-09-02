@@ -15,6 +15,7 @@ import {
 } from "./propose-zoom-meeting";
 import { checkCalendarAvailabilityTool } from "./check-calendar-availability";
 import { checkRecentEmailsTool } from "./check-recent-emails";
+import { readEmailContentTool } from "./read-email-content";
 import { composeEmailDraftTool } from "./compose-email-draft";
 import { sendEmailTool } from "./send-email";
 import { deleteCalendarEventTool } from "./delete-calendar-event";
@@ -46,6 +47,7 @@ export const ALL_TOOLS: ToolDefinition[] = [
   proposeCalendarEventProposeOnlyTool,
   checkCalendarAvailabilityTool,
   checkRecentEmailsTool,
+  readEmailContentTool,
   composeEmailDraftTool,
   sendEmailTool,
   deleteCalendarEventTool,

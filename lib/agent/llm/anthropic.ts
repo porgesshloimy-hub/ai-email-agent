@@ -27,16 +27,46 @@ export const anthropicAdapter: LlmProviderAdapter = {
       request.messages
     );
 
+    /**
+     * Prompt caching — added after measuring the real cost driver
+     * directly rather than guessing: the system prompt + tool
+     * descriptions together run to roughly 3,000+ tokens of STATIC
+     * content (identical across calls for the same tenant/persona),
+     * resent in full, uncached, on every single completion — and a
+     * chat turn often needs more than one completion (a tool call
+     * followed by a result-phrasing call, or several steps in
+     * chat.ts's multi-step loop), multiplying that resend within a
+     * single turn. Marking the end of the system block and the end of
+     * the tools array with cache_control caches everything up to and
+     * including that point — Anthropic bills a cache hit at roughly
+     * 10% of normal input price. This requires `system` to be an array
+     * of content blocks rather than a plain string, which is why this
+     * is built here rather than just passing the string through.
+     */
     const tools = request.tools?.map((tool) => ({
       name: tool.name,
       description: tool.description,
       input_schema: tool.parameters as Anthropic.Messages.Tool.InputSchema,
     }));
 
+    if (tools && tools.length > 0) {
+      (tools[tools.length - 1] as any).cache_control = { type: "ephemeral" };
+    }
+
+    const systemBlocks = system
+      ? [
+          {
+            type: "text" as const,
+            text: system,
+            cache_control: { type: "ephemeral" as const },
+          },
+        ]
+      : undefined;
+
     const response = await anthropic.messages.create({
       model: request.model,
       max_tokens: MAX_OUTPUT_TOKENS,
-      system: system || undefined,
+      system: systemBlocks,
       messages,
       tools: tools && tools.length > 0 ? tools : undefined,
     });
@@ -56,13 +86,46 @@ export const anthropicAdapter: LlmProviderAdapter = {
       }
     }
 
-    const usage = response.usage
+    /**
+     * Anthropic returns cache_creation_input_tokens and
+     * cache_read_input_tokens as separate fields from input_tokens
+     * once caching is in use. The installed SDK version (0.32.1)'s
+     * TypeScript types don't yet declare these fields on the Usage
+     * type, even though Anthropic's actual API response does include
+     * them — cast to access them rather than letting a stale type
+     * definition silently under-count real cached-token usage.
+     *
+     * Folded into promptTokens/totalTokens here so nothing downstream
+     * breaks, but this means the cost this project CALCULATES/DISPLAYS
+     * (lib/billing/pricing.ts, which only knows "input tokens" at the
+     * flat rate) will slightly OVERSTATE true cost after this change —
+     * a cache-read token actually bills at ~10% of the input rate, not
+     * the full rate this counts it at. Direction of error is safe (not
+     * undercharging), but if precise customer-facing billing matters,
+     * pricing.ts and the usage-recording path would need to be
+     * extended to track the cache-creation/cache-read breakdown
+     * separately — not done here, flagged as a known follow-up rather
+     * than silently left inaccurate.
+     */
+    const rawUsage = response.usage as
+      | (Anthropic.Messages.Usage & {
+          cache_creation_input_tokens?: number;
+          cache_read_input_tokens?: number;
+        })
+      | undefined;
+
+    const usage = rawUsage
       ? {
-          promptTokens: response.usage.input_tokens,
-          completionTokens: response.usage.output_tokens,
+          promptTokens:
+            rawUsage.input_tokens +
+            (rawUsage.cache_creation_input_tokens ?? 0) +
+            (rawUsage.cache_read_input_tokens ?? 0),
+          completionTokens: rawUsage.output_tokens,
           totalTokens:
-            response.usage.input_tokens +
-            response.usage.output_tokens,
+            rawUsage.input_tokens +
+            (rawUsage.cache_creation_input_tokens ?? 0) +
+            (rawUsage.cache_read_input_tokens ?? 0) +
+            rawUsage.output_tokens,
         }
       : null;
 

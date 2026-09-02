@@ -1,5 +1,5 @@
 import type { ToolContext, ToolDefinition } from "./types";
-import { resolveOwnerApprovalPath } from "@/lib/agent/approval/resolve";
+import { resolveOwnerApprovalPath, createSyncConfirmHold } from "@/lib/agent/approval/resolve";
 
 /**
  * NEW TOOL — real email sending, deliberately scoped narrower than
@@ -127,15 +127,21 @@ export const sendEmailTool: ToolDefinition = {
             tenantId,
             error: pendingError,
           });
-          return "I wasn't able to set that up for confirmation — please try again.";
+          return createSyncConfirmHold("I wasn't able to set that up for confirmation — please try again.");
         }
 
-        return confirmationMessage;
+        return createSyncConfirmHold(confirmationMessage);
       }
     }
 
     const { sendNewMessage } = await import("@/lib/gmail/client");
-    await sendNewMessage(tenantId, args.to, args.subject, args.body);
+
+    try {
+      await sendNewMessage(tenantId, args.to, args.subject, args.body);
+    } catch (err) {
+      console.error("SEND EMAIL FAILED:", { tenantId, to: args.to, error: err });
+      return `I tried to send that email to ${args.to} but ran into an error — nothing was sent. Could you try again?`;
+    }
 
     return `Sent — emailed ${args.to} with the subject "${args.subject}".`;
   },

@@ -8,6 +8,7 @@ import {
 import { processIncomingEmail } from "@/lib/agent/run";
 import { reconcileUnreportedUsage } from "@/lib/billing/meter";
 import { handleChatMessage } from "@/lib/agent/chat";
+import { channelSupportsTypingTracking } from "@/lib/agent/chat-pacing";
 
 /**
  * Fires on every Gmail push notification.
@@ -748,27 +749,32 @@ export const reconcilePendingDrafts = inngest.createFunction(
  * Delayed, batched owner-chat replies
  * ------------------------------------------------------------
  *
- * A deliberately bounded, two-phase wait rather than an open-ended
- * typing-tracking loop:
+ * Rewired per updated spec — Phase B is now skipped entirely when the
+ * owner didn't start typing, rather than being a shorter branch:
  *
  *   Phase A — wait a fixed 2-4 seconds after the message is sent.
  *   Decision — did the owner start typing at any point during Phase A?
- *     - Yes → Phase B is 5-9 seconds (they seem to be composing a
- *       follow-up; give them real room to actually send it).
- *     - No → Phase B is a shorter 2-4 seconds (just the ordinary
- *       "let it feel like a person, not a bot firing back instantly"
- *       pause).
- *   Respond — once Phase B elapses, reply to everything sent since the
- *   last reply.
+ *     - No → respond immediately, right at the end of Phase A. No
+ *       further wait.
+ *     - Yes → wait a flat additional 7-10 seconds (Phase B), then
+ *       respond regardless of whether they're still typing at that
+ *       exact moment.
  *
  * If the owner sends another message at ANY point (during Phase A or
  * Phase B), this run stands down entirely and the new message's own
- * triggered run starts the whole two-phase wait over again, relative
- * to itself — exactly "start that over again." This also means the
- * wait is naturally bounded (worst case ~4s + 9s ≈ 13s before a reply
- * begins, per message that doesn't get superseded) — no open-ended
- * loop, no separate safety cap needed the way a continuously-extending
- * wait would require.
+ * triggered run starts the whole wait over again, relative to itself.
+ * Naturally bounded either way — worst case ~4s + 10s ≈ 14s before a
+ * reply begins, per message that doesn't get superseded.
+ *
+ * Generation itself (lib/agent/chat.ts) now runs with NO artificial
+ * pacing at all — no minimum-duration floor, no inter-part pause. The
+ * "feels human" pacing moved entirely to the client
+ * (AgentChatPanel.tsx), which holds each already-generated message
+ * behind a calculated, content-length-based reveal delay instead of
+ * relying on the server's real work-in-progress status. This is a
+ * deliberate architecture change: the server's job is now "decide when
+ * to start, then produce the full answer as fast as possible"; pacing
+ * the human-facing reveal is the client's job entirely.
  *
  * Fires once per NEW owner message that isn't a reply to a pending
  * confirmation (app/api/agent-chat/send/route.ts decides that up
@@ -805,6 +811,15 @@ export const processDelayedChatReply = inngest.createFunction(
     };
 
     /**
+     * If this channel has no way to signal typing activity at all
+     * (see lib/agent/chat-pacing.ts), the entire wait system is
+     * pointless — there's no real signal behind it, just an arbitrary
+     * delay. Skip both phases entirely and go straight to the final
+     * latest-check + generation.
+     */
+    const supportsTyping = channelSupportsTypingTracking(channel);
+
+    /**
      * Returns { standDown: true } if a newer unprocessed owner message
      * exists (meaning this run's message has been superseded — its own
      * newly-triggered run will handle everything from scratch), or the
@@ -838,56 +853,76 @@ export const processDelayedChatReply = inngest.createFunction(
       });
     }
 
-    // Phase A: fixed 2-4 second pause.
-    const phaseAMs = await step.run("compute-phase-a", async () => {
-      return (2 + Math.floor(Math.random() * 3)) * 1000; // 2-4s
-    });
+    let batch: { standDown: boolean; rows: { id: string; content: string; created_at: string }[] };
 
-    await step.sleep("phase-a-wait", `${phaseAMs}ms`);
-
-    const afterPhaseA = await checkLatest("check-after-phase-a");
-
-    if (afterPhaseA.standDown) {
-      console.log("DELAYED CHAT REPLY: standing down after phase A, not the latest message", {
+    if (!supportsTyping) {
+      /**
+       * No typing signal to check at all for this channel — skip the
+       * entire wait system and respond as fast as the backend can.
+       * The stand-down/debounce check still matters regardless of
+       * typing support (it's what prevents overlapping replies when
+       * several messages arrive close together), so it still runs —
+       * just immediately, with no artificial wait in front of it.
+       */
+      console.log("DELAYED CHAT REPLY: channel has no typing signal, skipping wait entirely", {
         tenantId,
-        ownerMessageId,
+        channel,
       });
-      return { processed: false };
+      batch = await checkLatest("check-immediate-no-typing-support");
+    } else {
+      // Phase A: fixed 1-3 second pause.
+      const phaseAMs = await step.run("compute-phase-a", async () => {
+        return (1 + Math.floor(Math.random() * 3)) * 1000; // 1-3s
+      });
+
+      await step.sleep("phase-a-wait", `${phaseAMs}ms`);
+
+      const afterPhaseA = await checkLatest("check-after-phase-a");
+
+      if (afterPhaseA.standDown) {
+        console.log("DELAYED CHAT REPLY: standing down after phase A, not the latest message", {
+          tenantId,
+          ownerMessageId,
+        });
+        return { processed: false };
+      }
+
+      // Did the owner start typing at any point between sending this
+      // message and now (the end of Phase A)? A point-in-time check, not
+      // a rolling freshness window — Phase A is a fixed, short duration,
+      // so "typing recorded after this message was sent" is exactly
+      // "did they start typing during phase A."
+      const startedTyping = await step.run("check-typing-after-phase-a", async () => {
+        const supabase = createServiceSupabase();
+
+        const { data: tenant } = await supabase
+          .from("tenants")
+          .select("owner_last_typing_at")
+          .eq("id", tenantId)
+          .single();
+
+        if (!tenant?.owner_last_typing_at) return false;
+
+        return new Date(tenant.owner_last_typing_at) > new Date(ownerMessageCreatedAt);
+      });
+
+      // Phase B only happens at all if typing was detected — a flat
+      // 7-10s, not a shorter/longer branch on both sides. If typing
+      // WASN'T detected, there's no Phase B: proceed straight to the
+      // final latest-check and respond.
+      if (startedTyping) {
+        const phaseBMs = await step.run("compute-phase-b", async () => {
+          return (7 + Math.floor(Math.random() * 4)) * 1000; // 7-10s
+        });
+
+        await step.sleep("phase-b-wait", `${phaseBMs}ms`);
+      }
+
+      batch = await checkLatest("check-after-wait");
     }
 
-    // Did the owner start typing at any point between sending this
-    // message and now (the end of Phase A)? A point-in-time check, not
-    // a rolling freshness window — Phase A is a fixed, short duration,
-    // so "typing recorded after this message was sent" is exactly
-    // "did they start typing during phase A."
-    const startedTyping = await step.run("check-typing-after-phase-a", async () => {
-      const supabase = createServiceSupabase();
-
-      const { data: tenant } = await supabase
-        .from("tenants")
-        .select("owner_last_typing_at")
-        .eq("id", tenantId)
-        .single();
-
-      if (!tenant?.owner_last_typing_at) return false;
-
-      return new Date(tenant.owner_last_typing_at) > new Date(ownerMessageCreatedAt);
-    });
-
-    // Phase B: 5-9s if the owner appeared to start composing a
-    // follow-up, otherwise a shorter 2-4s.
-    const phaseBMs = await step.run("compute-phase-b", async () => {
-      return startedTyping
-        ? (5 + Math.floor(Math.random() * 5)) * 1000 // 5-9s
-        : (2 + Math.floor(Math.random() * 3)) * 1000; // 2-4s
-    });
-
-    await step.sleep("phase-b-wait", `${phaseBMs}ms`);
-
-    const batch = await checkLatest("check-after-phase-b");
-
     if (batch.standDown || batch.rows.length === 0) {
-      console.log("DELAYED CHAT REPLY: standing down after phase B, not the latest message", {
+      console.log("DELAYED CHAT REPLY: standing down, not the latest message", {
         tenantId,
         ownerMessageId,
       });
@@ -916,16 +951,13 @@ export const processDelayedChatReply = inngest.createFunction(
 
     await step.run("generate-and-persist-reply", async () => {
       /**
-       * chat_agent_replying (migration 017) is no longer toggled here.
-       * It moved into lib/agent/chat.ts itself, bracketing exactly the
-       * persist-loop phase — not this whole call, which also includes
-       * tool execution (a calendar/Gmail API call, or the JSON-result
-       * loop-back completion for a read-only tool). Toggling it here
-       * meant the typing indicator stayed on through tool-calling time
-       * too, reported as "I don't want it to show typing the entire
-       * time it takes to perform tools." Only handleChatMessage() knows
-       * the precise moment tool resolution ends and actual reply text
-       * begins, so it's the right place to own this now.
+       * chat_agent_replying (migration 017) is NOT toggled here for the
+       * real reply — as of the reveal-queue redesign, real-message
+       * pacing/indicator timing is entirely client-driven (see
+       * AgentChatPanel.tsx's reveal queue), so this column is ONLY
+       * written to below, for the phantom "changed their mind"
+       * simulation specifically — a case with no real message to drive
+       * a client-side reveal delay from at all.
        */
       await handleChatMessage(tenantId, combinedText, {
         channel,
@@ -947,12 +979,50 @@ export const processDelayedChatReply = inngest.createFunction(
       }
     });
 
+    /**
+     * Occasional "changed their mind mid-typing" simulation, per
+     * explicit request — a genuinely random ~1-in-15 chance (not a
+     * mechanical every-15th-message pattern), only for channels that
+     * can actually show a typing indicator at all. After the real
+     * reply is fully delivered, wait a beat (2-5s), then show typing
+     * again for a few seconds (3-7s) with NOTHING following — a person
+     * who started composing a follow-up and then decided not to send
+     * it. Reuses `tenants.chat_agent_replying` (migration 017), which
+     * had been left in the schema unused since the reveal-queue
+     * redesign moved real-message pacing to the client — repurposed
+     * here specifically for this phantom, message-less signal, which
+     * the client checks independently of its own reveal queue.
+     */
+    if (supportsTyping && Math.random() < 1 / 15) {
+      const supabase = createServiceSupabase();
+
+      const preTypingPauseMs = await step.run("compute-phantom-pretyping-pause", async () => {
+        return (2 + Math.floor(Math.random() * 4)) * 1000; // 2-5s
+      });
+      await step.sleep("phantom-pretyping-pause", `${preTypingPauseMs}ms`);
+
+      await step.run("phantom-typing-start", async () => {
+        await supabase.from("tenants").update({ chat_agent_replying: true }).eq("id", tenantId);
+      });
+
+      const phantomTypingMs = await step.run("compute-phantom-typing-duration", async () => {
+        return (3 + Math.floor(Math.random() * 5)) * 1000; // 3-7s
+      });
+      await step.sleep("phantom-typing-duration", `${phantomTypingMs}ms`);
+
+      await step.run("phantom-typing-end", async () => {
+        await supabase.from("tenants").update({ chat_agent_replying: false }).eq("id", tenantId);
+      });
+
+      console.log("DELAYED CHAT REPLY: phantom re-typing simulated (no message followed)", {
+        tenantId,
+      });
+    }
+
     console.log("DELAYED CHAT REPLY: processed batch", {
       tenantId,
       batchSize: batch.rows.length,
-      phaseAMs,
-      startedTyping,
-      phaseBMs,
+      supportsTyping,
     });
 
     return { processed: true, batchSize: batch.rows.length };

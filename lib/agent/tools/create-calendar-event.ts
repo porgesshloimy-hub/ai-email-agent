@@ -1,5 +1,5 @@
 import type { ToolContext, ToolDefinition } from "./types";
-import { resolveOwnerApprovalPath } from "@/lib/agent/approval/resolve";
+import { resolveOwnerApprovalPath, createSyncConfirmHold } from "@/lib/agent/approval/resolve";
 
 /**
  * DISCREPANCY BETWEEN SURFACES (found while diffing, not introduced
@@ -290,19 +290,26 @@ export const createCalendarEventChatTool: ToolDefinition = {
             tenantId,
             error: pendingError,
           });
-          return "I wasn't able to set that up for confirmation — please try again.";
+          return createSyncConfirmHold("I wasn't able to set that up for confirmation — please try again.");
         }
 
-        return confirmationMessage;
+        return createSyncConfirmHold(confirmationMessage);
       }
     }
 
     const { createEvent } = await import("@/lib/calendar/client");
-    const event = await createEvent(tenantId, {
-      summary: args.summary,
-      startTime: args.startTime,
-      endTime: args.endTime,
-    });
+
+    let event;
+    try {
+      event = await createEvent(tenantId, {
+        summary: args.summary,
+        startTime: args.startTime,
+        endTime: args.endTime,
+      });
+    } catch (err) {
+      console.error("CREATE CALENDAR EVENT FAILED:", { tenantId, args, error: err });
+      return `I tried to book "${args.summary}" but ran into an error — nothing was created. Could you try again?`;
+    }
 
     await supabase.from("calendar_actions").insert({
       tenant_id: tenantId,

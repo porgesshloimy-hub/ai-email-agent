@@ -42,6 +42,44 @@ export interface ApprovalResolution {
 }
 
 /**
+ * A distinguishable return shape for a tool's `sync_confirm` branch,
+ * added when chat.ts gained a real multi-step tool-calling loop (see
+ * that file's comment on `runChatToolLoop` for the full story — this
+ * exists to fix a genuine bug where deleting two calendar events in one
+ * turn was structurally impossible with the old single-tool-call
+ * dispatch, and the model narrated "deleting both now" as plain text
+ * instead, since it had no real way to make a second call).
+ *
+ * Previously, every tool's sync_confirm branch just returned a bare
+ * string, identical in shape to a normal completed-action result
+ * (e.g. "Done — booked X"). Once the loop needed to decide "should I
+ * feed this result back to the model for a possible next tool call, or
+ * stop entirely and wait for the owner's next message," a bare string
+ * couldn't answer that question — a "Done — X" string SHOULD loop back
+ * (the model might have another action queued, like deleting a second
+ * event), but a "just to confirm — X, go ahead?" string must NOT loop
+ * back, since there's nothing productive left to do until the owner
+ * actually replies. This sentinel makes that distinction explicit and
+ * type-checked instead of string-sniffing tool output.
+ */
+export interface SyncConfirmHold {
+  __syncConfirmHold: true;
+  message: string;
+}
+
+export function createSyncConfirmHold(message: string): SyncConfirmHold {
+  return { __syncConfirmHold: true, message };
+}
+
+export function isSyncConfirmHold(value: unknown): value is SyncConfirmHold {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<string, unknown>).__syncConfirmHold === true
+  );
+}
+
+/**
  * Only calendar-style owner actions are resolved here today, since
  * create_calendar_event (chat surface) is the only owner-directed tool
  * with a real external side effect that currently exists. Adding a

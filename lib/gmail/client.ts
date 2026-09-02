@@ -198,6 +198,40 @@ export async function readMessage(
 }
 
 /**
+ * Returns a specific email's real, full plain-text content — not just
+ * the header/snippet metadata searchRecentMessages() returns. Added
+ * after a real, reported gap: the owner-chat agent could correctly
+ * FIND the right email via check_recent_emails (sender/subject/date
+ * match), but that tool deliberately only ever fetches Gmail's
+ * `format: "metadata"` — which excludes the message body entirely —
+ * so when asked what the email actually said, the agent only ever had
+ * `snippet` (Gmail's own short ~100-character auto-preview) to work
+ * with, not the real content.
+ *
+ * Reuses readMessage() (already fetches `format: "full"`) and the
+ * existing extractPlainTextBody() helper (already handles
+ * text/plain, multipart, and text/html-with-fallback decoding —
+ * originally built for the reply-drafting pipeline) rather than
+ * duplicating MIME-parsing logic.
+ */
+export async function readEmailContent(tenantId: string, messageId: string) {
+  const message = await readMessage(tenantId, messageId);
+
+  const headers = message.payload?.headers ?? [];
+  const getHeader = (name: string) =>
+    headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value ?? null;
+
+  return {
+    id: message.id ?? messageId,
+    threadId: message.threadId ?? null,
+    from: getHeader("From"),
+    subject: getHeader("Subject"),
+    date: getHeader("Date"),
+    body: extractPlainTextBody(message.payload),
+  };
+}
+
+/**
  * NEW: lists recent inbox messages with real metadata (sender, subject,
  * date, snippet, unread status) — not tied to any specific known
  * message/thread id the way readThread()/readMessage() are.

@@ -1,5 +1,7 @@
 import { createServiceSupabase } from "@/lib/supabase/server";
 import { resolveCalendarWriteCapability, canReadCalendar, canReadGmail, resolveSendCapability } from "@/lib/agent/permissions";
+import { isSyncConfirmHold } from "@/lib/agent/approval/resolve";
+import { channelSupportsTypingTracking, calculateTypingDelayMs } from "@/lib/agent/chat-pacing";
 import { recordUsage } from "@/lib/billing/meter";
 import { calculateModelCost } from "@/lib/billing/pricing";
 import {
@@ -441,7 +443,7 @@ export async function handleChatMessage(
           agentConfig?.custom_instructions ?? "",
           `There are currently ${pendingEmailCount ?? 0} email drafts awaiting the owner's review.`,
           gmailReadAllowed
-            ? "You can also check the actual inbox directly — use check_recent_emails if asked about incoming/recent emails, unread messages, or what's come in. Don't assume you only know about drafts; you have real read access to the inbox."
+            ? "You can also check the actual inbox directly — use check_recent_emails if asked about incoming/recent emails, unread messages, or what's come in. Don't assume you only know about drafts; you have real read access to the inbox. Note that check_recent_emails only returns a short snippet for each message, not its real content — if asked what a specific email actually says, or for any detail beyond subject/sender/date, call read_email_content with that message's real id to get the full text. Never describe an email's content based on the snippet alone."
             : "You do not have access to check the inbox directly — only drafts already awaiting review are visible to you.",
           emailDraftCapability !== "none"
             ? "If the owner asks you to email, message, or write to someone, use compose_email_draft — it composes a brand-new email and saves it as a real Gmail draft for them to review and send. This is a real tool you can actually call; don't just describe what you'd do, use it. You can never send an email directly yourself — only create the draft."
@@ -453,7 +455,7 @@ export async function handleChatMessage(
             ? "You can discuss calendar availability if asked, and you DO have real access to meeting links (Zoom/Meet) attached to calendar events — check_calendar_availability returns each event's description and conferenceLink fields, either of which commonly contains the real link. If asked for a meeting link, or whether you have access to one, check_calendar_availability first before answering either way — never claim you lack this access without having checked, and never invent a link if neither field has one."
             : "",
           calendarWriteCapability !== "none"
-            ? "You also have delete_calendar_event — you CAN delete/cancel real events on the calendar. Look up the event first with check_calendar_availability to get its real googleEventId (never invent one), then delete it. If asked whether you can delete an event, or asked to delete one, say yes and do it — don't claim you lack this ability."
+            ? "You also have delete_calendar_event — you CAN delete/cancel real events on the calendar. Look up the event first with check_calendar_availability to get its real googleEventId (never invent one), then delete it. If asked whether you can delete an event, or asked to delete one, say yes and do it — don't claim you lack this ability. If there is more than one event to delete, call delete_calendar_event once per event, in sequence — you can make multiple tool calls in the same turn. Writing text like 'deleting now' or 'got it, deleting both' does NOTHING by itself — only an actual delete_calendar_event call deletes anything. Never tell the owner something was deleted, sent, or booked unless the corresponding tool call actually returned a real success result THIS turn."
             : "",
           videoMeetingGuidance,
           /**
@@ -492,77 +494,116 @@ export async function handleChatMessage(
       { role: "user", content: messageText },
     ];
 
-    const result = await runChatCompletion(aiProvider, {
-      model: aiModel,
-      messages,
-      tools,
-    });
-
-    await meterChatUsage(tenantId, aiProvider, aiModel, result.usage);
-
-    const toolCall = result.toolCalls[0];
-
-    if (!toolCall) {
-      return result.content ?? "I'm not sure how to respond to that.";
-    }
-
-    const args = JSON.parse(toolCall.arguments || "{}");
-
-    const toolDef = findToolForSurface(toolCall.name, "chat", toolContext);
-
-    if (!toolDef) {
-      return result.content ?? "Done.";
-    }
-
-    const toolResult = await toolDef.execute(args, toolContext);
-
     /**
-     * Bug found in production: check_calendar_availability (and any
-     * future informational, read-only tool) returns a structured
-     * object meant to be READ and phrased into English by a model —
-     * exactly what lib/agent/run.ts's multi-step email loop does by
-     * feeding the tool result back as a "tool" role message and
-     * completing again. chat.ts never did this — it returned whatever
-     * execute() produced directly as the final user-facing text, which
-     * is correct for a tool like create_calendar_event (it hand-writes
-     * a plain string, e.g. "Done — booked ..."), but surfaced raw JSON
-     * to the owner for any tool that returns data instead of prose.
+     * Bug found in production: deleting two calendar events in one
+     * request ("delete both of those Busy events") was structurally
+     * impossible — this dispatch only ever processed ONE tool call
+     * before finalizing, so after the first deletion (or even before
+     * any real deletion happened at all), the model had no way to make
+     * a SECOND tool call in the same turn. It appears to have resolved
+     * this by narrating "deleting both now" as plain text instead of
+     * actually calling the tool a second time — a real hallucination
+     * enabled directly by this structural gap, not a prompt-compliance
+     * issue alone. Fixed with a genuine bounded loop: the model can now
+     * make several sequential tool calls (check availability, delete
+     * event A, delete event B, then produce final text) within one
+     * turn, the same general shape as lib/agent/run.ts's multi-step
+     * email loop, just capped much lower since a chat turn should
+     * rarely need many steps.
      *
-     * Fix: if the tool's result is already a plain string, use it as-is
-     * (unchanged behavior). If it's anything else, do exactly one more
-     * model call — not a full loop, chat.ts is deliberately single-shot
-     * — with the tool result appended the same way run.ts does
-     * (JSON.stringify'd, as a "tool" role message), and use that
-     * completion's text as the final reply instead.
+     * MAX_CHAT_TOOL_STEPS is deliberately small compared to run.ts's
+     * MAX_AGENT_STEPS (15) — chat exchanges are simple by design
+     * (check something, act on 1-2 items, respond), and a low cap also
+     * limits the blast radius if a tool call ever gets stuck looping.
      */
-    if (typeof toolResult === "string") {
-      return toolResult;
+    const MAX_CHAT_TOOL_STEPS = 6;
+    let currentMessages: LlmMessage[] = [...messages];
+
+    for (let step = 0; step < MAX_CHAT_TOOL_STEPS; step++) {
+      const result = await runChatCompletion(aiProvider, {
+        model: aiModel,
+        messages: currentMessages,
+        tools,
+      });
+
+      await meterChatUsage(tenantId, aiProvider, aiModel, result.usage);
+
+      const toolCall = result.toolCalls[0];
+
+      if (!toolCall) {
+        return result.content ?? "I'm not sure how to respond to that.";
+      }
+
+      const args = JSON.parse(toolCall.arguments || "{}");
+      const toolDef = findToolForSurface(toolCall.name, "chat", toolContext);
+
+      if (!toolDef) {
+        return result.content ?? "Done.";
+      }
+
+      /**
+       * Bug found in production: a tool's own external API call
+       * throwing (e.g. delete_calendar_event's Google Calendar call
+       * failing on a stale event ID) propagated all the way up
+       * uncaught, into the Inngest step running this whole reply.
+       * Inngest retries a failing step, and if the cause is
+       * deterministic, every retry fails identically until the whole
+       * function gives up — meaning NO reply is ever persisted, not
+       * even an error message. Reported as "the agent didn't delete
+       * the event" with no visible explanation at all. The three
+       * owner-directed action tools were fixed individually to catch
+       * their own specific external calls with a clear message, but
+       * this catch exists as a systemic backstop too — any OTHER
+       * tool, including ones added later, that forgets its own
+       * error handling still can't take down the whole turn silently.
+       */
+      let toolResult;
+      try {
+        toolResult = await toolDef.execute(args, toolContext);
+      } catch (err) {
+        console.error("CHAT TOOL EXECUTION THREW:", { tenantId, toolName: toolCall.name, error: err });
+        return "Something went wrong while I was working on that — nothing should have changed, but please check and let me know if anything looks off.";
+      }
+
+      /**
+       * A tool holding for owner confirmation (see
+       * lib/agent/approval/resolve.ts's SyncConfirmHold) must STOP the
+       * loop immediately and return that text as the final reply —
+       * there is nothing productive left to do until the owner
+       * actually replies. Distinguishing this from a normal completed-
+       * action string (e.g. "Done — booked X", which SHOULD loop back
+       * so the model can decide whether to call another tool) is
+       * exactly why that sentinel exists instead of string-sniffing.
+       */
+      if (isSyncConfirmHold(toolResult)) {
+        return toolResult.message;
+      }
+
+      // Every other result — whether a plain string like "Done — X" or
+      // a structured object like check_calendar_availability's JSON —
+      // gets fed back to the model, which decides whether to call
+      // another tool (e.g. delete a second event) or produce final text.
+      currentMessages = [
+        ...currentMessages,
+        {
+          role: "assistant",
+          content: result.content,
+          toolCalls: [toolCall],
+        },
+        {
+          role: "tool",
+          toolCallId: toolCall.id,
+          name: toolCall.name,
+          content: typeof toolResult === "string" ? toolResult : JSON.stringify(toolResult),
+        },
+      ];
     }
 
-    const followUpMessages: LlmMessage[] = [
-      ...messages,
-      {
-        role: "assistant",
-        content: result.content,
-        toolCalls: [toolCall],
-      },
-      {
-        role: "tool",
-        toolCallId: toolCall.id,
-        name: toolCall.name,
-        content: JSON.stringify(toolResult),
-      },
-    ];
-
-    const followUp = await runChatCompletion(aiProvider, {
-      model: aiModel,
-      messages: followUpMessages,
-      tools,
-    });
-
-    await meterChatUsage(tenantId, aiProvider, aiModel, followUp.usage);
-
-    return followUp.content ?? "Done.";
+    // Hit MAX_CHAT_TOOL_STEPS without the model producing final text —
+    // extremely unlikely given the cap, but fail toward a plain
+    // message rather than silence.
+    console.error("CHAT TOOL LOOP: hit MAX_CHAT_TOOL_STEPS without a final response", { tenantId });
+    return "I've made some progress on that, but I'm not sure how to summarize it — could you check and let me know if anything's missing?";
   }
 
   const rawResponseText = await computeResponse();
@@ -610,23 +651,67 @@ export async function handleChatMessage(
   let lastAgentMessageRow: Awaited<ReturnType<typeof persistChatMessage>> = null;
 
   /**
-   * Architecture change: this used to toggle `tenants.chat_agent_replying`
-   * (migration 017) and pace parts 1-3s apart, so the "typing" indicator
-   * could reflect genuine real-time server status. That's been replaced
-   * entirely — the client (AgentChatPanel.tsx) now calculates its own
-   * reveal delay from each message's length once the content already
-   * exists, rather than the indicator needing to track live server
-   * work. So this loop's only job now is to persist every part as fast
-   * as it actually can — no artificial pause, no status bookkeeping.
-   * `chat_agent_replying` itself is left in the schema (migration 017)
-   * but is no longer read or written anywhere — harmless to leave
-   * unused rather than requiring a further migration to remove it.
+   * Architecture change (moved from AgentChatPanel.tsx per explicit
+   * request): pacing is real backend time again, not a client-side
+   * simulation layered on top of already-delivered content. Only
+   * applied for channels that actually support typing tracking at all
+   * (lib/agent/chat-pacing.ts) — skip entirely otherwise and persist as
+   * fast as possible, matching the same principle already applied to
+   * the Inngest wait phases.
+   *
+   * `chat_agent_replying` (migration 017) is revived here for the same
+   * reason it makes sense again: these delays are now genuine,
+   * multi-second backend waits, not a near-instant DB write — a
+   * polling client can accurately reflect "still working" without the
+   * earlier race-condition risk (a status window shorter than the
+   * poll interval), since these delays are seconds long by design.
    */
-  for (let i = 0; i < finalParts.length; i++) {
-    const row = await persistChatMessage(tenantId, "agent", finalParts[i], channel);
-    if (row) {
-      agentMessageIds.push(row.id);
-      lastAgentMessageRow = row;
+  const supportsTyping = channelSupportsTypingTracking(channel);
+  const supabaseForStatus = supportsTyping ? createServiceSupabase() : null;
+
+  if (supabaseForStatus) {
+    await supabaseForStatus.from("tenants").update({ chat_agent_replying: true }).eq("id", tenantId);
+  }
+
+  /**
+   * MIN_REPLYING_DURATION_MS guards a real timing problem, proven once
+   * already earlier in this project's history: the client polls this
+   * status every ~1s. For a SINGLE-part reply specifically, there's no
+   * inter-part delay at all (the loop below only pauses before parts
+   * after the first) — the true→false window would be as short as one
+   * database insert, likely 50-200ms, which is shorter than the poll
+   * interval itself. A window shorter than the poll interval isn't
+   * just unlikely to be caught — there exist phase alignments where
+   * it's mathematically impossible for any poll to land inside it.
+   * This floor must stay meaningfully LARGER than the poll interval,
+   * not just "long enough on average."
+   */
+  const MIN_REPLYING_DURATION_MS = 2500;
+  const replyingStartedAt = Date.now();
+
+  try {
+    for (let i = 0; i < finalParts.length; i++) {
+      if (i > 0 && supportsTyping) {
+        const delayMs = calculateTypingDelayMs(finalParts[i]);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+
+      const row = await persistChatMessage(tenantId, "agent", finalParts[i], channel);
+      if (row) {
+        agentMessageIds.push(row.id);
+        lastAgentMessageRow = row;
+      }
+    }
+
+    if (supportsTyping) {
+      const elapsedMs = Date.now() - replyingStartedAt;
+      if (elapsedMs < MIN_REPLYING_DURATION_MS) {
+        await new Promise((resolve) => setTimeout(resolve, MIN_REPLYING_DURATION_MS - elapsedMs));
+      }
+    }
+  } finally {
+    if (supabaseForStatus) {
+      await supabaseForStatus.from("tenants").update({ chat_agent_replying: false }).eq("id", tenantId);
     }
   }
 

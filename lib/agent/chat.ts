@@ -674,24 +674,38 @@ export async function handleChatMessage(
   }
 
   /**
-   * MIN_REPLYING_DURATION_MS guards a real timing problem, proven once
-   * already earlier in this project's history: the client polls this
-   * status every ~1s. For a SINGLE-part reply specifically, there's no
-   * inter-part delay at all (the loop below only pauses before parts
-   * after the first) — the true→false window would be as short as one
-   * database insert, likely 50-200ms, which is shorter than the poll
-   * interval itself. A window shorter than the poll interval isn't
-   * just unlikely to be caught — there exist phase alignments where
-   * it's mathematically impossible for any poll to land inside it.
-   * This floor must stay meaningfully LARGER than the poll interval,
-   * not just "long enough on average."
+   * MIN_REPLYING_DURATION_MS is now a secondary safety net rather than
+   * the primary fix — since every part (including the first) gets a
+   * real calculateTypingDelayMs() delay before it as of the fix below,
+   * the true→false window is already virtually guaranteed to exceed
+   * this floor on its own. Kept anyway: it costs nothing to apply, and
+   * guards the same original concern (the client polls this status
+   * every ~1s, so a window shorter than that interval isn't just
+   * unlikely to be caught — some phase alignments make it
+   * mathematically impossible for any poll to land inside it).
    */
   const MIN_REPLYING_DURATION_MS = 2500;
   const replyingStartedAt = Date.now();
 
   try {
     for (let i = 0; i < finalParts.length; i++) {
-      if (i > 0 && supportsTyping) {
+      /**
+       * Bug found in production: applying this delay only for i > 0
+       * (skipping it before the FIRST part) made sense when it seemed
+       * like the earlier Inngest wait phases (Phase A/B) already
+       * covered "a pause before responding." They don't, in the way
+       * that matters here — `chat_agent_replying` only flips true once
+       * THIS loop starts, which is after Phase A/B has already fully
+       * elapsed and after the LLM has already finished generating. So
+       * with zero delay before part 1, that first database write
+       * happened essentially instantly after the flag went true —
+       * there was never a real window for a poll to observe "typing,
+       * nothing yet" before the first message appeared. Reported as
+       * "the first message doesn't show typing," while later parts
+       * (which DO get this delay) worked correctly. Now every part,
+       * including the first, gets a real delay first.
+       */
+      if (supportsTyping) {
         const delayMs = calculateTypingDelayMs(finalParts[i]);
         await new Promise((resolve) => setTimeout(resolve, delayMs));
       }

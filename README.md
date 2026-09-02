@@ -627,7 +627,7 @@ wait would risk Vercel's default function timeout.
 **The wait — Phase B only happens at all if typing was detected, not a shorter/longer branch on
 both sides:**
 
-1. **Phase A** — a fixed 2-4 second pause after the message is sent.
+1. **Phase A** — a fixed 1-3 second pause after the message is sent.
 2. **Decision** — did the owner start typing at any point during Phase A? Checked via
    `tenants.owner_last_typing_at` (migration 016, a single constantly-overwritten timestamp with
    no history value once stale) against the message's own `created_at` — a point-in-time check,
@@ -635,6 +635,20 @@ both sides:**
    - **No** → skip straight to generating a reply — no further wait at all.
    - **Yes** → **Phase B**, a flat additional 7-10 seconds, then generate regardless of whether
      they're still typing at that exact moment.
+
+**This whole wait system only applies to channels that can actually signal typing at all** —
+`lib/agent/chat-pacing.ts`'s `channelSupportsTypingTracking()` gates it. Applying an artificial
+wait with no real signal behind it isn't the point; the design is "wait to see if they're
+composing more," not "always feel slow." Currently only `"web"` is in that set — the only real
+channel that goes through this async event-driven system at all today. **Two important scoping
+notes, checked directly rather than assumed:** Google Chat's webhook (`app/api/webhooks/google-chat/route.ts`)
+still calls `handleChatMessage()` synchronously and directly — it does not go through this
+Inngest event system at all, so it currently has zero wait and zero pacing of any kind. WhatsApp
+isn't built as a conversational surface in this codebase at all yet (see "Remaining Product
+Work"). Making either of them "work the same way" is a genuinely separate, larger integration
+project — for Google Chat specifically, restructuring its webhook to respond asynchronously via
+Chat's own message-push API instead of a synchronous reply — not something bolted on as part of
+this round.
 
 If the owner sends another message at any point during either phase, the run stands down
 entirely and the new message's own triggered run starts the whole wait over again, relative to
@@ -671,39 +685,180 @@ message shows no typing" incorrectly assumed the first message must have been sh
 hit the reveal-delay floor — checked against a real reported case with a genuinely long first
 message and found wrong; this confirmation-reply bypass is the actual, verified cause instead.)
 
-## The Typing Indicator — Simulated Reveal, Not Real-Time Status
+## Phantom Re-Typing — Simulating a Changed Mind
 
-**Architecture change:** the indicator used to reflect genuine real-time server status —
-`tenants.chat_agent_replying` (migration 017), toggled true/false around the actual persist
-work, polled by the client. That's been replaced entirely with a simulated, client-controlled
-reveal, based on direct feedback that the mechanics felt off (the indicator only appearing
-before the second message in a multi-part reply, not the first) and a request to make the pacing
-feel more deliberately human rather than tied to raw server timing.
+A rare (~1-in-15, genuinely random per message — not a mechanical every-15th pattern), message-
+less typing simulation: after the real reply is fully delivered, wait 2-5 seconds, then show
+typing again for 3-7 seconds with **nothing following** — mimicking someone who started composing
+a follow-up and decided not to send it. Only happens for channels that support typing tracking
+at all (see above).
 
-**How it works now:**
+This reuses `tenants.chat_agent_replying` (migration 017) for a narrower purpose than its
+original design — it's no longer used for real-message pacing (that stays entirely client-driven
+via the reveal queue below, which was confirmed to feel right), only for this specific
+message-less signal, which the reveal queue has no way to represent since it only ever reacts to
+actual persisted messages. The client's polling (`AgentChatPanel.tsx`) extends its watch window
+by ~16 seconds past the real reply's own quiet-period stop specifically to catch this, since the
+phantom simulation happens strictly after the real batch is already fully delivered.
 
-1. **Generation is completely unpaced server-side.** `lib/agent/chat.ts` no longer has any
-   artificial delay at all — no minimum-duration floor, no inter-part pause. It persists every
-   part of a reply as fast as it technically can. `chat_agent_replying` itself is left in the
-   schema (harmless) but is no longer read or written anywhere.
-2. **The client holds each message behind a calculated delay before showing it.**
-   `AgentChatPanel.tsx`'s `calculateRevealDelay()` computes a duration from the message's own
-   character count — using a typing speed that's **randomized per message** (18-42ms/character),
-   not one fixed rate, since a real person doesn't type every message at exactly the same pace.
-   Clamped between 500ms and 4.5s. About 1 in 15 messages gets an extra random 3-7 second
-   "thinking mid-typing" pause added on top, for the occasional longer pause a real person takes.
-3. **A reveal queue (`enqueueForReveal`/`processRevealQueue`) owns all of this.** Polling
-   (`pollForNewMessages`) no longer touches the typing indicator or `messages` state directly at
-   all — it just fetches new rows quickly and hands them to the queue. The queue shows the
-   indicator, waits the calculated delay, reveals that one message, and repeats for anything
-   still queued — including messages that arrive while a previous delay is already in progress,
-   so nothing gets dropped or shown all at once out of order.
+Separately, `calculateRevealDelay()`'s per-message typing duration gets an extra 20-35% stretch
+on ~1-in-5 messages (distinct from the existing ~1-in-15 "thinking pause," which adds a flat
+chunk rather than scaling the whole duration) — a further, explicit measure against the
+calculation feeling too mechanically tied to raw character count.
 
-This fixes the "indicator only shows before the second message" problem as a natural
-consequence of the redesign, not a separate patch: since the client now deliberately orchestrates
-every reveal itself, "show the indicator before the first message" is just the first thing the
-queue does — it's no longer a matter of whether a poll happened to catch a real status flag at
-the right moment.
+## Bug Found and Fixed: Deleting Multiple Events Silently Failed
+
+Reported directly from production: asked to delete two calendar events, the agent repeatedly
+said things like "Got 'em — deleting both now" and "Now deleting both:" across several separate
+exchanges, but **nothing was ever actually deleted**. Traced to a real structural limitation, not
+a prompt-compliance issue: `chat.ts`'s tool dispatch only ever processed a single tool call
+(`result.toolCalls[0]`) before finalizing a turn. Deleting two events requires two separate
+`delete_calendar_event` calls — the model had no mechanism to make a second call in the same
+turn, and appears to have resolved this by narrating the action in plain text instead of ever
+actually performing it a second time.
+
+**Fixed with a genuine bounded multi-step loop** (`MAX_CHAT_TOOL_STEPS = 6`), the same general
+shape as `run.ts`'s existing multi-step email loop, just capped much lower since a chat turn
+should rarely need many steps. The model can now check availability, delete event A, delete
+event B, and produce final text, all within one turn.
+
+This required a real type-level fix to make the loop's exit conditions unambiguous:
+`lib/agent/approval/resolve.ts` gained a `SyncConfirmHold` sentinel
+(`{ __syncConfirmHold: true, message }`), returned by `create_calendar_event`, `send_email`, and
+`delete_calendar_event`'s confirmation-hold branches instead of a bare string. Previously, a
+"just to confirm — X, go ahead?" hold and a "Done — booked X" completion were the same shape (a
+plain string) — indistinguishable to code, even though one must stop the loop entirely (nothing
+productive to do until the owner replies) and the other must loop back (the model might have
+another action queued). The sentinel makes that distinction explicit and type-checked instead of
+string-sniffing tool output.
+
+The system prompt also gained explicit anti-narration language: "writing text like 'deleting
+now' or 'got it, deleting both' does NOTHING by itself — only an actual `delete_calendar_event`
+call deletes anything," plus an explicit instruction to call it once per event in sequence when
+there's more than one.
+
+## Bug Found and Fixed: A Single Failed Action Could Silently Kill the Whole Reply
+
+A second, different bug found via direct follow-up — reported as a single-event deletion also
+not working, distinct from the multi-event limitation above. Traced to a real gap: none of the
+three owner-directed action tools (`create_calendar_event`, `send_email`,
+`delete_calendar_event`) had any error handling around their actual external API call
+(`createEvent`/`sendNewMessage`/`deleteEvent`). If that call throws for any reason — a stale or
+slightly-wrong ID, the target already gone, a transient network error, a permissions hiccup —
+the exception propagated fully uncaught, up through the tool-calling loop, into the Inngest step
+running the whole reply. Inngest retries a failing step; if the cause is deterministic, every
+retry fails identically and the entire function eventually gives up — meaning **no reply is
+persisted at all**, not even an error message. That's indistinguishable from "the agent silently
+did nothing," exactly as reported.
+
+Fixed at two levels: each of the three tools now wraps its own external call in `try`/`catch`,
+returning a specific, honest message ("I tried to delete X but ran into an error…") instead of
+throwing. `lib/agent/chat.ts`'s tool loop also gained a systemic backstop — any tool's execution
+is now caught generically, so a future tool that forgets its own error handling still can't take
+down an entire turn silently.
+
+## Cost Investigation: Why Haiku 4.5 Chat Messages Run ~$0.01, and Prompt Caching
+
+Checked directly rather than assumed. Haiku 4.5 is $1/$5 per million input/output tokens.
+Measuring the actual system prompt (`lib/agent/chat.ts`) and tool descriptions together comes to
+roughly 3,100 tokens of static content — identical across calls for a given tenant/persona — sent
+in full, uncached, on **every** completion. Since a chat turn often needs more than one
+completion (a tool call followed by a result-phrasing call, or several steps in the multi-step
+loop above), that static block gets resent multiple times per single user message. At ~2
+completions per turn, the math lands almost exactly on the reported ~$0.01 — this is a real,
+explainable consequence of the current design, not a billing anomaly.
+
+**Fixed with prompt caching** (`lib/agent/llm/anthropic.ts`) — `cache_control: {type: "ephemeral"}`
+added to the end of the system prompt block and the last tool definition, which caches everything
+up to and including that point. Anthropic bills a cache hit at roughly 10% of normal input price.
+This required changing `system` from a plain string to an array of content blocks (the shape
+`cache_control` requires), and casting around the installed SDK version's (0.32.1) type
+definitions, which don't yet declare the `cache_creation_input_tokens`/`cache_read_input_tokens`
+fields Anthropic's actual API response includes.
+
+**One known, honest gap left open:** `lib/billing/pricing.ts`'s cost calculation still treats all
+input tokens at the flat rate — it doesn't yet distinguish cache-read tokens (billed far
+cheaper) from regular ones. This means the *actual* provider bill will drop from caching, but
+this project's own *displayed/tracked* usage cost will slightly **overstate** it until that
+calculation is extended to track the cache-creation/cache-read breakdown separately. The
+direction of error is safe (not undercharging a tenant), but it's not fully precise — flagged
+here rather than left silently inaccurate.
+
+## Gap Found and Fixed: The Agent Could Find an Email But Not Read It
+
+Reported directly: asked to find a specific email, the agent correctly identified it but had no
+idea what it actually said — only its subject. Checked directly rather than assumed:
+`check_recent_emails` fetches Gmail with `format: "metadata"`, which explicitly excludes the
+message body — each result only ever carried `snippet` (Gmail's own short ~100-character
+auto-preview), never the real content. This wasn't a bug in the sense of broken code; the tool
+was genuinely only ever built to list what's in the inbox lightly, not read one fully.
+
+**New tool: `read_email_content`.** Reuses `readMessage()` (already fetches `format: "full"`)
+and the existing `extractPlainTextBody()` helper (already handles text/plain, multipart, and
+text/html-with-fallback decoding — originally built for the reply-drafting pipeline), wrapped in
+a new exported `readEmailContent()` in `lib/gmail/client.ts`. Kept as a separate tool rather than
+always fetching full bodies in `check_recent_emails` — a full-body fetch is heavier, and listing
+10-25 inbox messages almost never needs every single one's complete content. The natural flow —
+find first (lightweight), then read one specific message fully once identified — is exactly the
+kind of multi-step exchange `chat.ts`'s bounded tool loop now supports in one turn. The system
+prompt was updated to make this explicit: never describe an email's content from the snippet
+alone.
+
+## Bug Found and Fixed: Standalone "go" and a Duplicate Booking
+
+**Standalone "go":** the affirmative-detection regex (both `chat.ts`'s real check and
+`pending-confirmation-check.ts`'s cheap version) only matched the full phrase "go ahead" — a bare
+"go" fell through as an ordinary new message, creating a second, redundant confirmation prompt
+instead of executing the first one. Fixed to accept "go" with or without "ahead."
+
+**Duplicate booking from a plain "thanks":** after a calendar event was successfully booked,
+saying "thanks! I appreciate it" — two acknowledgments with no new instruction — caused the model
+to call `create_calendar_event` again, booking a duplicate. The tool's own result sits in
+conversation history as plain text with nothing marking it "already done, don't repeat," so an
+appreciative follow-up was apparently misread as license to redo the action. Fixed with an
+explicit system prompt instruction: a plain acknowledgment is never grounds to re-invoke a tool
+for something already completed — only an actual new, specific request is.
+
+## The Typing Indicator — Real Backend Pacing, Moved There Deliberately
+
+**Current architecture, after two redesigns:** pacing between the parts of a split reply is
+genuine backend time, computed and applied in `lib/agent/chat.ts`'s persist loop via a shared
+module, `lib/agent/chat-pacing.ts`. This isn't the original design — it briefly lived entirely in
+the client as a simulated reveal — but was moved back to the backend on request, specifically so
+the pacing logic lives somewhere a future non-web channel could eventually reuse, rather than
+being trapped inside a React component only the web widget ever runs. See "Delayed, Typing-Aware
+Replies" above for the current, honest scope of what that actually means for Google Chat/WhatsApp
+today (nothing yet — they aren't wired onto this async system at all).
+
+**How it works:**
+
+1. **`lib/agent/chat-pacing.ts`'s `calculateTypingDelayMs()`** computes a duration from a
+   message's own character count — using a typing speed that's **randomized per message**
+   (25-55ms/character), not one fixed rate, since a real person doesn't type every message at
+   exactly the same pace. Clamped between 1.2s and 5.5s. About 1-in-15 messages gets an extra
+   random 3-7 second "thinking mid-typing" pause added on top; separately, about 1-in-5 messages
+   gets its whole computed duration stretched by an extra 20-35% — a further, explicit measure
+   against the calculation feeling mechanically tied to raw character count.
+2. **`lib/agent/chat.ts`'s persist loop** actually waits that long between persisting each part —
+   real backend delay, not a display trick — and only when the channel supports typing tracking
+   at all (`channelSupportsTypingTracking()`); otherwise it persists as fast as it can, with zero
+   artificial delay.
+3. **`tenants.chat_agent_replying`** (migration 017) is toggled `true` before the loop starts and
+   `false` once it finishes, and the client (`AgentChatPanel.tsx`) polls this directly to drive
+   the indicator. A `MIN_REPLYING_DURATION_MS` floor (2.5s) still exists here for a specific
+   reason: a single-part reply has no inter-part pacing at all (only parts after the first get a
+   delay), so its true→false window could otherwise be as short as one database write — well
+   under the 1s poll interval, mathematically guaranteeing some phase alignments would miss it
+   entirely, the exact bug already proven and fixed once earlier in this project. Multi-part
+   replies rarely need the floor at all (their own pacing already exceeds it), but it costs
+   nothing to apply uniformly.
+4. **The occasional phantom "changed their mind" simulation** (see "Phantom Re-Typing" below)
+   reuses this exact same column for a second purpose — a typing indicator with no message behind
+   it at all, happening strictly after the real batch finishes. The client doesn't need to
+   distinguish which case produced a given "typing" moment; it just shows the indicator whenever
+   the flag is true, and tracks how long since it was last true (rather than stopping the instant
+   it first goes false) specifically so it survives the gap between the real reply finishing and
+   a possible later phantom flip.
 
 **Message splitting is enforced mechanically, not left to prompt compliance alone.** The model
 is only asked to insert a `"|||"` delimiter between distinct messages, which was reported as
@@ -1129,6 +1284,9 @@ lib/
 │   │                             resolution (calendar, email)
 │   ├── chat-history/              Persistence + the model-context window (distinct from the
 │   │                             UI's own, much larger display window)
+│   ├── chat-pacing.ts            Channel typing-tracking capability check — the intended
+│   │                             extension point for wiring additional channels onto the
+│   │                             wait/pacing system once they have a real typing signal
 │   ├── permissions.ts            Permission engine (connection-checked)
 │   ├── content-safety.ts         Placeholder/hallucination text checks
 │   ├── grounding-guard.ts        LLM-based "was this actually done" check

@@ -826,7 +826,24 @@ export const processDelayedChatReply = inngest.createFunction(
      * full unprocessed batch (including this message) if this run's
      * message is still the most recent one.
      */
-    async function checkLatest(stepId: string) {
+    /**
+     * Explicit return type here, and explicit typing inside both
+     * branches below — a real Vercel build failure (not caught by an
+     * earlier standalone tsc check using manually-specified flags
+     * rather than this project's actual tsconfig.json) showed Inngest's
+     * `step.run()` wraps its return value through a `Jsonify` type
+     * utility for serialization safety. An untyped empty array literal
+     * (`rows: []`) and the raw Supabase query result's own generated
+     * type (loosely inferred, not matching this hand-written shape)
+     * couldn't be reconciled against each other or against the
+     * declared `batch` type below — TypeScript inferred `null[]` for
+     * the empty-array branch and a `JsonifyObject<...>` wrapper for the
+     * other. Both branches now explicitly construct the exact same
+     * shape, removing any ambiguity for Jsonify to mis-infer.
+     */
+    async function checkLatest(
+      stepId: string
+    ): Promise<{ standDown: boolean; rows: { id: string; content: string; created_at: string }[] }> {
       return step.run(stepId, async () => {
         const supabase = createServiceSupabase();
 
@@ -845,11 +862,20 @@ export const processDelayedChatReply = inngest.createFunction(
         const rows = unprocessed ?? [];
         const mostRecent = rows[rows.length - 1];
 
-        if (rows.length === 0 || mostRecent.id !== ownerMessageId) {
-          return { standDown: true as const, rows: [] };
+        if (rows.length === 0 || !mostRecent || mostRecent.id !== ownerMessageId) {
+          return {
+            standDown: true,
+            rows: [] as { id: string; content: string; created_at: string }[],
+          };
         }
 
-        return { standDown: false as const, rows };
+        const typedRows: { id: string; content: string; created_at: string }[] = rows.map((r) => ({
+          id: String(r.id),
+          content: String(r.content),
+          created_at: String(r.created_at),
+        }));
+
+        return { standDown: false, rows: typedRows };
       });
     }
 
@@ -951,13 +977,13 @@ export const processDelayedChatReply = inngest.createFunction(
 
     await step.run("generate-and-persist-reply", async () => {
       /**
-       * chat_agent_replying (migration 017) is NOT toggled here for the
-       * real reply — as of the reveal-queue redesign, real-message
-       * pacing/indicator timing is entirely client-driven (see
-       * AgentChatPanel.tsx's reveal queue), so this column is ONLY
-       * written to below, for the phantom "changed their mind"
-       * simulation specifically — a case with no real message to drive
-       * a client-side reveal delay from at all.
+       * chat_agent_replying (migration 017) IS toggled for the real
+       * reply too, but not here — it's owned by lib/agent/chat.ts's
+       * own persist loop (via lib/agent/chat-pacing.ts), which is the
+       * only place that knows the precise moment tool resolution ends
+       * and real pacing between parts should begin. This step only
+       * calls into that function and marks the batch processed
+       * afterward.
        */
       await handleChatMessage(tenantId, combinedText, {
         channel,
@@ -987,11 +1013,11 @@ export const processDelayedChatReply = inngest.createFunction(
      * reply is fully delivered, wait a beat (2-5s), then show typing
      * again for a few seconds (3-7s) with NOTHING following — a person
      * who started composing a follow-up and then decided not to send
-     * it. Reuses `tenants.chat_agent_replying` (migration 017), which
-     * had been left in the schema unused since the reveal-queue
-     * redesign moved real-message pacing to the client — repurposed
-     * here specifically for this phantom, message-less signal, which
-     * the client checks independently of its own reveal queue.
+     * it. Reuses the same `tenants.chat_agent_replying` column
+     * (migration 017) that lib/agent/chat.ts's persist loop uses for
+     * real-message pacing — the client doesn't need to distinguish
+     * which case produced a given "typing" moment, it just shows the
+     * indicator whenever this flag is true.
      */
     if (supportsTyping && Math.random() < 1 / 15) {
       const supabase = createServiceSupabase();

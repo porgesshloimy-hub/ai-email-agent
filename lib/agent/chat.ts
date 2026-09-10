@@ -30,7 +30,7 @@ import {
 } from "@/lib/agent/personas/apply-overrides";
 import { persistChatMessage, linkPendingConfirmationToMessage } from "@/lib/agent/chat-history/persist";
 import { fetchChatHistoryTurns, stripLeakedTimestampPrefix, stripAllLeakedTimestamps } from "@/lib/agent/chat-history/build-context";
-import { fetchPinnedContext } from "@/lib/agent/memory/pinned";
+import { fetchPinnedContext, renderPinnedContext } from "@/lib/agent/memory/pinned";
 
 /**
  * Handles a single message from the business owner via Google Chat. This is
@@ -405,21 +405,30 @@ export async function handleChatMessage(
     const historyTurns = await fetchChatHistoryTurns(tenantId, tenant?.timezone);
 
     /**
-     * Active owner instruction notes (agent_instruction_notes) — the
-     * chat surface is where these get authored (Phase 2.6, a later
-     * build pass) but they should apply here too the moment they exist,
-     * same as the email surface (see run.ts). No per-customer pinned
-     * memory here — chat is the owner talking about arbitrary customers,
-     * not a single customer thread, so there's no one customerEmail to
-     * scope a pinned-slots fetch to; search_context (available on this
-     * surface via getToolsForSurface, capability "memory" is baseline)
-     * is how the owner-chat agent looks up a specific customer's memory
-     * when asked about one.
+     * Tenant-scope pinned context: active owner instruction notes
+     * (agent_instruction_notes) AND anything flagged always_surface at
+     * the tenant level (a fact meant to apply everywhere, not just
+     * email — e.g. a standing policy the owner wants the agent to never
+     * lose track of). Passing customerEmail: null to fetchPinnedContext
+     * means it only returns tenant-scope always_surface rows, never a
+     * specific customer's consequential slots — correct here, since chat
+     * is the owner talking about arbitrary customers, not a single
+     * customer thread. Per-customer memory is reached instead via
+     * search_context (available on this surface via getToolsForSurface,
+     * capability "memory" is baseline), which the owner-chat agent calls
+     * when asked about a specific customer.
+     *
+     * NOTE: an earlier version of this wiring called fetchPinnedContext
+     * but only read .instructionNotes back out, silently dropping
+     * .pinnedMemories — meaning a tenant-wide pin applied to email but
+     * not to chat, which wasn't a deliberate scope decision, just a
+     * missed render step. Fixed by rendering both here.
      */
-    const ownerInstructionNotes = await fetchPinnedContext(tenantId, null);
-    const activeInstructionNotesText = ownerInstructionNotes.instructionNotes
+    const ownerPinnedContext = await fetchPinnedContext(tenantId, null);
+    const activeInstructionNotesText = ownerPinnedContext.instructionNotes
       .map((note) => `- ${note.content}`)
       .join("\n");
+    const pinnedMemoriesText = renderPinnedContext(ownerPinnedContext);
 
     const messages: LlmMessage[] = [
       {
@@ -461,6 +470,9 @@ export async function handleChatMessage(
           agentConfig?.custom_instructions ?? "",
           activeInstructionNotesText
             ? `Standing instructions the owner has given you in past conversations, which still apply:\n${activeInstructionNotesText}`
+            : "",
+          pinnedMemoriesText
+            ? `Business-wide facts that always apply, not specific to any one customer:\n${pinnedMemoriesText}`
             : "",
           "You have a search_context tool: it looks up this business's stored knowledge and a specific customer's memory (past preferences, prior issues, stated facts). Use it whenever the owner asks about a specific customer by name or email, or asks something that depends on business knowledge you haven't already been given — pass that customer's email in the customerEmail argument when you have it.",
           `There are currently ${pendingEmailCount ?? 0} email drafts awaiting the owner's review.`,

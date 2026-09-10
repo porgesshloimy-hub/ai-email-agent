@@ -22,6 +22,7 @@ import { deleteCalendarEventTool } from "./delete-calendar-event";
 import { checkPendingApprovalsTool } from "./check-pending-approvals";
 import { requestAdditionalCapabilityTool } from "./request-additional-capability";
 import { noActionRequiredTool } from "./no-action-required";
+import { searchContextTool } from "./search-context";
 
 import type { ToolContext, ToolDefinition, ToolSurface } from "./types";
 
@@ -57,6 +58,7 @@ export const ALL_TOOLS: ToolDefinition[] = [
   checkPendingApprovalsTool,
   requestAdditionalCapabilityTool,
   noActionRequiredTool,
+  searchContextTool,
 ];
 
 /**

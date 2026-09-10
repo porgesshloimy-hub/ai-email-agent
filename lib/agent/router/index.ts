@@ -122,7 +122,10 @@ export async function selectRelevantCapabilities(input: {
 export function deriveAvailableCapabilities(
   permissions: ToolPermissions
 ): CapabilityKey[] {
-  const capabilities: CapabilityKey[] = [CAPABILITY.GMAIL];
+  // "memory" (search_context) has no permission gate — see
+  // lib/agent/router/types.ts's BASELINE_CAPABILITIES comment — so it's
+  // unconditionally available, same as "gmail".
+  const capabilities: CapabilityKey[] = [CAPABILITY.GMAIL, CAPABILITY.MEMORY];
 
   /**
    * "calendar" covers both the write tools (create/propose_calendar_event)

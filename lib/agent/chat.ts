@@ -30,6 +30,7 @@ import {
 } from "@/lib/agent/personas/apply-overrides";
 import { persistChatMessage, linkPendingConfirmationToMessage } from "@/lib/agent/chat-history/persist";
 import { fetchChatHistoryTurns, stripLeakedTimestampPrefix, stripAllLeakedTimestamps } from "@/lib/agent/chat-history/build-context";
+import { fetchPinnedContext } from "@/lib/agent/memory/pinned";
 
 /**
  * Handles a single message from the business owner via Google Chat. This is
@@ -403,6 +404,23 @@ export async function handleChatMessage(
     // time-cutoff rules.
     const historyTurns = await fetchChatHistoryTurns(tenantId, tenant?.timezone);
 
+    /**
+     * Active owner instruction notes (agent_instruction_notes) — the
+     * chat surface is where these get authored (Phase 2.6, a later
+     * build pass) but they should apply here too the moment they exist,
+     * same as the email surface (see run.ts). No per-customer pinned
+     * memory here — chat is the owner talking about arbitrary customers,
+     * not a single customer thread, so there's no one customerEmail to
+     * scope a pinned-slots fetch to; search_context (available on this
+     * surface via getToolsForSurface, capability "memory" is baseline)
+     * is how the owner-chat agent looks up a specific customer's memory
+     * when asked about one.
+     */
+    const ownerInstructionNotes = await fetchPinnedContext(tenantId, null);
+    const activeInstructionNotesText = ownerInstructionNotes.instructionNotes
+      .map((note) => `- ${note.content}`)
+      .join("\n");
+
     const messages: LlmMessage[] = [
       {
         role: "system",
@@ -441,6 +459,10 @@ export async function handleChatMessage(
           buildCurrentDateContext(tenant?.timezone),
           tenant?.business_description ?? "",
           agentConfig?.custom_instructions ?? "",
+          activeInstructionNotesText
+            ? `Standing instructions the owner has given you in past conversations, which still apply:\n${activeInstructionNotesText}`
+            : "",
+          "You have a search_context tool: it looks up this business's stored knowledge and a specific customer's memory (past preferences, prior issues, stated facts). Use it whenever the owner asks about a specific customer by name or email, or asks something that depends on business knowledge you haven't already been given — pass that customer's email in the customerEmail argument when you have it.",
           `There are currently ${pendingEmailCount ?? 0} email drafts awaiting the owner's review.`,
           gmailReadAllowed
             ? "You can also check the actual inbox directly — use check_recent_emails if asked about incoming/recent emails, unread messages, or what's come in. Don't assume you only know about drafts; you have real read access to the inbox. Note that check_recent_emails only returns a short snippet for each message, not its real content — if asked what a specific email actually says, or for any detail beyond subject/sender/date, call read_email_content with that message's real id to get the full text. Never describe an email's content based on the snippet alone."

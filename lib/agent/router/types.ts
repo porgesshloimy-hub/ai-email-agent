@@ -31,6 +31,7 @@ export const CAPABILITY = {
   GMAIL: "gmail",
   CALENDAR: "calendar",
   ZOOM: "zoom",
+  MEMORY: "memory",
 } as const;
 
 /**
@@ -41,8 +42,18 @@ export const CAPABILITY = {
  * needs the ability to at least draft or send a reply, and pruning that
  * would mean an email that "needs no reply" also can't be routed to a
  * human via create_draft.
+ *
+ * "memory" (search_context) is baseline for a different reason: it's a
+ * read-only, tenant/customer-scoped lookup with no permission gate at
+ * all (see lib/agent/tools/search-context.ts's isAvailable), so there's
+ * nothing for the router to usefully narrow — withholding it from a
+ * "routine" email would only ever cost the agent context it's already
+ * allowed to have.
  */
-export const BASELINE_CAPABILITIES: CapabilityKey[] = [CAPABILITY.GMAIL];
+export const BASELINE_CAPABILITIES: CapabilityKey[] = [
+  CAPABILITY.GMAIL,
+  CAPABILITY.MEMORY,
+];
 
 export type HeuristicVerdict = "relevant" | "irrelevant" | "ambiguous";
 

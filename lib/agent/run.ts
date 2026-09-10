@@ -45,6 +45,15 @@ import {
   narrowReadCapability,
 } from "@/lib/agent/personas/apply-overrides";
 import OpenAI from "openai";
+import { extractEmailAddress } from "@/lib/agent/memory/util";
+import {
+  fetchPinnedContext,
+  renderPinnedContext,
+  fetchMemoryExistenceSignal,
+  renderExistenceSignal,
+} from "@/lib/agent/memory/pinned";
+import { shouldExtractMemory } from "@/lib/agent/memory/eligibility";
+import { runMemoryExtraction } from "@/lib/agent/memory/extractor";
 
 /**
  * Maximum number of model round trips (tool call -> tool result ->
@@ -183,6 +192,12 @@ export async function processIncomingEmail(
 
       gmail_message_id:
         email.messageId,
+
+      // Added for lib/agent/memory/eligibility.ts's cross-thread "has
+      // this sender emailed before" check (migration 018) — previously
+      // email_actions carried no sender/customer column at all.
+      customer_email:
+        extractEmailAddress(email.from),
 
       action_type:
         "processing",
@@ -420,6 +435,35 @@ export async function processIncomingEmail(
 
     /**
      * --------------------------------------------------------
+     * PINNED MEMORY CONTEXT (Tier 1 — see lib/agent/memory/pinned.ts)
+     * --------------------------------------------------------
+     *
+     * Supersedes the original plan's "auto-inject top 3 tenant + top 5
+     * customer memories on every email" design — see the project's
+     * memory-system build plan, section 0.1. Only a small, deterministic
+     * set rides along here (consequential slots, explicitly pinned
+     * memories, active owner instruction notes); everything else is
+     * reached via the agent-invoked search_context tool
+     * (lib/agent/tools/search-context.ts), nudged by the existence
+     * signal below rather than dumped into every prompt.
+     */
+
+    const customerEmail = extractEmailAddress(email.from);
+
+    const [pinnedContext, memoryExistenceSignal] = await Promise.all([
+      fetchPinnedContext(email.tenantId, customerEmail),
+      fetchMemoryExistenceSignal(email.tenantId, customerEmail),
+    ]);
+
+    const pinnedContextText = renderPinnedContext(pinnedContext);
+    const memoryExistenceSignalText = renderExistenceSignal(memoryExistenceSignal);
+
+    const activeInstructionNotesText = pinnedContext.instructionNotes
+      .map((note) => `- ${note.content}`)
+      .join("\n");
+
+    /**
+     * --------------------------------------------------------
      * TOOL PERMISSIONS
      * --------------------------------------------------------
      *
@@ -607,7 +651,14 @@ export async function processIncomingEmail(
            */
           "<custom_instructions>",
           agentConfig?.custom_instructions ?? "",
+          activeInstructionNotesText,
           "</custom_instructions>",
+
+          "<pinned_context>",
+          "Durable facts about this specific customer that always apply — consequential details (shipping address, phone number, etc.) are marked unconfirmed if they still need confirming before being used in an action. Do not confuse an unconfirmed detail with an unverified guess: it was actually stated, it just hasn't been confirmed as still-current for use in a real action yet.",
+          pinnedContextText,
+          memoryExistenceSignalText,
+          "</pinned_context>",
 
           "<business_rules>",
           "Rules you must follow:",
@@ -665,7 +716,9 @@ export async function processIncomingEmail(
           "</action_rules>",
 
           "<safety_rules>",
-          "Use business knowledge whenever relevant. Only use information explicitly provided in the business knowledge, business rules, custom instructions, or the email itself — never invent policies, prices, discounts, refunds, availability, procedures, commitments, promises, approvals, or other business facts.",
+          "Use business knowledge whenever relevant. Only use information explicitly provided in the business knowledge, business rules, custom instructions, pinned context, search_context results, or the email itself — never invent policies, prices, discounts, refunds, availability, procedures, commitments, promises, approvals, or other business facts.",
+
+          "The pinned context above is only a small, always-present subset of what's known about this customer and this business. If the pinned context and the existence signal don't already answer something this reply depends on — a past preference, a prior issue, a specific policy — call search_context before answering rather than guessing or asking the customer to repeat information they may have already given.",
           "Never commit or discuss commitments on behalf of the business owner. This includes discussing such topics in emails that you only draft and don't send.",
           "Never describe a business action — a meeting created, a calendar event booked, a document shared, anything else a tool would need to perform — as already done, confirmed, or booked unless the corresponding tool actually succeeded earlier in this same run. A tool being available to you is not the same as it having been used. If you have not actually called and received a successful result from the tool that performs an action, do not write as if it happened; use propose_* so a human can confirm it, or omit the claim.",
           "Never assume the business wants something done merely because the customer asked for it, and never claim the business approved, promised, offered, refunded, canceled, scheduled, or agreed to something unless that's explicitly documented. Don't make decisions on behalf of the business unless business rules explicitly authorize it.",
@@ -732,6 +785,15 @@ export async function processIncomingEmail(
      * a ledger check rather than a per-connector keyword list.
      */
     const completedCapabilities = new Set<string>();
+
+    /**
+     * Captures the reply body once send_reply/create_draft actually
+     * executes, so the post-send memory extraction hook (below the main
+     * loop) has the full exchange — not just the inbound half — to
+     * extract from. Null if the run ends via no_action_required or a
+     * propose-calendar/zoom tool with no reply body.
+     */
+    let agentReplyTextForMemory: string | null = null;
 
     /**
      * --------------------------------------------------------
@@ -1087,6 +1149,14 @@ export async function processIncomingEmail(
                 terminalActionTaken = true;
               }
 
+              if (
+                (toolName === "send_reply" || toolName === "create_draft") &&
+                typeof args.body === "string" &&
+                args.body.trim()
+              ) {
+                agentReplyTextForMemory = args.body;
+              }
+
               if (toolDef.createsApproval) {
                 approvalCreated = true;
               }
@@ -1298,6 +1368,62 @@ export async function processIncomingEmail(
       throw new Error(
         "Agent reached maximum tool steps without completing the requested action"
       );
+    }
+
+    /**
+     * --------------------------------------------------------
+     * MEMORY EXTRACTION (fire-and-forget, post-send)
+     * --------------------------------------------------------
+     *
+     * Per Phase 2.3/2.2/6.3 of the memory-system build plan: gated on
+     * shouldExtractMemory (2nd contact from this sender, OR a real
+     * capability completed this run — e.g. a calendar event/Zoom meeting
+     * actually got created on a first contact).
+     *
+     * DELIBERATELY AWAITED, not truly fire-and-forget, despite the
+     * original plan's "fire-and-forget (doesn't block response)"
+     * phrasing: "the response" there means the customer-facing send,
+     * which already happened earlier in this function (via the
+     * send_reply/create_draft tool call above) — by this point there's
+     * nothing left to delay for the customer. processIncomingEmail
+     * itself runs inside an Inngest `step.run()` (see
+     * lib/inngest/functions.ts), which only considers the step complete
+     * once the promise it wraps resolves; an actually-unawaited
+     * `void (async () => {...})()` here would race the serverless
+     * instance being reclaimed right after this function returns against
+     * the extraction's own network calls finishing, silently dropping
+     * extractions under exactly the deployment model (Vercel) this repo
+     * documents. Awaiting keeps it correct there. Still wrapped in its
+     * own try/catch (redundant with the module's internal fail-open, but
+     * cheap insurance) so a truly unexpected throw here can never turn a
+     * successful send into a failed run.
+     */
+
+    try {
+      const eligibleForMemoryExtraction = await shouldExtractMemory(
+        email.tenantId,
+        customerEmail,
+        { completedCapabilityThisRun: completedCapabilities.size > 0 }
+      );
+
+      if (eligibleForMemoryExtraction) {
+        await runMemoryExtraction({
+          tenantId: email.tenantId,
+          customerEmail,
+          sourceThreadId: email.threadId,
+          emailSubject: email.subject,
+          emailBody: email.bodyText,
+          agentReplyText: agentReplyTextForMemory,
+        });
+      }
+    } catch (error) {
+      // Note: this is NOT a `return` here — a failed/ineligible
+      // extraction must fall through to the normal FINAL RESULT return
+      // below, not exit the function early.
+      console.error("MEMORY EXTRACTION HOOK failed:", error, {
+        tenantId: email.tenantId,
+        emailActionId,
+      });
     }
 
     /**

@@ -504,6 +504,28 @@ export async function handleChatMessage(
             ? `Business-wide facts that always apply, not specific to any one customer:\n${pinnedMemoriesText}`
             : "",
           "You have a search_context tool: it looks up this business's stored knowledge and a specific customer's memory (past preferences, prior issues, stated facts). Use it whenever the owner asks about a specific customer by name or email, or asks something that depends on business knowledge you haven't already been given — pass that customer's email in the customerEmail argument when you have it.",
+          /**
+           * Found in production: asked "are you sure you don't have the
+           * ability to remember things to do later," the model said no
+           * and explained (incorrectly) that it only exists within a
+           * single chat conversation with no way to reach the owner
+           * later. Root cause: reminders and scheduled actions are both
+           * real, working features (see parseOwnerMessage, called
+           * earlier in this same function, before this system prompt is
+           * even built) — but they're handled structurally, outside the
+           * normal tool-calling loop, so nothing in THIS prompt ever
+           * told the model they exist. A direct "remind me tomorrow to
+           * X" is intercepted and handled correctly regardless of this
+           * line; the gap was purely that a META question about the
+           * capability ("can you do X," "are you sure you can't do X")
+           * doesn't match that interception and falls through to here,
+           * where the model had zero information to answer from and
+           * defaulted to a plausible-sounding but false denial. This is
+           * the same class of bug as the "confidence" fix elsewhere in
+           * this codebase: never let the model deny a real capability
+           * out of simple ignorance that it exists.
+           */
+          "You CAN hold onto something to bring up later and you CAN schedule sending an email for a future time — these are real, working features, not things you lack. If the owner directly asks you to remind them of something later (e.g. \"remind me tomorrow morning to call the supplier\"), or to send an email at a future time (e.g. \"email Jane tomorrow at 9am to confirm\"), that request is understood and handled automatically — just confirm it back to them in your own words. If asked WHETHER you can do this, or whether you're sure you can't, say yes clearly and explain briefly how: they just tell you what to do and when, in plain language, the same way they'd ask you to do anything else in this chat. Never claim you only exist within one conversation with no way to follow up later — that is false.",
           `There are currently ${pendingEmailCount ?? 0} email drafts awaiting the owner's review.`,
           gmailReadAllowed
             ? "You can also check the actual inbox directly — use check_recent_emails if asked about incoming/recent emails, unread messages, or what's come in. Don't assume you only know about drafts; you have real read access to the inbox. Note that check_recent_emails only returns a short snippet for each message, not its real content — if asked what a specific email actually says, or for any detail beyond subject/sender/date, call read_email_content with that message's real id to get the full text. Never describe an email's content based on the snippet alone."

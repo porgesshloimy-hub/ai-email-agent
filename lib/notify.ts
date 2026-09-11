@@ -59,6 +59,43 @@ export async function notifyOwner(
 }
 
 /**
+ * Plain owner SMS send — no hardcoded "Review: .../dashboard/approvals"
+ * link appended (unlike notifyOwner, which is specifically for approval-
+ * adjacent notifications). Added for lib/agent/outreach/dispatcher.ts
+ * (Phase 5.2): a reminder or watch notification isn't about anything
+ * pending approval, so appending that link would be actively misleading.
+ * Returns whether the send actually happened (true) or was skipped
+ * because the tenant has no phone number on file, or failed outright
+ * (false either way) — the dispatcher uses this to decide whether to
+ * count the attempt or leave the item queued for a real retry.
+ */
+export async function sendOwnerMessage(
+  tenantId: string,
+  message: string
+): Promise<boolean> {
+  const supabase = createServiceSupabase();
+
+  const { data: tenant } = await supabase
+    .from("tenants")
+    .select("phone_number")
+    .eq("id", tenantId)
+    .single();
+
+  if (!tenant?.phone_number) {
+    console.error("SEND OWNER MESSAGE: no phone number on file, skipping:", { tenantId });
+    return false;
+  }
+
+  try {
+    await sendSms(tenantId, tenant.phone_number, message);
+    return true;
+  } catch (error) {
+    console.error("SEND OWNER MESSAGE: send failed:", error, { tenantId });
+    return false;
+  }
+}
+
+/**
  * Sends an SMS asking the owner to approve or
  * reject the most recent pending action.
  */

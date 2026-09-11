@@ -6,6 +6,7 @@ import {
   reconcilePendingDrafts,
   reconcileUsageReporting,
   processDelayedChatReply,
+  dispatchPendingOutreach,
 } from "@/lib/inngest/functions";
 
 export const { GET, POST, PUT } = serve({
@@ -16,5 +17,6 @@ export const { GET, POST, PUT } = serve({
     reconcilePendingDrafts,
     reconcileUsageReporting,
     processDelayedChatReply,
+    dispatchPendingOutreach,
   ],
 });

@@ -31,6 +31,7 @@ import {
 import { persistChatMessage, linkPendingConfirmationToMessage } from "@/lib/agent/chat-history/persist";
 import { fetchChatHistoryTurns, stripLeakedTimestampPrefix, stripAllLeakedTimestamps } from "@/lib/agent/chat-history/build-context";
 import { fetchPinnedContext, renderPinnedContext } from "@/lib/agent/memory/pinned";
+import { parseOwnerMessage } from "@/lib/agent/memory/owner-intent";
 
 /**
  * Handles a single message from the business owner via Google Chat. This is
@@ -270,6 +271,34 @@ export async function handleChatMessage(
       .select("business_name, business_description, timezone")
       .eq("id", tenantId)
       .single();
+
+    /**
+     * --------------------------------------------------------
+     * OWNER INTENT PARSING (Phase 2.6)
+     * --------------------------------------------------------
+     *
+     * Checked after the pending-confirmation resolution above (that
+     * still takes priority — a yes/no reply to something already awaiting
+     * confirmation should never get reclassified as a new instruction)
+     * and before the full persona/tool/system-prompt setup below, so a
+     * recognized instruction/pin/reminder/acknowledgment is handled
+     * deterministically without spending a full agent loop on it.
+     * Returns { handled: false } for anything that isn't one of those —
+     * including ordinary conversation and (currently) "watch" requests,
+     * which are classified but not yet actable (Phase 4) — and this
+     * function falls through to the normal pipeline below exactly as it
+     * did before this existed.
+     */
+    const ownerIntent = await parseOwnerMessage({
+      tenantId,
+      message: messageText,
+      timezone: tenant?.timezone ?? null,
+      sourceThreadId: repliedToMessageId,
+    });
+
+    if (ownerIntent.handled && ownerIntent.responseText) {
+      return ownerIntent.responseText;
+    }
 
     const { data: agentConfig } = await supabase
       .from("agent_configs")

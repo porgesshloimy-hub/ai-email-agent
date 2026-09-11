@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import twilio from "twilio";
 import { createServiceSupabase } from "@/lib/supabase/server";
 import { sendDraft } from "@/lib/gmail/client";
+import { checkAndResolveAcknowledgment } from "@/lib/agent/reminders/ack-detection";
 
 const twilioClient = twilio(
   process.env.TWILIO_ACCOUNT_SID,
@@ -12,9 +13,12 @@ export async function POST(request: NextRequest) {
   const formData = await request.formData();
 
   const from = String(formData.get("From") ?? "").trim();
-  const body = String(formData.get("Body") ?? "")
-    .trim()
-    .toUpperCase();
+  // Kept in original casing/punctuation for the reminder-acknowledgment
+  // check below (natural-language phrase matching, not an exact command
+  // comparison) — `body` (uppercased) below is still what every existing
+  // exact-command check compares against, unchanged.
+  const rawBody = String(formData.get("Body") ?? "").trim();
+  const body = rawBody.toUpperCase();
 
   if (!from) {
     return twimlResponse("Unable to identify your phone number.");
@@ -73,6 +77,22 @@ export async function POST(request: NextRequest) {
       tenant.id,
       body
     );
+  }
+
+  /*
+   * Reminder acknowledgment (Phase 3.3) — checked only after none of the
+   * exact commands above matched, so "APPROVE"/"DENY"/etc. keep taking
+   * priority over this. checkAndResolveAcknowledgment itself only acts
+   * when exactly one reminder is currently awaiting_ack for this tenant
+   * (see its own module comment for why it deliberately doesn't guess
+   * when more than one is pending) and fails closed on any error, so a
+   * false positive here can't silently clear a reminder that wasn't
+   * actually acknowledged.
+   */
+  const acknowledgedReminder = await checkAndResolveAcknowledgment(tenant.id, rawBody);
+
+  if (acknowledgedReminder) {
+    return twimlResponse(`Got it — cleared that reminder: "${acknowledgedReminder.content}"`);
   }
 
   return twimlResponse(

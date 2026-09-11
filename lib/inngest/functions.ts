@@ -9,6 +9,9 @@ import { processIncomingEmail } from "@/lib/agent/run";
 import { reconcileUnreportedUsage } from "@/lib/billing/meter";
 import { handleChatMessage } from "@/lib/agent/chat";
 import { channelSupportsTypingTracking } from "@/lib/agent/chat-pacing";
+import { enqueueDueReminders } from "@/lib/agent/reminders/dispatch";
+import { dispatchAllPendingOutreach } from "@/lib/agent/outreach/dispatcher";
+import { runDueScheduledActions } from "@/lib/agent/scheduled-actions/dispatch";
 
 /**
  * Fires on every Gmail push notification.
@@ -1052,5 +1055,57 @@ export const processDelayedChatReply = inngest.createFunction(
     });
 
     return { processed: true, batchSize: batch.rows.length };
+  }
+);
+
+/**
+ * Phase 6.1 (partial) of the memory-system build plan — the scheduled
+ * half of proactive outreach. Every run: queue whatever reminders are
+ * due (lib/agent/reminders/dispatch.ts), then send whatever's queued,
+ * across every tenant with something waiting (lib/agent/outreach/
+ * dispatcher.ts). Both steps are idempotent/safe to re-run (queueing
+ * checks for an existing queue row first; sending removes the queue row
+ * it just handled), so a missed or doubled-up cron tick self-corrects
+ * rather than double-sending.
+ *
+ * Every 15 minutes rather than reconcile-pending-drafts' 10 — reminders
+ * are owner-facing proactive contact, not a correctness-critical
+ * reconciliation, so a slightly coarser cadence is the right trade
+ * against needless invocations.
+ *
+ * NOTE: this drives reminders AND scheduled actions (see the third step
+ * below, added Phase 6.2). Watches and self-observation suggestions
+ * (later phases) will enqueue into the same agent_outreach_queue once
+ * built, and this same job picks them up automatically via
+ * dispatchAllPendingOutreach's item_type dispatch — no changes needed
+ * here when those phases land.
+ */
+export const dispatchPendingOutreach = inngest.createFunction(
+  {
+    id: "dispatch-pending-outreach",
+  },
+
+  {
+    cron: "*/15 * * * *",
+  },
+
+  async ({ step }) => {
+    const enqueueResult = await step.run("enqueue-due-reminders", async () => {
+      return enqueueDueReminders();
+    });
+
+    const dispatchResult = await step.run("dispatch-queued-outreach", async () => {
+      return dispatchAllPendingOutreach();
+    });
+
+    // Phase 6.2 — a separate step, not an outreach_queue item type: a
+    // due scheduled action isn't a notification to enqueue for delivery,
+    // it's a real action (send/draft an email) that must execute on its
+    // own. See lib/agent/scheduled-actions/dispatch.ts.
+    const scheduledActionsResult = await step.run("run-due-scheduled-actions", async () => {
+      return runDueScheduledActions();
+    });
+
+    return { enqueueResult, dispatchResult, scheduledActionsResult };
   }
 );

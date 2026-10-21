@@ -526,6 +526,19 @@ export async function handleChatMessage(
            * out of simple ignorance that it exists.
            */
           "You CAN hold onto something to bring up later and you CAN schedule sending an email for a future time — these are real, working features, not things you lack. If the owner directly asks you to remind them of something later (e.g. \"remind me tomorrow morning to call the supplier\"), or to send an email at a future time (e.g. \"email Jane tomorrow at 9am to confirm\"), that request is understood and handled automatically — just confirm it back to them in your own words. If asked WHETHER you can do this, or whether you're sure you can't, say yes clearly and explain briefly how: they just tell you what to do and when, in plain language, the same way they'd ask you to do anything else in this chat. Never claim you only exist within one conversation with no way to follow up later — that is false.",
+          /**
+           * SMS is now a real owner-chat transport (app/api/twilio/
+           * incoming). Over text the owner is typically away from a
+           * computer and has no email or web on their phone, so this
+           * line does two jobs: keep replies SMS-sized, and make sure
+           * the model never tells them to "check your email" or "open
+           * the dashboard" — they can't. Same lesson as the capability
+           * line above: a channel's constraints must be stated in the
+           * prompt, not assumed.
+           */
+          channel === "sms"
+            ? "This conversation is happening over SMS. The owner is away from their computer and has NO email or web access on their phone — never tell them to check their email, open a link, or use the dashboard; give them the information itself, in the text. Keep replies short (a few sentences — long texts are costly and hard to read on a phone), plain text only with no markdown, and write everything as ONE message with no paragraph breaks unless truly needed. If you can't do something, say so briefly and offer the closest thing you can do."
+            : "",
           `There are currently ${pendingEmailCount ?? 0} email drafts awaiting the owner's review.`,
           gmailReadAllowed
             ? "You can also check the actual inbox directly — use check_recent_emails if asked about incoming/recent emails, unread messages, or what's come in. Don't assume you only know about drafts; you have real read access to the inbox. Note that check_recent_emails only returns a short snippet for each message, not its real content — if asked what a specific email actually says, or for any detail beyond subject/sender/date, call read_email_content with that message's real id to get the full text. Never describe an email's content based on the snippet alone."

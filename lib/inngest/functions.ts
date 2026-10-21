@@ -8,6 +8,8 @@ import {
 import { processIncomingEmail } from "@/lib/agent/run";
 import { reconcileUnreportedUsage } from "@/lib/billing/meter";
 import { handleChatMessage } from "@/lib/agent/chat";
+import { sendSmsToNumber } from "@/lib/notify";
+import { isTwilioConfigured } from "@/lib/sms/twilio";
 import { channelSupportsTypingTracking } from "@/lib/agent/chat-pacing";
 import { enqueueDueReminders } from "@/lib/agent/reminders/dispatch";
 import { dispatchAllPendingOutreach } from "@/lib/agent/outreach/dispatcher";
@@ -806,11 +808,20 @@ export const processDelayedChatReply = inngest.createFunction(
   },
 
   async ({ event, step }) => {
-    const { tenantId, ownerMessageId, ownerMessageCreatedAt, channel } = event.data as {
+    const { tenantId, ownerMessageId, ownerMessageCreatedAt, channel, replyToPhone } = event.data as {
       tenantId: string;
       ownerMessageId: string;
       ownerMessageCreatedAt: string;
       channel: string;
+      /**
+       * Only set for channel "sms": the exact number the owner texted
+       * from (they can have more than one authorized phone), so the
+       * answer goes back to that phone rather than always the primary.
+       * Set only by app/api/twilio/incoming/route.ts after it has
+       * validated Twilio's signature and matched the number to this
+       * tenant.
+       */
+      replyToPhone?: string;
     };
 
     /**
@@ -978,7 +989,7 @@ export const processDelayedChatReply = inngest.createFunction(
             )
             .join("\n\n");
 
-    await step.run("generate-and-persist-reply", async () => {
+    const reply = await step.run("generate-and-persist-reply", async () => {
       /**
        * chat_agent_replying (migration 017) IS toggled for the real
        * reply too, but not here — it's owned by lib/agent/chat.ts's
@@ -988,7 +999,7 @@ export const processDelayedChatReply = inngest.createFunction(
        * calls into that function and marks the batch processed
        * afterward.
        */
-      await handleChatMessage(tenantId, combinedText, {
+      const result = await handleChatMessage(tenantId, combinedText, {
         channel,
         skipPersistingOwnerMessage: true,
       });
@@ -1006,7 +1017,70 @@ export const processDelayedChatReply = inngest.createFunction(
       if (error) {
         throw new Error(`Failed to mark batch as processed: ${error.message}`);
       }
+
+      return { text: String(result.text ?? "") };
     });
+
+    /**
+     * SMS delivery — its own step on purpose. The reply is already
+     * generated, persisted (the dashboard shows it regardless), and the
+     * batch marked processed by the step above; if the text itself
+     * fails to send, Inngest retries ONLY this step. Keeping it inside
+     * the step above would re-run the whole LLM turn (a second cost,
+     * and a duplicate persisted reply) just to retry a send.
+     *
+     * The agent's reply was written for a chat window and may be split
+     * into several short paragraphs; over SMS that is one message —
+     * several rapid texts arrive out of order often enough to be
+     * confusing, and cost more.
+     */
+    if (channel === "sms" && reply.text.trim()) {
+      await step.run("deliver-sms-reply", async () => {
+        const supabase = createServiceSupabase();
+
+        let destination = replyToPhone ?? null;
+
+        if (!destination) {
+          const { data: tenantRow } = await supabase
+            .from("tenants")
+            .select("phone_number")
+            .eq("id", tenantId)
+            .single();
+
+          destination = tenantRow?.phone_number ?? null;
+        }
+
+        if (!destination) {
+          console.error("DELAYED CHAT REPLY: sms reply has no destination number, not sent:", {
+            tenantId,
+          });
+          return { sent: false };
+        }
+
+        if (!isTwilioConfigured()) {
+          // Not retried (it can't succeed until credentials exist) —
+          // the reply is still in the dashboard transcript.
+          console.error("DELAYED CHAT REPLY: Twilio not configured, sms reply not sent:", {
+            tenantId,
+          });
+          return { sent: false };
+        }
+
+        const sent = await sendSmsToNumber(
+          tenantId,
+          destination,
+          reply.text,
+          "Owner chat reply SMS"
+        );
+
+        if (!sent) {
+          // Throw so Inngest retries just this step.
+          throw new Error("SMS reply send failed");
+        }
+
+        return { sent: true };
+      });
+    }
 
     /**
      * Occasional "changed their mind mid-typing" simulation, per

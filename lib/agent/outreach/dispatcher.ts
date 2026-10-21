@@ -1,5 +1,6 @@
 import { createServiceSupabase } from "@/lib/supabase/server";
 import { sendOwnerMessage } from "@/lib/notify";
+import { isTwilioConfigured } from "@/lib/sms/twilio";
 import { persistChatMessage } from "@/lib/agent/chat-history/persist";
 
 /**
@@ -228,20 +229,29 @@ export async function notifyTenant(
 ): Promise<boolean> {
   const preferSms = tenant.proactive_contact_channel === "sms";
 
-  if (preferSms && tenant.phone_number) {
+  // SMS is only genuinely usable when it's preferred AND Twilio is
+  // really configured in this deployment AND a number is on file. A
+  // phone number alone is not enough: a tenant can have one (reused
+  // from the approval-SMS flow) while Twilio's credentials were never
+  // set, in which case every attempt fails at the API and the item
+  // retries forever without ever reaching the owner.
+  if (preferSms && tenant.phone_number && isTwilioConfigured()) {
     const sent = await sendOwnerMessage(tenantId, message);
     if (sent) return true;
-    // A real SMS attempt actually failed (Twilio error, etc.) — leave
-    // this as a failure rather than silently rerouting to the widget,
-    // so the caller's normal retry/backoff logic applies. A tenant with
-    // no phone_number at all (the common case right now) never reaches
-    // this branch — see the fallback below.
+    // A real SMS attempt failed (carrier/Twilio error) — leave it as a
+    // failure so the caller's normal retry/backoff applies, rather than
+    // silently rerouting.
     return false;
   }
 
   if (preferSms && !tenant.phone_number) {
     console.log(
       "NOTIFY TENANT: preferred channel is sms but no phone_number is on file — falling back to the dashboard chat widget:",
+      { tenantId }
+    );
+  } else if (preferSms && !isTwilioConfigured()) {
+    console.error(
+      "NOTIFY TENANT: preferred channel is sms but Twilio is not configured in this deployment — falling back to the dashboard chat widget:",
       { tenantId }
     );
   } else if (tenant.proactive_contact_channel && tenant.proactive_contact_channel !== "sms") {

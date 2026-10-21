@@ -1,6 +1,6 @@
 import { createServerSupabase } from "@/lib/supabase/server";
 import { INTEGRATIONS } from "@/lib/integrations/config";
-import { disconnectGoogle, disconnectZoom, saveTimezone } from "./actions";
+import { disconnectGoogle, disconnectZoom, saveTimezone, savePhoneNumbers } from "./actions";
 import { COMMON_TIMEZONES } from "@/lib/timezones";
 import {
   Badge,
@@ -179,6 +179,48 @@ export default async function SettingsPage() {
                 </dd>
               </div>
             </dl>
+          </Panel>
+        </BentoItem>
+
+        <BentoItem span="md">
+          <Panel padding="lg">
+            <PanelTitle>Text messages</PanelTitle>
+            <p className="text-sm leading-relaxed text-muted">
+              Phones allowed to text your agent. The first number is where the agent reaches
+              you (reminders, results of scheduled actions, approval requests); a message from
+              either number is treated as coming from you, and the agent replies to whichever
+              phone texted. Anyone else who texts the agent&apos;s number is ignored.
+            </p>
+
+            <form action={savePhoneNumbers} className="mt-5 space-y-4">
+              <div>
+                <Label htmlFor="primaryPhone">Your phone</Label>
+                <Input
+                  id="primaryPhone"
+                  name="primaryPhone"
+                  type="tel"
+                  placeholder="(555) 123-4567"
+                  defaultValue={tenant?.phone_number ?? ""}
+                />
+              </div>
+
+              <div>
+                <Label htmlFor="additionalPhone">Second phone (optional)</Label>
+                <Input
+                  id="additionalPhone"
+                  name="additionalPhone"
+                  type="tel"
+                  placeholder="(555) 987-6543"
+                  defaultValue={tenant?.additional_phone_numbers?.[0] ?? ""}
+                />
+              </div>
+
+              <div className="flex justify-end">
+                <Button type="submit" size="sm">
+                  Save phone numbers
+                </Button>
+              </div>
+            </form>
           </Panel>
         </BentoItem>
 

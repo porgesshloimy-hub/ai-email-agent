@@ -3,54 +3,108 @@ import twilio from "twilio";
 import { createServiceSupabase } from "@/lib/supabase/server";
 import { sendDraft } from "@/lib/gmail/client";
 import { checkAndResolveAcknowledgment } from "@/lib/agent/reminders/ack-detection";
+import { persistChatMessage } from "@/lib/agent/chat-history/persist";
+import { inngest } from "@/lib/inngest/client";
+import { recordUsage } from "@/lib/billing/meter";
+import { calculateSmsCost } from "@/lib/billing/pricing";
+import {
+  isValidTwilioRequest,
+  normalizePhoneNumber,
+} from "@/lib/sms/twilio";
 
-const twilioClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
+/**
+ * Longest inbound text accepted. SMS itself caps well below this once
+ * concatenated; the limit just keeps one oversized or malicious POST
+ * from becoming an oversized LLM prompt.
+ */
+const MAX_INBOUND_CHARS = 1600;
 
 export async function POST(request: NextRequest) {
   const formData = await request.formData();
 
-  const from = String(formData.get("From") ?? "").trim();
+  /**
+   * Twilio signs the exact set of form fields it sent, so validation
+   * needs all of them as plain strings. Done BEFORE anything reads
+   * `From`: without this check, anyone who knew this URL could POST a
+   * forged `From` equal to the owner's number and run APPROVE/DENY or
+   * talk to the agent as the owner. Fails closed (see
+   * isValidTwilioRequest).
+   */
+  const params: Record<string, string> = {};
+  formData.forEach((value, key) => {
+    if (typeof value === "string") params[key] = value;
+  });
+
+  if (
+    !isValidTwilioRequest(request.headers.get("x-twilio-signature"), params)
+  ) {
+    console.error("TWILIO INBOUND: invalid or missing signature, rejected");
+    return new NextResponse("Forbidden", { status: 403 });
+  }
+
+  const rawFrom = String(params.From ?? "").trim();
+  const from = normalizePhoneNumber(rawFrom) ?? rawFrom;
+
   // Kept in original casing/punctuation for the reminder-acknowledgment
-  // check below (natural-language phrase matching, not an exact command
-  // comparison) — `body` (uppercased) below is still what every existing
-  // exact-command check compares against, unchanged.
-  const rawBody = String(formData.get("Body") ?? "").trim();
+  // check and for the agent (natural language, not an exact command
+  // comparison) — `body` (uppercased) below is still what every exact
+  // command check compares against, unchanged.
+  const rawBody = String(params.Body ?? "")
+    .trim()
+    .slice(0, MAX_INBOUND_CHARS);
   const body = rawBody.toUpperCase();
 
   if (!from) {
-    return twimlResponse("Unable to identify your phone number.");
+    return emptyTwimlResponse();
   }
 
-  if (!body) {
-    return twimlResponse(
-      "Reply APPROVE or DENY to handle your pending approval."
-    );
-  }
+  /**
+   * An owner can have more than one authorized phone: the primary
+   * (tenants.phone_number) or any entry in
+   * tenants.additional_phone_numbers (migration 022).
+   */
+  const tenantId = await findTenantIdByPhone(from);
 
-  const supabase = createServiceSupabase();
-
-  // Find the tenant belonging to this phone number.
-  const { data: tenant, error: tenantError } = await supabase
-    .from("tenants")
-    .select("id")
-    .eq("phone_number", from)
-    .maybeSingle();
-
-  if (tenantError) {
-    console.error("Tenant lookup failed:", tenantError);
+  if (tenantId === "error") {
     return twimlResponse(
       "There was a problem processing your request. Please try again."
     );
   }
 
-  if (!tenant) {
+  if (!tenantId) {
+    // Deliberately NO reply to an unrecognized number. Answering every
+    // stranger who texts this number costs money per message and lets
+    // anyone use it as an SMS amplifier; silence is the safe default.
+    console.log("TWILIO INBOUND: message from an unrecognized number, ignored");
+    return emptyTwimlResponse();
+  }
+
+  // Inbound texts cost real money on Twilio's side; meter them like the
+  // outbound ones. Never blocks handling the message.
+  try {
+    const inboundSegments = Math.max(1, Number(params.NumSegments ?? "1") || 1);
+
+    await recordUsage({
+      tenantId,
+      service: "twilio_sms",
+      description: "Owner inbound SMS",
+      quantity: inboundSegments,
+      unit: "sms_segment",
+      rawCostUsd: calculateSmsCost(inboundSegments),
+    });
+  } catch (error) {
+    console.error("TWILIO INBOUND: failed to record inbound SMS usage:", error, {
+      tenantId,
+    });
+  }
+
+  if (!body) {
     return twimlResponse(
-      "This phone number is not connected to a Prime Automatic account."
+      "I can only read text messages right now — send me words and I'll take it from there."
     );
   }
+
+  const tenant = { id: tenantId };
 
   /*
    * APPROVE / DENY
@@ -95,9 +149,98 @@ export async function POST(request: NextRequest) {
     return twimlResponse(`Got it — cleared that reminder: "${acknowledgedReminder.content}"`);
   }
 
-  return twimlResponse(
-    "I didn't understand that. Reply APPROVE or DENY for your latest pending approval."
-  );
+  /*
+   * Everything else is a conversation with the agent. Previously this
+   * fell through to "I didn't understand that"; now SMS is simply
+   * another transport for the same owner chat the dashboard widget
+   * uses: persist the message, hand it to the same Inngest reply
+   * pipeline (channel "sms" has no typing signal, so it skips the wait
+   * phases and answers as fast as the backend can — see
+   * lib/agent/chat-pacing.ts), and let that pipeline text the answer
+   * back to `replyToPhone` (lib/inngest/functions.ts).
+   *
+   * The reply deliberately does NOT go back through this response:
+   * Twilio gives a webhook ~15 seconds, an LLM turn with tools can take
+   * longer, and a timeout would drop the answer. Returning an empty
+   * TwiML response now and sending via the REST API later avoids that.
+   */
+  const row = await persistChatMessage(tenant.id, "owner", rawBody, "sms");
+
+  if (!row) {
+    return twimlResponse("Sorry — I couldn't save that message. Please send it again.");
+  }
+
+  try {
+    await inngest.send({
+      name: "chat/owner-message.sent",
+      data: {
+        tenantId: tenant.id,
+        ownerMessageId: row.id,
+        ownerMessageCreatedAt: row.created_at,
+        channel: "sms",
+        replyToPhone: from,
+      },
+    });
+  } catch (error) {
+    console.error("TWILIO INBOUND: failed to queue agent reply:", error, {
+      tenantId: tenant.id,
+    });
+
+    return twimlResponse(
+      "I got your message but couldn't start working on it. Please try again in a minute."
+    );
+  }
+
+  return emptyTwimlResponse();
+}
+
+/**
+ * Looks up which tenant, if any, an inbound number belongs to — primary
+ * number first, then the additional authorized numbers. Returns
+ * "error" for a lookup failure so the caller can tell that apart from
+ * "no such number" (which must stay silent).
+ */
+async function findTenantIdByPhone(
+  phone: string
+): Promise<string | null | "error"> {
+  const supabase = createServiceSupabase();
+
+  const { data: primary, error: primaryError } = await supabase
+    .from("tenants")
+    .select("id")
+    .eq("phone_number", phone)
+    .maybeSingle();
+
+  if (primaryError) {
+    console.error("Tenant lookup failed:", primaryError);
+    return "error";
+  }
+
+  if (primary) return primary.id;
+
+  const { data: additional, error: additionalError } = await supabase
+    .from("tenants")
+    .select("id")
+    .contains("additional_phone_numbers", [phone])
+    .limit(1)
+    .maybeSingle();
+
+  if (additionalError) {
+    console.error("Tenant lookup (additional numbers) failed:", additionalError);
+    return "error";
+  }
+
+  return additional?.id ?? null;
+}
+
+/**
+ * A valid TwiML response that sends nothing back to the texter.
+ */
+function emptyTwimlResponse() {
+  return new NextResponse(new twilio.twiml.MessagingResponse().toString(), {
+    status: 200,
+    headers: { "Content-Type": "text/xml" },
+  });
 }
 
 /**

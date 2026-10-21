@@ -152,8 +152,9 @@ Gmail / Google Chat / Twilio SMS
 
 ## SMS
 
-- Twilio — inbound SMS currently supports a fixed APPROVE/DENY/permission-toggle command set
-  against pending approvals, not the full agent pipeline
+- Twilio — inbound SMS from the owner's authorized phone(s) is a full conversation with the
+  owner-chat agent (see "SMS (Twilio)" below), with the original APPROVE/DENY/permission-toggle
+  commands kept as exact-match fast paths
 
 ## Background Processing
 
@@ -948,8 +949,64 @@ chat-interface foundation above, which the memory system was always meant to sit
 
 # SMS (Twilio)
 
-`/api/twilio/incoming` currently understands a fixed APPROVE/DENY/permission-toggle command
-vocabulary against pending approvals — not the full agent pipeline.
+SMS is a real transport for the **owner chat** — the same agent the dashboard widget talks to —
+not a separate bot. Built for an owner who is away from a computer with no email or web on their
+phone.
+
+```
+Owner text ──► /api/twilio/incoming
+                 │  1. verify X-Twilio-Signature (403 if invalid — fails closed)
+                 │  2. match the sending number to a tenant
+                 │       (tenants.phone_number OR tenants.additional_phone_numbers)
+                 │       unknown number → silently ignored, no reply
+                 │  3. exact commands (APPROVE / DENY / ALLOW SEND / ...) → handled inline
+                 │  4. reminder acknowledgment ("ok", "thanks", ...) → clears the reminder
+                 │  5. anything else → persisted to owner_chat_messages (channel "sms")
+                 │       and sent to Inngest "chat/owner-message.sent"
+                 ▼
+         processDelayedChatReply (same function the web widget uses)
+                 │  no typing signal on SMS → skips the wait phases, still debounces
+                 │  rapid-fire messages into one reply
+                 ▼
+         handleChatMessage(channel "sms") ──► reply persisted (dashboard shows it too)
+                 ▼
+         "deliver-sms-reply" step ──► one SMS to the number that texted
+```
+
+Design notes worth keeping:
+
+- **Signature validation is mandatory.** The route previously trusted whatever `From` was POSTed
+  to it, so anyone who knew the URL could impersonate the owner's phone. `lib/sms/twilio.ts`'s
+  `isValidTwilioRequest()` now verifies Twilio's signature against `TWILIO_AUTH_TOKEN` and the
+  configured public URL (`NEXT_PUBLIC_APP_URL` + `/api/twilio/incoming`, or `TWILIO_WEBHOOK_URL`
+  to override). The only bypass, `TWILIO_SKIP_SIGNATURE_VALIDATION=true`, is ignored in production.
+  Even so, SMS caller ID is not strong authentication — keep high-risk actions (new external
+  recipients, anything financial) behind a confirmation as the SMS surface grows.
+- **The reply is not sent through the webhook response.** Twilio gives a webhook ~15 seconds and
+  an LLM turn with tools can exceed that, so the webhook returns an empty TwiML response and the
+  answer goes out via the REST API afterward, as its own Inngest step so a failed send retries
+  without regenerating (and re-billing) the reply.
+- **One SMS per reply.** The chat agent splits replies into several bubbles; over SMS they are
+  joined into one message (several rapid texts arrive out of order and cost more), trimmed to
+  1,500 characters with a pointer to the dashboard transcript.
+- **The agent is told the owner can't reach email or the web** (prompt line in `chat.ts`,
+  `channel === "sms"` only), so it gives the information itself rather than "check your email."
+- **Unknown numbers get no reply** — answering strangers costs money per message and makes the
+  number usable as an SMS amplifier.
+- **Both directions are metered** (`twilio_sms`), since Twilio charges for inbound too.
+- **`isTwilioConfigured()`** (credentials really present) now gates every SMS path —
+  `notifyTenant`, `notifyOwner`, `notifyApproval`, and the reply step. A phone number on file
+  alone previously made the dispatcher try SMS, fail, and retry forever without ever reaching the
+  dashboard-widget fallback. The Twilio client is also created lazily now rather than at import.
+- **Carriers:** US numbers must be registered before they can text US phones — toll-free
+  verification (free) or A2P 10DLC (a sole-proprietor campaign allows only one number). Texting
+  STOP is intercepted by Twilio at the number level and opts the sender out; don't use it as the
+  agent's own "pause" word.
+
+Setup: set `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`; in the Twilio console
+point the number's "A message comes in" webhook (HTTP POST) at
+`https://<your-app>/api/twilio/incoming`; run migration `022_owner_sms_numbers.sql`; enter your
+phone number(s) under **Settings → Text messages**.
 
 ---
 
@@ -1142,9 +1199,10 @@ real footgun: reasoning about "the schema" from `schema.sql` alone is currently 
 
 ## Twilio SMS Scope
 
-Inbound SMS only understands a fixed approval-response vocabulary, not the general agent
-pipeline — a deliberate, narrower scope for now, not a bug, but worth being explicit about if
-it's ever assumed to be "the agent, just over SMS."
+Inbound SMS is now a full owner-chat conversation (see "SMS (Twilio)"). Still not built: emailing
+forwarded to text by rule ("forward everything from X"), per-message reference IDs for replying to
+a specific forwarded email, a phone-verification (text-back code) step, a pause word that isn't
+STOP, and flood controls (rate caps/digest mode) for high-volume forwarding.
 
 ## OpenAI Token Usage / Cost
 
@@ -1232,6 +1290,7 @@ STRIPE_WEBHOOK_SECRET
 TWILIO_ACCOUNT_SID
 TWILIO_AUTH_TOKEN
 TWILIO_FROM_NUMBER
+TWILIO_WEBHOOK_URL          (optional — only if the public URL differs from NEXT_PUBLIC_APP_URL)
 
 TOKEN_ENCRYPTION_KEY
 

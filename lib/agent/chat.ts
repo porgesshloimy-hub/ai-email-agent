@@ -87,7 +87,7 @@ export async function handleChatMessage(
     alreadyPersistedOwnerMessageId?: string;
     skipPersistingOwnerMessage?: boolean;
   } = {}
-): Promise<{ text: string; messageIds: string[]; ownerMessageId: string | null }> {
+): Promise<{ text: string; parts: string[]; messageIds: string[]; ownerMessageId: string | null }> {
   const channel = options.channel ?? "chat";
   const repliedToMessageId = options.repliedToMessageId ?? null;
 
@@ -537,7 +537,7 @@ export async function handleChatMessage(
            * prompt, not assumed.
            */
           channel === "sms"
-            ? "This conversation is happening over SMS. The owner is away from their computer and has NO email or web access on their phone — never tell them to check their email, open a link, or use the dashboard; give them the information itself, in the text. Keep replies short (a few sentences — long texts are costly and hard to read on a phone), plain text only with no markdown, and write everything as ONE message with no paragraph breaks unless truly needed. If you can't do something, say so briefly and offer the closest thing you can do."
+            ? "This conversation is happening over SMS. The owner is away from their computer and has NO email or web access on their phone — never tell them to check their email, open a link, or use the dashboard; give them the information itself, in the text. Each separate message you write (split by \"|||\" or a blank line, as described elsewhere) is delivered as its own text message, and every text costs money — so write each one short and use only as many as the answer genuinely needs, usually 1 to 3 and never padding. Plain text only, no markdown. If you can't do something, say so briefly and offer the closest thing you can do."
             : "",
           `There are currently ${pendingEmailCount ?? 0} email drafts awaiting the owner's review.`,
           gmailReadAllowed
@@ -737,11 +737,27 @@ export async function handleChatMessage(
    * separately forbid multi-paragraph messages, since a paragraph
    * break now just IS a message boundary either way.
    */
-  const parts = cleanedResponseText
+  const splitParts = cleanedResponseText
     .split(/\|\|\||\n\s*\n+/)
     .map((part) => stripAllLeakedTimestamps(stripLeakedTimestampPrefix(part.trim())).trim())
-    .filter((part) => part.length > 0)
-    .slice(0, 6);
+    .filter((part) => part.length > 0);
+
+  const MAX_PARTS = 6;
+
+  /**
+   * Past the cap, the chat widget simply drops the extra parts (a
+   * missing bubble is a cosmetic loss). Over SMS the owner may have no
+   * other way to see the answer, so overflow is folded into the last
+   * allowed text instead of discarded — and the cap matters more there
+   * since every part is a separately billed text.
+   */
+  const parts =
+    channel === "sms" && splitParts.length > MAX_PARTS
+      ? [
+          ...splitParts.slice(0, MAX_PARTS - 1),
+          splitParts.slice(MAX_PARTS - 1).join("\n\n"),
+        ]
+      : splitParts.slice(0, MAX_PARTS);
 
   const finalParts = parts.length > 0 ? parts : [cleanedResponseText.trim() || "Done."];
 
@@ -837,6 +853,10 @@ export async function handleChatMessage(
 
   return {
     text: finalParts.join("\n\n"),
+    // The same parts that were persisted one row each above. Exposed so
+    // a transport that delivers messages individually (SMS) sends
+    // exactly what the dashboard shows, rather than re-splitting `text`.
+    parts: finalParts,
     messageIds: agentMessageIds,
     ownerMessageId: ownerMessageRow?.id ?? null,
   };

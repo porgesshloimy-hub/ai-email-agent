@@ -1018,68 +1018,76 @@ export const processDelayedChatReply = inngest.createFunction(
         throw new Error(`Failed to mark batch as processed: ${error.message}`);
       }
 
-      return { text: String(result.text ?? "") };
+      return {
+        text: String(result.text ?? ""),
+        parts: Array.isArray(result.parts) ? result.parts.map(String) : [],
+      };
     });
 
     /**
-     * SMS delivery — its own step on purpose. The reply is already
-     * generated, persisted (the dashboard shows it regardless), and the
-     * batch marked processed by the step above; if the text itself
-     * fails to send, Inngest retries ONLY this step. Keeping it inside
-     * the step above would re-run the whole LLM turn (a second cost,
-     * and a duplicate persisted reply) just to retry a send.
+     * SMS delivery. The reply was already generated, persisted (the
+     * dashboard shows it regardless) and the batch marked processed by
+     * the step above, so a send failure must retry ONLY the send —
+     * keeping it inside that step would re-run the whole LLM turn (a
+     * second cost and a duplicate persisted reply) just to retry a text.
      *
-     * The agent's reply was written for a chat window and may be split
-     * into several short paragraphs; over SMS that is one message —
-     * several rapid texts arrive out of order often enough to be
-     * confusing, and cost more.
+     * Each part (the same paragraphs the chat widget shows as separate
+     * bubbles — see the splitting in lib/agent/chat.ts) goes out as its
+     * own text, in order. Each part is its own step so that a failure
+     * on part 3 retries part 3 alone, and never re-sends parts 1-2
+     * (which Inngest has already memoized as done). A short sleep
+     * between parts keeps them in order: texts fired back to back can
+     * arrive swapped, which for a multi-part answer reads as nonsense.
      */
-    if (channel === "sms" && reply.text.trim()) {
-      await step.run("deliver-sms-reply", async () => {
+    const smsParts = reply.parts.length > 0 ? reply.parts : reply.text.trim() ? [reply.text.trim()] : [];
+
+    if (channel === "sms" && smsParts.length > 0) {
+      const destination = await step.run("resolve-sms-destination", async () => {
+        if (replyToPhone) return replyToPhone;
+
         const supabase = createServiceSupabase();
+        const { data: tenantRow } = await supabase
+          .from("tenants")
+          .select("phone_number")
+          .eq("id", tenantId)
+          .single();
 
-        let destination = replyToPhone ?? null;
-
-        if (!destination) {
-          const { data: tenantRow } = await supabase
-            .from("tenants")
-            .select("phone_number")
-            .eq("id", tenantId)
-            .single();
-
-          destination = tenantRow?.phone_number ?? null;
-        }
-
-        if (!destination) {
-          console.error("DELAYED CHAT REPLY: sms reply has no destination number, not sent:", {
-            tenantId,
-          });
-          return { sent: false };
-        }
-
-        if (!isTwilioConfigured()) {
-          // Not retried (it can't succeed until credentials exist) —
-          // the reply is still in the dashboard transcript.
-          console.error("DELAYED CHAT REPLY: Twilio not configured, sms reply not sent:", {
-            tenantId,
-          });
-          return { sent: false };
-        }
-
-        const sent = await sendSmsToNumber(
-          tenantId,
-          destination,
-          reply.text,
-          "Owner chat reply SMS"
-        );
-
-        if (!sent) {
-          // Throw so Inngest retries just this step.
-          throw new Error("SMS reply send failed");
-        }
-
-        return { sent: true };
+        return tenantRow?.phone_number ?? null;
       });
+
+      if (!destination) {
+        console.error("DELAYED CHAT REPLY: sms reply has no destination number, not sent:", {
+          tenantId,
+        });
+      } else if (!isTwilioConfigured()) {
+        // Can't succeed until credentials exist, so not retried — the
+        // reply is still in the dashboard transcript.
+        console.error("DELAYED CHAT REPLY: Twilio not configured, sms reply not sent:", {
+          tenantId,
+        });
+      } else {
+        for (let i = 0; i < smsParts.length; i++) {
+          if (i > 0) {
+            await step.sleep(`sms-part-gap-${i}`, "1500ms");
+          }
+
+          await step.run(`deliver-sms-part-${i}`, async () => {
+            const sent = await sendSmsToNumber(
+              tenantId,
+              destination,
+              smsParts[i],
+              "Owner chat reply SMS"
+            );
+
+            if (!sent) {
+              // Throw so Inngest retries just this part.
+              throw new Error(`SMS reply part ${i + 1}/${smsParts.length} failed to send`);
+            }
+
+            return { sent: true };
+          });
+        }
+      }
     }
 
     /**

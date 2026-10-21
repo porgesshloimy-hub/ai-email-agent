@@ -1,0 +1,224 @@
+diff --git a/README.md b/README.md
+index 327fd38..1104fee 100644
+--- a/README.md
++++ b/README.md
+@@ -970,7 +970,7 @@ Owner text ──► /api/twilio/incoming
+                  ▼
+          handleChatMessage(channel "sms") ──► reply persisted (dashboard shows it too)
+                  ▼
+-         "deliver-sms-reply" step ──► one SMS to the number that texted
++         "deliver-sms-part-N" steps ──► one SMS per reply part, to the number that texted
+ ```
+ 
+ Design notes worth keeping:
+@@ -986,9 +986,13 @@ Design notes worth keeping:
+   an LLM turn with tools can exceed that, so the webhook returns an empty TwiML response and the
+   answer goes out via the REST API afterward, as its own Inngest step so a failed send retries
+   without regenerating (and re-billing) the reply.
+-- **One SMS per reply.** The chat agent splits replies into several bubbles; over SMS they are
+-  joined into one message (several rapid texts arrive out of order and cost more), trimmed to
+-  1,500 characters with a pointer to the dashboard transcript.
++- **One text per paragraph.** The chat agent's replies are split into short parts (on `|||` or a
++  blank line, up to 6 — see `chat.ts`); the dashboard shows each as a bubble and SMS sends each as
++  its own text, in order, with a 1.5-second gap so carriers don't deliver them swapped. Each part
++  is its own Inngest step, so a failed send retries only that part and never re-sends earlier
++  ones. Over the cap, SMS folds the overflow into the last text rather than dropping it (the
++  widget just drops it), and each text is still trimmed to 1,500 characters. Every text is billed
++  separately, so the SMS prompt asks the model for as few parts as the answer needs.
+ - **The agent is told the owner can't reach email or the web** (prompt line in `chat.ts`,
+   `channel === "sms"` only), so it gives the information itself rather than "check your email."
+ - **Unknown numbers get no reply** — answering strangers costs money per message and makes the
+diff --git a/lib/agent/chat.ts b/lib/agent/chat.ts
+index 40fb1aa..8c9ac3a 100644
+--- a/lib/agent/chat.ts
++++ b/lib/agent/chat.ts
+@@ -87,7 +87,7 @@ export async function handleChatMessage(
+     alreadyPersistedOwnerMessageId?: string;
+     skipPersistingOwnerMessage?: boolean;
+   } = {}
+-): Promise<{ text: string; messageIds: string[]; ownerMessageId: string | null }> {
++): Promise<{ text: string; parts: string[]; messageIds: string[]; ownerMessageId: string | null }> {
+   const channel = options.channel ?? "chat";
+   const repliedToMessageId = options.repliedToMessageId ?? null;
+ 
+@@ -537,7 +537,7 @@ export async function handleChatMessage(
+            * prompt, not assumed.
+            */
+           channel === "sms"
+-            ? "This conversation is happening over SMS. The owner is away from their computer and has NO email or web access on their phone — never tell them to check their email, open a link, or use the dashboard; give them the information itself, in the text. Keep replies short (a few sentences — long texts are costly and hard to read on a phone), plain text only with no markdown, and write everything as ONE message with no paragraph breaks unless truly needed. If you can't do something, say so briefly and offer the closest thing you can do."
++            ? "This conversation is happening over SMS. The owner is away from their computer and has NO email or web access on their phone — never tell them to check their email, open a link, or use the dashboard; give them the information itself, in the text. Each separate message you write (split by \"|||\" or a blank line, as described elsewhere) is delivered as its own text message, and every text costs money — so write each one short and use only as many as the answer genuinely needs, usually 1 to 3 and never padding. Plain text only, no markdown. If you can't do something, say so briefly and offer the closest thing you can do."
+             : "",
+           `There are currently ${pendingEmailCount ?? 0} email drafts awaiting the owner's review.`,
+           gmailReadAllowed
+@@ -737,11 +737,27 @@ export async function handleChatMessage(
+    * separately forbid multi-paragraph messages, since a paragraph
+    * break now just IS a message boundary either way.
+    */
+-  const parts = cleanedResponseText
++  const splitParts = cleanedResponseText
+     .split(/\|\|\||\n\s*\n+/)
+     .map((part) => stripAllLeakedTimestamps(stripLeakedTimestampPrefix(part.trim())).trim())
+-    .filter((part) => part.length > 0)
+-    .slice(0, 6);
++    .filter((part) => part.length > 0);
++
++  const MAX_PARTS = 6;
++
++  /**
++   * Past the cap, the chat widget simply drops the extra parts (a
++   * missing bubble is a cosmetic loss). Over SMS the owner may have no
++   * other way to see the answer, so overflow is folded into the last
++   * allowed text instead of discarded — and the cap matters more there
++   * since every part is a separately billed text.
++   */
++  const parts =
++    channel === "sms" && splitParts.length > MAX_PARTS
++      ? [
++          ...splitParts.slice(0, MAX_PARTS - 1),
++          splitParts.slice(MAX_PARTS - 1).join("\n\n"),
++        ]
++      : splitParts.slice(0, MAX_PARTS);
+ 
+   const finalParts = parts.length > 0 ? parts : [cleanedResponseText.trim() || "Done."];
+ 
+@@ -837,6 +853,10 @@ export async function handleChatMessage(
+ 
+   return {
+     text: finalParts.join("\n\n"),
++    // The same parts that were persisted one row each above. Exposed so
++    // a transport that delivers messages individually (SMS) sends
++    // exactly what the dashboard shows, rather than re-splitting `text`.
++    parts: finalParts,
+     messageIds: agentMessageIds,
+     ownerMessageId: ownerMessageRow?.id ?? null,
+   };
+diff --git a/lib/inngest/functions.ts b/lib/inngest/functions.ts
+index 4871bb5..98447cd 100644
+--- a/lib/inngest/functions.ts
++++ b/lib/inngest/functions.ts
+@@ -1018,68 +1018,76 @@ export const processDelayedChatReply = inngest.createFunction(
+         throw new Error(`Failed to mark batch as processed: ${error.message}`);
+       }
+ 
+-      return { text: String(result.text ?? "") };
++      return {
++        text: String(result.text ?? ""),
++        parts: Array.isArray(result.parts) ? result.parts.map(String) : [],
++      };
+     });
+ 
+     /**
+-     * SMS delivery — its own step on purpose. The reply is already
+-     * generated, persisted (the dashboard shows it regardless), and the
+-     * batch marked processed by the step above; if the text itself
+-     * fails to send, Inngest retries ONLY this step. Keeping it inside
+-     * the step above would re-run the whole LLM turn (a second cost,
+-     * and a duplicate persisted reply) just to retry a send.
++     * SMS delivery. The reply was already generated, persisted (the
++     * dashboard shows it regardless) and the batch marked processed by
++     * the step above, so a send failure must retry ONLY the send —
++     * keeping it inside that step would re-run the whole LLM turn (a
++     * second cost and a duplicate persisted reply) just to retry a text.
+      *
+-     * The agent's reply was written for a chat window and may be split
+-     * into several short paragraphs; over SMS that is one message —
+-     * several rapid texts arrive out of order often enough to be
+-     * confusing, and cost more.
++     * Each part (the same paragraphs the chat widget shows as separate
++     * bubbles — see the splitting in lib/agent/chat.ts) goes out as its
++     * own text, in order. Each part is its own step so that a failure
++     * on part 3 retries part 3 alone, and never re-sends parts 1-2
++     * (which Inngest has already memoized as done). A short sleep
++     * between parts keeps them in order: texts fired back to back can
++     * arrive swapped, which for a multi-part answer reads as nonsense.
+      */
+-    if (channel === "sms" && reply.text.trim()) {
+-      await step.run("deliver-sms-reply", async () => {
+-        const supabase = createServiceSupabase();
++    const smsParts = reply.parts.length > 0 ? reply.parts : reply.text.trim() ? [reply.text.trim()] : [];
+ 
+-        let destination = replyToPhone ?? null;
++    if (channel === "sms" && smsParts.length > 0) {
++      const destination = await step.run("resolve-sms-destination", async () => {
++        if (replyToPhone) return replyToPhone;
+ 
+-        if (!destination) {
+-          const { data: tenantRow } = await supabase
+-            .from("tenants")
+-            .select("phone_number")
+-            .eq("id", tenantId)
+-            .single();
++        const supabase = createServiceSupabase();
++        const { data: tenantRow } = await supabase
++          .from("tenants")
++          .select("phone_number")
++          .eq("id", tenantId)
++          .single();
+ 
+-          destination = tenantRow?.phone_number ?? null;
+-        }
++        return tenantRow?.phone_number ?? null;
++      });
+ 
+-        if (!destination) {
+-          console.error("DELAYED CHAT REPLY: sms reply has no destination number, not sent:", {
+-            tenantId,
+-          });
+-          return { sent: false };
+-        }
++      if (!destination) {
++        console.error("DELAYED CHAT REPLY: sms reply has no destination number, not sent:", {
++          tenantId,
++        });
++      } else if (!isTwilioConfigured()) {
++        // Can't succeed until credentials exist, so not retried — the
++        // reply is still in the dashboard transcript.
++        console.error("DELAYED CHAT REPLY: Twilio not configured, sms reply not sent:", {
++          tenantId,
++        });
++      } else {
++        for (let i = 0; i < smsParts.length; i++) {
++          if (i > 0) {
++            await step.sleep(`sms-part-gap-${i}`, "1500ms");
++          }
+ 
+-        if (!isTwilioConfigured()) {
+-          // Not retried (it can't succeed until credentials exist) —
+-          // the reply is still in the dashboard transcript.
+-          console.error("DELAYED CHAT REPLY: Twilio not configured, sms reply not sent:", {
+-            tenantId,
+-          });
+-          return { sent: false };
+-        }
++          await step.run(`deliver-sms-part-${i}`, async () => {
++            const sent = await sendSmsToNumber(
++              tenantId,
++              destination,
++              smsParts[i],
++              "Owner chat reply SMS"
++            );
+ 
+-        const sent = await sendSmsToNumber(
+-          tenantId,
+-          destination,
+-          reply.text,
+-          "Owner chat reply SMS"
+-        );
++            if (!sent) {
++              // Throw so Inngest retries just this part.
++              throw new Error(`SMS reply part ${i + 1}/${smsParts.length} failed to send`);
++            }
+ 
+-        if (!sent) {
+-          // Throw so Inngest retries just this step.
+-          throw new Error("SMS reply send failed");
++            return { sent: true };
++          });
+         }
+-
+-        return { sent: true };
+-      });
++      }
+     }
+ 
+     /**

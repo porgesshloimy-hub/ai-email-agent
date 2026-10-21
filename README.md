@@ -970,7 +970,7 @@ Owner text ──► /api/twilio/incoming
                  ▼
          handleChatMessage(channel "sms") ──► reply persisted (dashboard shows it too)
                  ▼
-         "deliver-sms-reply" step ──► one SMS to the number that texted
+         "deliver-sms-part-N" steps ──► one SMS per reply part, to the number that texted
 ```
 
 Design notes worth keeping:
@@ -986,9 +986,13 @@ Design notes worth keeping:
   an LLM turn with tools can exceed that, so the webhook returns an empty TwiML response and the
   answer goes out via the REST API afterward, as its own Inngest step so a failed send retries
   without regenerating (and re-billing) the reply.
-- **One SMS per reply.** The chat agent splits replies into several bubbles; over SMS they are
-  joined into one message (several rapid texts arrive out of order and cost more), trimmed to
-  1,500 characters with a pointer to the dashboard transcript.
+- **One text per paragraph.** The chat agent's replies are split into short parts (on `|||` or a
+  blank line, up to 6 — see `chat.ts`); the dashboard shows each as a bubble and SMS sends each as
+  its own text, in order, with a 1.5-second gap so carriers don't deliver them swapped. Each part
+  is its own Inngest step, so a failed send retries only that part and never re-sends earlier
+  ones. Over the cap, SMS folds the overflow into the last text rather than dropping it (the
+  widget just drops it), and each text is still trimmed to 1,500 characters. Every text is billed
+  separately, so the SMS prompt asks the model for as few parts as the answer needs.
 - **The agent is told the owner can't reach email or the web** (prompt line in `chat.ts`,
   `channel === "sms"` only), so it gives the information itself rather than "check your email."
 - **Unknown numbers get no reply** — answering strangers costs money per message and makes the

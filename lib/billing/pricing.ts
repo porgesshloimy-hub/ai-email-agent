@@ -28,8 +28,16 @@ export const OPENAI_PRICING_PER_1M_TOKENS: Record<
  * Anthropic (Claude) pricing.
  *
  * Sourced from Anthropic's own launch posts:
- * - Claude Haiku 4.5: $1 / $5 per 1M input/output tokens
- *   (https://www.anthropic.com/news/claude-haiku-4-5)
+ * - Claude Haiku 5.5: $0.10 / $0.50 per 1M input/output tokens for
+ *   prompts up to 100K tokens, $0.50 / $2.50 above that (the only
+ *   current Claude model with a prompt-length price tier). Uses the
+ *   newer tokenizer (~30% more tokens for the same text than Haiku
+ *   4.5) — per-token rates below are correct as-is, but token counts
+ *   aren't comparable to old usage_events rows.
+ *   (https://platform.claude.com/docs/en/about-claude/pricing)
+ * - Claude Haiku 4.5 (retired from the catalog; entry kept so any
+ *   in-flight/legacy usage can still be priced): $1 / $5 per 1M
+ *   input/output tokens (https://www.anthropic.com/news/claude-haiku-4-5)
  * - Claude Sonnet 4.6: unchanged from Sonnet 4.5, $3 / $15 per 1M
  *   input/output tokens (https://www.anthropic.com/news/claude-sonnet-4-6)
  *
@@ -37,8 +45,24 @@ export const OPENAI_PRICING_PER_1M_TOKENS: Record<
  */
 export const ANTHROPIC_PRICING_PER_1M_TOKENS: Record<
   string,
-  { input: number; output: number }
+  {
+    input: number;
+    output: number;
+    /**
+     * Optional prompt-length price tier: when a single request's
+     * prompt exceeds `aboveTokens`, the whole request (input AND
+     * output) bills at these rates instead.
+     */
+    longPrompt?: { aboveTokens: number; input: number; output: number };
+  }
 > = {
+  "claude-haiku-5-5": {
+    input: 0.1,
+    output: 0.5,
+    longPrompt: { aboveTokens: 100_000, input: 0.5, output: 2.5 },
+  },
+
+  // Retired from MODEL_CATALOG — see note above.
   "claude-haiku-4-5": {
     input: 1.0,
     output: 5.0,
@@ -77,7 +101,14 @@ export const MISTRAL_PRICING_PER_1M_TOKENS: Record<
  */
 const PRICING_TABLES_BY_PROVIDER: Record<
   string,
-  Record<string, { input: number; output: number }>
+  Record<
+    string,
+    {
+      input: number;
+      output: number;
+      longPrompt?: { aboveTokens: number; input: number; output: number };
+    }
+  >
 > = {
   openai: OPENAI_PRICING_PER_1M_TOKENS,
   anthropic: ANTHROPIC_PRICING_PER_1M_TOKENS,
@@ -135,11 +166,25 @@ export function calculateModelCost(
   const safeInputTokens = Math.max(0, Number(inputTokens) || 0);
   const safeOutputTokens = Math.max(0, Number(outputTokens) || 0);
 
+  /**
+   * Prompt-length tier (currently Haiku 5.5 only). safeInputTokens
+   * already includes cache-creation + cache-read tokens (see
+   * lib/agent/llm/anthropic.ts), and Anthropic's docs don't say
+   * whether cached tokens count toward the 100K threshold — counting
+   * them is the conservative (never-undercharge) reading, matching how
+   * this file already treats cache reads at the full input rate.
+   */
+  const rates =
+    pricing.longPrompt &&
+    safeInputTokens > pricing.longPrompt.aboveTokens
+      ? pricing.longPrompt
+      : pricing;
+
   const inputCost =
-    (safeInputTokens / 1_000_000) * pricing.input;
+    (safeInputTokens / 1_000_000) * rates.input;
 
   const outputCost =
-    (safeOutputTokens / 1_000_000) * pricing.output;
+    (safeOutputTokens / 1_000_000) * rates.output;
 
   return inputCost + outputCost;
 }

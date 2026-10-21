@@ -58,7 +58,7 @@ const REQUIRED_ENV_VAR_BY_PROVIDER: Record<AIProvider, string> = {
  * deployment's environment.
  *
  * This exists because of a real incident: a tenant selected Claude
- * Haiku 4.5 on the Agent dashboard before ANTHROPIC_API_KEY had been
+ * Haiku 5.5 on the Agent dashboard before ANTHROPIC_API_KEY had been
  * added to the production environment. lib/agent/models.ts's
  * resolveModelSelection() only validates that a (provider, model) pair
  * is a real catalog entry — it has no way to know whether that

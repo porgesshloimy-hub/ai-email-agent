@@ -1,0 +1,210 @@
+diff --git a/README.md b/README.md
+index 5068b70..8318080 100644
+--- a/README.md
++++ b/README.md
+@@ -757,6 +757,27 @@ throwing. `lib/agent/chat.ts`'s tool loop also gained a systemic backstop — an
+ is now caught generically, so a future tool that forgets its own error handling still can't take
+ down an entire turn silently.
+ 
++## Model Update: Claude Haiku 4.5 → Claude Haiku 5.5 (Oct 2026)
++
++The "Balanced (Recommended)" tier now points at `claude-haiku-5-5` (Haiku 4.5 is being retired).
++Checked against Anthropic's migration guide rather than assumed: Haiku 5.5 returns a 400 for a
++non-default `temperature`/`top_p`/`top_k`, for manual `thinking.budget_tokens`, and for assistant
++prefill — `lib/agent/llm/anthropic.ts` sends none of those, so the swap needed no adapter change.
++What did change:
++
++- **Pricing** is $0.10 / $0.50 per 1M input/output tokens for prompts up to 100K tokens and
++  $0.50 / $2.50 above that — the first model in `pricing.ts` with a prompt-length tier, so
++  `calculateModelCost()` now supports an optional `longPrompt` tier. Cache tokens are counted
++  toward the threshold (conservative; Anthropic's docs don't say either way). This agent's prompts
++  sit far below 100K, so the upper tier is a safeguard, not an expected path.
++- **Tokenizer** produces ~30% more tokens for the same text than Haiku 4.5 did. Per-token rates are
++  unaffected, but token counts in new `usage_events` aren't directly comparable to old ones.
++- **Existing tenants**: migration `021_haiku_5_5_model_migration.sql` rewrites stored
++  `claude-haiku-4-5` selections; without it `resolveModelSelection()` would silently downgrade
++  them to the default model. Old `usage_events` rows still render via a legacy label map.
++
++The Cost Investigation below is kept as written — its figures describe Haiku 4.5.
++
+ ## Cost Investigation: Why Haiku 4.5 Chat Messages Run ~$0.01, and Prompt Caching
+ 
+ Checked directly rather than assumed. Haiku 4.5 is $1/$5 per million input/output tokens.
+diff --git a/app/dashboard/agent/actions.ts b/app/dashboard/agent/actions.ts
+index 25c42e9..ea50d2b 100644
+--- a/app/dashboard/agent/actions.ts
++++ b/app/dashboard/agent/actions.ts
+@@ -86,7 +86,7 @@ export async function saveModelSelection(formData: FormData) {
+    * environment might not actually have that provider's API key set
+    * yet (see lib/agent/llm/index.ts's isProviderConfigured for the
+    * production incident this guards against: a tenant selected
+-   * Claude Haiku 4.5 before ANTHROPIC_API_KEY existed in the
++   * Claude Haiku 5.5 before ANTHROPIC_API_KEY existed in the
+    * environment, and every email they received failed outright).
+    * Reject the save here with a clear message instead of letting it
+    * fail silently the next time an email comes in.
+diff --git a/lib/agent/llm/index.ts b/lib/agent/llm/index.ts
+index 0302be3..cf05b41 100644
+--- a/lib/agent/llm/index.ts
++++ b/lib/agent/llm/index.ts
+@@ -58,7 +58,7 @@ const REQUIRED_ENV_VAR_BY_PROVIDER: Record<AIProvider, string> = {
+  * deployment's environment.
+  *
+  * This exists because of a real incident: a tenant selected Claude
+- * Haiku 4.5 on the Agent dashboard before ANTHROPIC_API_KEY had been
++ * Haiku 5.5 on the Agent dashboard before ANTHROPIC_API_KEY had been
+  * added to the production environment. lib/agent/models.ts's
+  * resolveModelSelection() only validates that a (provider, model) pair
+  * is a real catalog entry — it has no way to know whether that
+diff --git a/lib/agent/models.ts b/lib/agent/models.ts
+index 82b8b77..c9b0fb4 100644
+--- a/lib/agent/models.ts
++++ b/lib/agent/models.ts
+@@ -63,7 +63,7 @@ export interface ProviderInfo {
+  *
+  * Cheapest    -> GPT-5 nano
+  * Economy     -> Mistral Small 4
+- * Balanced (Recommended) -> Claude Haiku 4.5
++ * Balanced (Recommended) -> Claude Haiku 5.5
+  * Advanced    -> Claude Sonnet 4.6
+  */
+ export const MODEL_CATALOG: Record<AIProvider, ProviderInfo> = {
+@@ -102,8 +102,8 @@ export const MODEL_CATALOG: Record<AIProvider, ProviderInfo> = {
+     label: "Anthropic",
+     models: [
+       {
+-        id: "claude-haiku-4-5",
+-        label: "Claude Haiku 4.5",
++        id: "claude-haiku-5-5",
++        label: "Claude Haiku 5.5",
+         tier: "Balanced",
+         tierDescription:
+           "Better reasoning and instruction-following for more complex tasks.",
+@@ -143,8 +143,8 @@ export const DEFAULT_AI_MODEL = "gpt-5-nano";
+ /**
+  * Look up a model's dashboard label + tier by its id, regardless of
+  * provider. Used by the billing page (app/dashboard/billing/page.tsx)
+- * to show a friendly name ("Claude Haiku 4.5") instead of a raw model
+- * id ("claude-haiku-4-5") next to a cost breakdown line.
++ * to show a friendly name ("Claude Haiku 5.5") instead of a raw model
++ * id ("claude-haiku-5-5") next to a cost breakdown line.
+  */
+ export function getModelDisplayLabel(
+   modelId: string
+@@ -153,9 +153,22 @@ export function getModelDisplayLabel(
+     (option) => option.id === modelId
+   );
+ 
+-  return match ? match.label : modelId;
++  return match
++    ? match.label
++    : LEGACY_MODEL_LABELS[modelId] ?? modelId;
+ }
+ 
++/**
++ * Models that are no longer selectable but still appear in historical
++ * usage_events descriptions (the billing page parses the model id out
++ * of those). Kept so past months' cost breakdowns show a friendly name
++ * instead of a raw id. NOT part of MODEL_CATALOG — a tenant can't
++ * select these.
++ */
++const LEGACY_MODEL_LABELS: Record<string, string> = {
++  "claude-haiku-4-5": "Claude Haiku 4.5 (retired)",
++};
++
+ export function isValidProvider(
+   provider: string
+ ): provider is AIProvider {
+diff --git a/lib/billing/pricing.ts b/lib/billing/pricing.ts
+index 1b1800f..e7fb87a 100644
+--- a/lib/billing/pricing.ts
++++ b/lib/billing/pricing.ts
+@@ -28,8 +28,16 @@ export const OPENAI_PRICING_PER_1M_TOKENS: Record<
+  * Anthropic (Claude) pricing.
+  *
+  * Sourced from Anthropic's own launch posts:
+- * - Claude Haiku 4.5: $1 / $5 per 1M input/output tokens
+- *   (https://www.anthropic.com/news/claude-haiku-4-5)
++ * - Claude Haiku 5.5: $0.10 / $0.50 per 1M input/output tokens for
++ *   prompts up to 100K tokens, $0.50 / $2.50 above that (the only
++ *   current Claude model with a prompt-length price tier). Uses the
++ *   newer tokenizer (~30% more tokens for the same text than Haiku
++ *   4.5) — per-token rates below are correct as-is, but token counts
++ *   aren't comparable to old usage_events rows.
++ *   (https://platform.claude.com/docs/en/about-claude/pricing)
++ * - Claude Haiku 4.5 (retired from the catalog; entry kept so any
++ *   in-flight/legacy usage can still be priced): $1 / $5 per 1M
++ *   input/output tokens (https://www.anthropic.com/news/claude-haiku-4-5)
+  * - Claude Sonnet 4.6: unchanged from Sonnet 4.5, $3 / $15 per 1M
+  *   input/output tokens (https://www.anthropic.com/news/claude-sonnet-4-6)
+  *
+@@ -37,8 +45,24 @@ export const OPENAI_PRICING_PER_1M_TOKENS: Record<
+  */
+ export const ANTHROPIC_PRICING_PER_1M_TOKENS: Record<
+   string,
+-  { input: number; output: number }
++  {
++    input: number;
++    output: number;
++    /**
++     * Optional prompt-length price tier: when a single request's
++     * prompt exceeds `aboveTokens`, the whole request (input AND
++     * output) bills at these rates instead.
++     */
++    longPrompt?: { aboveTokens: number; input: number; output: number };
++  }
+ > = {
++  "claude-haiku-5-5": {
++    input: 0.1,
++    output: 0.5,
++    longPrompt: { aboveTokens: 100_000, input: 0.5, output: 2.5 },
++  },
++
++  // Retired from MODEL_CATALOG — see note above.
+   "claude-haiku-4-5": {
+     input: 1.0,
+     output: 5.0,
+@@ -77,7 +101,14 @@ export const MISTRAL_PRICING_PER_1M_TOKENS: Record<
+  */
+ const PRICING_TABLES_BY_PROVIDER: Record<
+   string,
+-  Record<string, { input: number; output: number }>
++  Record<
++    string,
++    {
++      input: number;
++      output: number;
++      longPrompt?: { aboveTokens: number; input: number; output: number };
++    }
++  >
+ > = {
+   openai: OPENAI_PRICING_PER_1M_TOKENS,
+   anthropic: ANTHROPIC_PRICING_PER_1M_TOKENS,
+@@ -135,11 +166,25 @@ export function calculateModelCost(
+   const safeInputTokens = Math.max(0, Number(inputTokens) || 0);
+   const safeOutputTokens = Math.max(0, Number(outputTokens) || 0);
+ 
++  /**
++   * Prompt-length tier (currently Haiku 5.5 only). safeInputTokens
++   * already includes cache-creation + cache-read tokens (see
++   * lib/agent/llm/anthropic.ts), and Anthropic's docs don't say
++   * whether cached tokens count toward the 100K threshold — counting
++   * them is the conservative (never-undercharge) reading, matching how
++   * this file already treats cache reads at the full input rate.
++   */
++  const rates =
++    pricing.longPrompt &&
++    safeInputTokens > pricing.longPrompt.aboveTokens
++      ? pricing.longPrompt
++      : pricing;
++
+   const inputCost =
+-    (safeInputTokens / 1_000_000) * pricing.input;
++    (safeInputTokens / 1_000_000) * rates.input;
+ 
+   const outputCost =
+-    (safeOutputTokens / 1_000_000) * pricing.output;
++    (safeOutputTokens / 1_000_000) * rates.output;
+ 
+   return inputCost + outputCost;
+ }

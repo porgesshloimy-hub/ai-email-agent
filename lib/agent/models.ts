@@ -63,7 +63,7 @@ export interface ProviderInfo {
  *
  * Cheapest    -> GPT-5 nano
  * Economy     -> Mistral Small 4
- * Balanced (Recommended) -> Claude Haiku 4.5
+ * Balanced (Recommended) -> Claude Haiku 5.5
  * Advanced    -> Claude Sonnet 4.6
  */
 export const MODEL_CATALOG: Record<AIProvider, ProviderInfo> = {
@@ -102,8 +102,8 @@ export const MODEL_CATALOG: Record<AIProvider, ProviderInfo> = {
     label: "Anthropic",
     models: [
       {
-        id: "claude-haiku-4-5",
-        label: "Claude Haiku 4.5",
+        id: "claude-haiku-5-5",
+        label: "Claude Haiku 5.5",
         tier: "Balanced",
         tierDescription:
           "Better reasoning and instruction-following for more complex tasks.",
@@ -143,8 +143,8 @@ export const DEFAULT_AI_MODEL = "gpt-5-nano";
 /**
  * Look up a model's dashboard label + tier by its id, regardless of
  * provider. Used by the billing page (app/dashboard/billing/page.tsx)
- * to show a friendly name ("Claude Haiku 4.5") instead of a raw model
- * id ("claude-haiku-4-5") next to a cost breakdown line.
+ * to show a friendly name ("Claude Haiku 5.5") instead of a raw model
+ * id ("claude-haiku-5-5") next to a cost breakdown line.
  */
 export function getModelDisplayLabel(
   modelId: string
@@ -153,8 +153,21 @@ export function getModelDisplayLabel(
     (option) => option.id === modelId
   );
 
-  return match ? match.label : modelId;
+  return match
+    ? match.label
+    : LEGACY_MODEL_LABELS[modelId] ?? modelId;
 }
+
+/**
+ * Models that are no longer selectable but still appear in historical
+ * usage_events descriptions (the billing page parses the model id out
+ * of those). Kept so past months' cost breakdowns show a friendly name
+ * instead of a raw id. NOT part of MODEL_CATALOG — a tenant can't
+ * select these.
+ */
+const LEGACY_MODEL_LABELS: Record<string, string> = {
+  "claude-haiku-4-5": "Claude Haiku 4.5 (retired)",
+};
 
 export function isValidProvider(
   provider: string

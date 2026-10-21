@@ -86,7 +86,7 @@ export async function saveModelSelection(formData: FormData) {
    * environment might not actually have that provider's API key set
    * yet (see lib/agent/llm/index.ts's isProviderConfigured for the
    * production incident this guards against: a tenant selected
-   * Claude Haiku 4.5 before ANTHROPIC_API_KEY existed in the
+   * Claude Haiku 5.5 before ANTHROPIC_API_KEY existed in the
    * environment, and every email they received failed outright).
    * Reject the save here with a clear message instead of letting it
    * fail silently the next time an email comes in.

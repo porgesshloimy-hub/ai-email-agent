@@ -757,6 +757,27 @@ throwing. `lib/agent/chat.ts`'s tool loop also gained a systemic backstop — an
 is now caught generically, so a future tool that forgets its own error handling still can't take
 down an entire turn silently.
 
+## Model Update: Claude Haiku 4.5 → Claude Haiku 5.5 (Oct 2026)
+
+The "Balanced (Recommended)" tier now points at `claude-haiku-5-5` (Haiku 4.5 is being retired).
+Checked against Anthropic's migration guide rather than assumed: Haiku 5.5 returns a 400 for a
+non-default `temperature`/`top_p`/`top_k`, for manual `thinking.budget_tokens`, and for assistant
+prefill — `lib/agent/llm/anthropic.ts` sends none of those, so the swap needed no adapter change.
+What did change:
+
+- **Pricing** is $0.10 / $0.50 per 1M input/output tokens for prompts up to 100K tokens and
+  $0.50 / $2.50 above that — the first model in `pricing.ts` with a prompt-length tier, so
+  `calculateModelCost()` now supports an optional `longPrompt` tier. Cache tokens are counted
+  toward the threshold (conservative; Anthropic's docs don't say either way). This agent's prompts
+  sit far below 100K, so the upper tier is a safeguard, not an expected path.
+- **Tokenizer** produces ~30% more tokens for the same text than Haiku 4.5 did. Per-token rates are
+  unaffected, but token counts in new `usage_events` aren't directly comparable to old ones.
+- **Existing tenants**: migration `021_haiku_5_5_model_migration.sql` rewrites stored
+  `claude-haiku-4-5` selections; without it `resolveModelSelection()` would silently downgrade
+  them to the default model. Old `usage_events` rows still render via a legacy label map.
+
+The Cost Investigation below is kept as written — its figures describe Haiku 4.5.
+
 ## Cost Investigation: Why Haiku 4.5 Chat Messages Run ~$0.01, and Prompt Caching
 
 Checked directly rather than assumed. Haiku 4.5 is $1/$5 per million input/output tokens.

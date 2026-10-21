@@ -81,12 +81,35 @@ export function normalizePhoneNumber(input: string): string | null {
  * outright for unusual setups.
  */
 export function getInboundWebhookUrl(): string {
-  if (process.env.TWILIO_WEBHOOK_URL) {
-    return process.env.TWILIO_WEBHOOK_URL;
+  const override = cleanEnvValue(process.env.TWILIO_WEBHOOK_URL);
+
+  if (override) {
+    return override;
   }
 
-  const base = (process.env.NEXT_PUBLIC_APP_URL ?? "").replace(/\/+$/, "");
+  const base = cleanEnvValue(process.env.NEXT_PUBLIC_APP_URL).replace(/\/+$/, "");
   return `${base}/api/twilio/incoming`;
+}
+
+/**
+ * Environment values pasted into a dashboard routinely pick up a
+ * trailing space/newline or wrapping quotes. For most variables that
+ * is harmless; for anything that feeds a signature comparison it makes
+ * every request fail with no visible reason. Trim whitespace and strip
+ * one pair of matching surrounding quotes.
+ */
+function cleanEnvValue(value: string | undefined): string {
+  let v = (value ?? "").trim();
+
+  if (
+    v.length >= 2 &&
+    ((v.startsWith('"') && v.endsWith('"')) ||
+      (v.startsWith("'") && v.endsWith("'")))
+  ) {
+    v = v.slice(1, -1).trim();
+  }
+
+  return v;
 }
 
 /**
@@ -114,21 +137,78 @@ export function isValidTwilioRequest(
     return true;
   }
 
-  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  const authToken = cleanEnvValue(process.env.TWILIO_AUTH_TOKEN);
 
   if (!authToken || !signatureHeader) {
+    console.error("TWILIO SIGNATURE: cannot validate —", {
+      authTokenPresent: Boolean(authToken),
+      signatureHeaderPresent: Boolean(signatureHeader),
+    });
     return false;
   }
 
+  const url = getInboundWebhookUrl();
+
   try {
-    return twilio.validateRequest(
+    const valid = twilio.validateRequest(
       authToken,
       signatureHeader,
-      getInboundWebhookUrl(),
+      url,
       params
     );
+
+    if (!valid) {
+      logSignatureMismatch(authToken, signatureHeader, url, params);
+    }
+
+    return valid;
   } catch (error) {
     console.error("TWILIO SIGNATURE VALIDATION ERROR:", error);
     return false;
   }
+}
+
+/**
+ * Logged only when a signature does NOT match, to make the cause
+ * findable from the deployment logs instead of guesswork. Nothing
+ * secret is written: not the token (only its length, which helps spot
+ * a truncated paste) and only the first few characters of each
+ * signature (enough to confirm "these differ" without handing anyone a
+ * usable value).
+ *
+ * How to read it:
+ *   - urlUsed: the exact string being signed against. It must equal
+ *     what the Twilio console calls, character for character.
+ *   - urlSource: which variable it came from.
+ *   - expectedPrefix vs receivedPrefix: always differ here; what
+ *     matters is everything else.
+ *   - paramKeys: the form fields Twilio sent.
+ *   - tokenLength: a real Twilio Auth Token is 32 characters.
+ */
+function logSignatureMismatch(
+  authToken: string,
+  receivedSignature: string,
+  url: string,
+  params: Record<string, string>
+) {
+  let expectedPrefix = "unavailable";
+
+  try {
+    expectedPrefix = twilio
+      .getExpectedTwilioSignature(authToken, url, params)
+      .slice(0, 6);
+  } catch {
+    // diagnostic only
+  }
+
+  console.error("TWILIO SIGNATURE MISMATCH:", {
+    urlUsed: url,
+    urlSource: cleanEnvValue(process.env.TWILIO_WEBHOOK_URL)
+      ? "TWILIO_WEBHOOK_URL"
+      : "NEXT_PUBLIC_APP_URL",
+    tokenLength: authToken.length,
+    expectedPrefix,
+    receivedPrefix: receivedSignature.slice(0, 6),
+    paramKeys: Object.keys(params).sort(),
+  });
 }

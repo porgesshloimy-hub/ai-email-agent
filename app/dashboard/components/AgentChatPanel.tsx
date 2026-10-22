@@ -1,6 +1,8 @@
 "use client";
 
 import { Fragment, useEffect, useRef, useState } from "react";
+import { ChatBubble } from "./ChatBubble";
+import { formatTimeLabel, startsNewMessageGroup } from "./chat-grouping";
 
 export interface ChatMessage {
   id: string;
@@ -55,23 +57,6 @@ function renderInlineMarkdown(text: string): React.ReactNode[] {
       );
     }
     return <Fragment key={i}>{part}</Fragment>;
-  });
-}
-
-function formatTimeLabel(iso: string): string {
-  const date = new Date(iso);
-  const now = new Date();
-  const sameDay = date.toDateString() === now.toDateString();
-
-  if (sameDay) {
-    return date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
-  }
-
-  return date.toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
   });
 }
 
@@ -538,10 +523,16 @@ export default function AgentChatPanel({
              * distinct action.
              */
             const nextMsg = messages[index + 1];
-            const showTimestamp =
-              !nextMsg ||
-              nextMsg.role !== msg.role ||
-              formatTimeLabel(nextMsg.created_at) !== formatTimeLabel(msg.created_at);
+            const showTimestamp = !nextMsg || startsNewMessageGroup(msg, nextMsg);
+
+            /**
+             * The first message of a group — one that arrived from a
+             * different sender or at a different displayed time than
+             * the message before it — gets a small tail, as in
+             * WhatsApp/iMessage. Same grouping rule as the timestamp
+             * above (chat-grouping.ts), so the two never disagree.
+             */
+            const hasTail = startsNewMessageGroup(messages[index - 1], msg);
 
             /**
              * Spacing fix: this used to give consecutive same-time
@@ -580,15 +571,9 @@ export default function AgentChatPanel({
                     on hover of that specific message.
                   */}
                   <div className="relative max-w-full">
-                    <div
-                      className={`max-w-full whitespace-pre-wrap break-words rounded-panel px-3.5 py-2.5 text-sm leading-relaxed shadow-panel ${
-                        isOwner
-                          ? "bg-blue-100 text-ink"
-                          : "bg-[#ECEEF1] text-ink"
-                      } ${msg.pending ? "opacity-60" : ""}`}
-                    >
+                    <ChatBubble isOwner={isOwner} hasTail={hasTail} pending={Boolean(msg.pending)}>
                       {renderInlineMarkdown(msg.content)}
-                    </div>
+                    </ChatBubble>
 
                     <button
                       type="button"
@@ -612,10 +597,19 @@ export default function AgentChatPanel({
           })}
           {isAgentTyping && (
             <div className="mt-3 flex justify-start">
-              <div className="flex items-center gap-1 rounded-panel bg-[#ECEEF1] px-3.5 py-2.5 shadow-panel">
-                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted [animation-delay:-0.3s]" />
-                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted [animation-delay:-0.15s]" />
-                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted" />
+              <div className="relative">
+                <ChatBubble
+                  isOwner={false}
+                  className="flex items-center gap-1"
+                  hasTail={startsNewMessageGroup(messages[messages.length - 1], {
+                    role: "agent",
+                    created_at: new Date().toISOString(),
+                  })}
+                >
+                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted [animation-delay:-0.3s]" />
+                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted [animation-delay:-0.15s]" />
+                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted" />
+                </ChatBubble>
               </div>
             </div>
           )}

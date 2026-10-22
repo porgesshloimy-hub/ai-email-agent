@@ -80,15 +80,43 @@ export function normalizePhoneNumber(input: string): string | null {
  * is built from configuration instead. TWILIO_WEBHOOK_URL overrides it
  * outright for unusual setups.
  */
-export function getInboundWebhookUrl(): string {
+export function getInboundWebhookUrl(requestDerivedUrl?: string): string {
   const override = cleanEnvValue(process.env.TWILIO_WEBHOOK_URL);
 
-  if (override) {
+  if (isAbsoluteUrl(override)) {
     return override;
   }
 
   const base = cleanEnvValue(process.env.NEXT_PUBLIC_APP_URL).replace(/\/+$/, "");
-  return `${base}/api/twilio/incoming`;
+  const configured = `${base}/api/twilio/incoming`;
+
+  if (isAbsoluteUrl(configured)) {
+    return configured;
+  }
+
+  /**
+   * Neither variable gave a usable absolute URL (the failure that
+   * produced "Invalid URL" in production: NEXT_PUBLIC_APP_URL was empty,
+   * leaving just "/api/twilio/incoming"). Fall back to the address this
+   * very request arrived on. That is safe: the URL is only one input
+   * to an HMAC that cannot be produced without TWILIO_AUTH_TOKEN, so a
+   * forged Host header can't make a forged request validate — it would
+   * simply fail the comparison. Explicit configuration still wins
+   * whenever it's present and valid.
+   */
+  if (requestDerivedUrl && isAbsoluteUrl(requestDerivedUrl)) {
+    console.error(
+      "TWILIO SIGNATURE: no usable TWILIO_WEBHOOK_URL / NEXT_PUBLIC_APP_URL configured — using the request's own address instead. Set TWILIO_WEBHOOK_URL to make this explicit:",
+      { requestDerivedUrl }
+    );
+    return requestDerivedUrl;
+  }
+
+  return configured;
+}
+
+function isAbsoluteUrl(value: string): boolean {
+  return /^https?:\/\/[^/\s]+/i.test(value);
 }
 
 /**
@@ -128,7 +156,8 @@ function cleanEnvValue(value: string | undefined): string {
  */
 export function isValidTwilioRequest(
   signatureHeader: string | null,
-  params: Record<string, string>
+  params: Record<string, string>,
+  requestDerivedUrl?: string
 ): boolean {
   if (
     process.env.NODE_ENV !== "production" &&
@@ -147,7 +176,15 @@ export function isValidTwilioRequest(
     return false;
   }
 
-  const url = getInboundWebhookUrl();
+  const url = getInboundWebhookUrl(requestDerivedUrl);
+
+  if (!isAbsoluteUrl(url)) {
+    console.error(
+      "TWILIO SIGNATURE: the webhook URL is not an absolute http(s) URL, so no request can be validated. Set TWILIO_WEBHOOK_URL (e.g. https://yourdomain.com/api/twilio/incoming):",
+      { urlUsed: url }
+    );
+    return false;
+  }
 
   try {
     const valid = twilio.validateRequest(

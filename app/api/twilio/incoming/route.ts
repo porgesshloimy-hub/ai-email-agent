@@ -35,8 +35,23 @@ export async function POST(request: NextRequest) {
     if (typeof value === "string") params[key] = value;
   });
 
+  // The address this request actually arrived on — only a last-resort
+  // fallback when no webhook URL is configured (see
+  // getInboundWebhookUrl). Behind Vercel, x-forwarded-host/proto carry
+  // the public values.
+  const forwardedHost =
+    request.headers.get("x-forwarded-host") ?? request.headers.get("host");
+  const forwardedProto = request.headers.get("x-forwarded-proto") ?? "https";
+  const requestDerivedUrl = forwardedHost
+    ? `${forwardedProto}://${forwardedHost}${request.nextUrl.pathname}${request.nextUrl.search}`
+    : undefined;
+
   if (
-    !isValidTwilioRequest(request.headers.get("x-twilio-signature"), params)
+    !isValidTwilioRequest(
+      request.headers.get("x-twilio-signature"),
+      params,
+      requestDerivedUrl
+    )
   ) {
     console.error("TWILIO INBOUND: invalid or missing signature, rejected");
     return new NextResponse("Forbidden", { status: 403 });

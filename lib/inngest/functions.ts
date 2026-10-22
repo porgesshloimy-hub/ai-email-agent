@@ -1077,6 +1077,12 @@ export const processDelayedChatReply = inngest.createFunction(
           tenantId,
         });
       } else {
+        console.log("SMS REPLY DELIVERY: starting", {
+          tenantId,
+          texts: smsParts.length,
+          toLast4: String(destination).slice(-4),
+        });
+
         for (let i = 0; i < smsParts.length; i++) {
           if (i > 0) {
             await step.sleep(`sms-part-gap-${i}`, "1500ms");
@@ -1095,10 +1101,13 @@ export const processDelayedChatReply = inngest.createFunction(
               throw new Error(`SMS reply part ${i + 1}/${smsParts.length} failed to send`);
             }
 
+            console.log("SMS REPLY DELIVERY: text sent", { tenantId, part: i + 1, of: smsParts.length });
             return { sent: true };
           });
         }
       }
+    } else if (channel === "sms") {
+      console.error("SMS REPLY DELIVERY: nothing to send — the reply had no text", { tenantId });
     }
 
     /**

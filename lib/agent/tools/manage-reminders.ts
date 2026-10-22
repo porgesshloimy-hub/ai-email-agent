@@ -152,6 +152,37 @@ export function resolveItem<T extends { id: string }>(
   return { kind: "many", items };
 }
 
+/**
+ * These tools must never throw. A thrown error inside a chat tool is
+ * caught one level up and replaced with a generic "something went
+ * wrong" reply that hides what actually failed — and, for list_reminders
+ * in particular, one unreadable table (say a migration that was never
+ * run) used to turn an ordinary "what's up?" into that dead-end reply.
+ * Instead the failure is logged with its real cause and handed back to
+ * the model as plain text, with an explicit note that nothing changed.
+ */
+async function failSoft(
+  toolName: string,
+  tenantId: string,
+  run: () => Promise<string>
+): Promise<string> {
+  try {
+    return await run();
+  } catch (error) {
+    console.error(`MANAGE REMINDERS (${toolName}) failed:`, error, { tenantId });
+    const reason = error instanceof Error ? error.message : String(error);
+    return `I couldn't do that: ${reason}. Nothing was changed.`;
+  }
+}
+
+async function settle<T>(promise: Promise<T>): Promise<{ ok: true; value: T } | { ok: false; reason: string }> {
+  try {
+    return { ok: true, value: await promise };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 function listReminderLines(rows: ReminderRow[], timeZone: string): string {
   return rows
     .map((r) => `- id ${r.id}: "${r.content}" — ${formatWhen(r.trigger_at, timeZone)} (${describeReminderStatus(r)})`)
@@ -192,20 +223,43 @@ export const listRemindersTool: ToolDefinition = {
   isAvailable: () => true,
 
   async execute(_args: Record<string, any>, context: ToolContext) {
-    const [reminders, scheduled, timeZone] = await Promise.all([
-      fetchActiveReminders(context.supabase, context.tenantId),
-      fetchPendingScheduledActions(context.supabase, context.tenantId),
-      getTimezone(context.supabase, context.tenantId),
-    ]);
+    return failSoft("list_reminders", context.tenantId, async () => {
+      const [remindersResult, scheduledResult, timeZone] = await Promise.all([
+        settle(fetchActiveReminders(context.supabase, context.tenantId)),
+        settle(fetchPendingScheduledActions(context.supabase, context.tenantId)),
+        getTimezone(context.supabase, context.tenantId),
+      ]);
 
-    if (reminders.length === 0 && scheduled.length === 0) {
-      return "Nothing is scheduled — no outstanding reminders and no emails waiting to be sent.";
-    }
+      // One half failing (a table that doesn't exist yet, say) must not
+      // hide the half that works. Report what could be read, and say
+      // plainly what couldn't — never imply an unreadable list is empty.
+      const sections: string[] = [];
+      const notes: string[] = [];
 
-    const sections: string[] = [];
-    if (reminders.length > 0) sections.push(`Reminders:\n${listReminderLines(reminders, timeZone)}`);
-    if (scheduled.length > 0) sections.push(`Scheduled emails:\n${listScheduledLines(scheduled, timeZone)}`);
-    return sections.join("\n\n");
+      if (remindersResult.ok) {
+        if (remindersResult.value.length > 0) {
+          sections.push(`Reminders:\n${listReminderLines(remindersResult.value, timeZone)}`);
+        }
+      } else {
+        console.error("MANAGE REMINDERS (list_reminders): reminders unreadable:", remindersResult.reason, { tenantId: context.tenantId });
+        notes.push(`Couldn't read reminders (${remindersResult.reason}).`);
+      }
+
+      if (scheduledResult.ok) {
+        if (scheduledResult.value.length > 0) {
+          sections.push(`Scheduled emails:\n${listScheduledLines(scheduledResult.value, timeZone)}`);
+        }
+      } else {
+        console.error("MANAGE REMINDERS (list_reminders): scheduled emails unreadable:", scheduledResult.reason, { tenantId: context.tenantId });
+        notes.push(`Couldn't read scheduled emails (${scheduledResult.reason}).`);
+      }
+
+      if (sections.length === 0 && notes.length === 0) {
+        return "Nothing is scheduled — no outstanding reminders and no emails waiting to be sent.";
+      }
+
+      return [...sections, ...notes].join("\n\n");
+    });
   },
 };
 
@@ -266,23 +320,25 @@ export const completeReminderTool: ToolDefinition = {
   isAvailable: () => true,
 
   async execute(args: Record<string, any>, context: ToolContext) {
-    const resolved = await resolveReminderOrExplain(args, context);
-    if ("message" in resolved) return resolved.message;
+    return failSoft("complete_reminder", context.tenantId, async () => {
+      const resolved = await resolveReminderOrExplain(args, context);
+      if ("message" in resolved) return resolved.message;
 
-    const { reminder } = resolved;
+      const { reminder } = resolved;
 
-    const { data, error } = await context.supabase
-      .from("agent_reminders")
-      .update({ status: "done" })
-      .eq("id", reminder.id)
-      .eq("tenant_id", context.tenantId)
-      .select("id");
+      const { data, error } = await context.supabase
+        .from("agent_reminders")
+        .update({ status: "done" })
+        .eq("id", reminder.id)
+        .eq("tenant_id", context.tenantId)
+        .select("id");
 
-    if (error) return `Failed to mark that reminder done: ${error.message}. It is still active.`;
-    if (!data || data.length === 0) return "That reminder couldn't be updated (it may have just changed). It was not marked done.";
+      if (error) return `Failed to mark that reminder done: ${error.message}. It is still active.`;
+      if (!data || data.length === 0) return "That reminder couldn't be updated (it may have just changed). It was not marked done.";
 
-    await clearQueueEntries(context.supabase, context.tenantId, reminder.id);
-    return `Marked done: "${reminder.content}". It won't come up again.`;
+      await clearQueueEntries(context.supabase, context.tenantId, reminder.id);
+      return `Marked done: "${reminder.content}". It won't come up again.`;
+    });
   },
 };
 
@@ -299,24 +355,26 @@ export const deleteReminderTool: ToolDefinition = {
   isAvailable: () => true,
 
   async execute(args: Record<string, any>, context: ToolContext) {
-    const resolved = await resolveReminderOrExplain(args, context);
-    if ("message" in resolved) return resolved.message;
+    return failSoft("delete_reminder", context.tenantId, async () => {
+      const resolved = await resolveReminderOrExplain(args, context);
+      if ("message" in resolved) return resolved.message;
 
-    const { reminder } = resolved;
+      const { reminder } = resolved;
 
-    await clearQueueEntries(context.supabase, context.tenantId, reminder.id);
+      await clearQueueEntries(context.supabase, context.tenantId, reminder.id);
 
-    const { data, error } = await context.supabase
-      .from("agent_reminders")
-      .delete()
-      .eq("id", reminder.id)
-      .eq("tenant_id", context.tenantId)
-      .select("id");
+      const { data, error } = await context.supabase
+        .from("agent_reminders")
+        .delete()
+        .eq("id", reminder.id)
+        .eq("tenant_id", context.tenantId)
+        .select("id");
 
-    if (error) return `Failed to delete that reminder: ${error.message}. It is still active.`;
-    if (!data || data.length === 0) return "That reminder couldn't be deleted (it may have just changed). It is still active.";
+      if (error) return `Failed to delete that reminder: ${error.message}. It is still active.`;
+      if (!data || data.length === 0) return "That reminder couldn't be deleted (it may have just changed). It is still active.";
 
-    return `Deleted the reminder: "${reminder.content}". It won't come up again.`;
+      return `Deleted the reminder: "${reminder.content}". It won't come up again.`;
+    });
   },
 };
 
@@ -333,40 +391,42 @@ export const cancelScheduledEmailTool: ToolDefinition = {
   isAvailable: () => true,
 
   async execute(args: Record<string, any>, context: ToolContext) {
-    const [actions, timeZone] = await Promise.all([
-      fetchPendingScheduledActions(context.supabase, context.tenantId),
-      getTimezone(context.supabase, context.tenantId),
-    ]);
+    return failSoft("cancel_scheduled_email", context.tenantId, async () => {
+      const [actions, timeZone] = await Promise.all([
+        fetchPendingScheduledActions(context.supabase, context.tenantId),
+        getTimezone(context.supabase, context.tenantId),
+      ]);
 
-    const resolution = resolveItem(actions, args, (a) => `${a.to_email} ${a.subject} ${a.body}`);
+      const resolution = resolveItem(actions, args, (a) => `${a.to_email} ${a.subject} ${a.body}`);
 
-    if (resolution.kind === "none") {
-      return actions.length === 0
-        ? "No emails are waiting to be sent, so nothing was changed. (If it already went out, it can't be cancelled.)"
-        : `No pending scheduled email matches that, so nothing was changed. Currently scheduled:\n${listScheduledLines(actions, timeZone)}`;
-    }
+      if (resolution.kind === "none") {
+        return actions.length === 0
+          ? "No emails are waiting to be sent, so nothing was changed. (If it already went out, it can't be cancelled.)"
+          : `No pending scheduled email matches that, so nothing was changed. Currently scheduled:\n${listScheduledLines(actions, timeZone)}`;
+      }
 
-    if (resolution.kind === "many") {
-      return `More than one scheduled email could be meant, so nothing was changed. Ask the owner which one:\n${listScheduledLines(resolution.items, timeZone)}`;
-    }
+      if (resolution.kind === "many") {
+        return `More than one scheduled email could be meant, so nothing was changed. Ask the owner which one:\n${listScheduledLines(resolution.items, timeZone)}`;
+      }
 
-    const action = resolution.item;
+      const action = resolution.item;
 
-    // Only a still-pending action is cancellable: one that is already
-    // executing or sent must not be silently reported as cancelled.
-    const { data, error } = await context.supabase
-      .from("agent_scheduled_actions")
-      .update({ status: "cancelled", result_summary: "Cancelled by the owner before it was sent." })
-      .eq("id", action.id)
-      .eq("tenant_id", context.tenantId)
-      .eq("status", "pending")
-      .select("id");
+      // Only a still-pending action is cancellable: one that is already
+      // executing or sent must not be silently reported as cancelled.
+      const { data, error } = await context.supabase
+        .from("agent_scheduled_actions")
+        .update({ status: "cancelled", result_summary: "Cancelled by the owner before it was sent." })
+        .eq("id", action.id)
+        .eq("tenant_id", context.tenantId)
+        .eq("status", "pending")
+        .select("id");
 
-    if (error) return `Failed to cancel that scheduled email: ${error.message}. It is still scheduled.`;
-    if (!data || data.length === 0) {
-      return "That email is no longer pending — it may have just been sent — so it could not be cancelled.";
-    }
+      if (error) return `Failed to cancel that scheduled email: ${error.message}. It is still scheduled.`;
+      if (!data || data.length === 0) {
+        return "That email is no longer pending — it may have just been sent — so it could not be cancelled.";
+      }
 
-    return `Cancelled the email to ${action.to_email} ("${action.subject}"). It will not be sent.`;
+      return `Cancelled the email to ${action.to_email} ("${action.subject}"). It will not be sent.`;
+    });
   },
 };

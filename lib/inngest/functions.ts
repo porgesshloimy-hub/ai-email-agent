@@ -10,6 +10,7 @@ import { reconcileUnreportedUsage } from "@/lib/billing/meter";
 import { handleChatMessage } from "@/lib/agent/chat";
 import { sendSmsToNumber } from "@/lib/notify";
 import { isTwilioConfigured } from "@/lib/sms/twilio";
+import { chunkForSms } from "@/lib/sms/chunk";
 import { channelSupportsTypingTracking } from "@/lib/agent/chat-pacing";
 import { enqueueDueReminders } from "@/lib/agent/reminders/dispatch";
 import { dispatchAllPendingOutreach } from "@/lib/agent/outreach/dispatcher";
@@ -1039,7 +1040,17 @@ export const processDelayedChatReply = inngest.createFunction(
      * between parts keeps them in order: texts fired back to back can
      * arrive swapped, which for a multi-part answer reads as nonsense.
      */
-    const smsParts = reply.parts.length > 0 ? reply.parts : reply.text.trim() ? [reply.text.trim()] : [];
+    /**
+     * A single part can still be longer than one text allows (a
+     * forwarded email kept together with [[keep]], say). Rather than
+     * truncate it — lib/notify.ts's last-resort trim points at the
+     * dashboard, which an owner texting from a phone with no web access
+     * can't open — it is split at natural breaks into several texts
+     * (lib/sms/chunk.ts) that go out in order like any other part.
+     */
+    const smsParts = (
+      reply.parts.length > 0 ? reply.parts : reply.text.trim() ? [reply.text.trim()] : []
+    ).flatMap((part) => chunkForSms(part));
 
     if (channel === "sms" && smsParts.length > 0) {
       const destination = await step.run("resolve-sms-destination", async () => {

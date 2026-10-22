@@ -19,6 +19,7 @@ import {
   type AIProvider,
 } from "@/lib/agent/models";
 import { getToolsForSurface, findToolForSurface } from "@/lib/agent/tools";
+import { splitReplyIntoParts } from "@/lib/agent/reply-parts";
 import type { ToolContext } from "@/lib/agent/tools";
 import { buildCurrentDateContext } from "@/lib/agent/date-context";
 import { resolveCategory, describeResolvedCategory } from "@/lib/agent/tools/categories";
@@ -525,7 +526,7 @@ export async function handleChatMessage(
            * this codebase: never let the model deny a real capability
            * out of simple ignorance that it exists.
            */
-          "You CAN hold onto something to bring up later and you CAN schedule sending an email for a future time — these are real, working features, not things you lack. If the owner directly asks you to remind them of something later (e.g. \"remind me tomorrow morning to call the supplier\"), or to send an email at a future time (e.g. \"email Jane tomorrow at 9am to confirm\"), that request is understood and handled automatically — just confirm it back to them in your own words. If asked WHETHER you can do this, or whether you're sure you can't, say yes clearly and explain briefly how: they just tell you what to do and when, in plain language, the same way they'd ask you to do anything else in this chat. Never claim you only exist within one conversation with no way to follow up later — that is false.",
+          "You CAN hold onto something to bring up later and you CAN schedule sending an email for a future time — these are real, working features, not things you lack. If the owner directly asks you to remind them of something later (e.g. \"remind me tomorrow morning to call the supplier\"), or to send an email at a future time (e.g. \"email Jane tomorrow at 9am to confirm\"), that request is understood and handled automatically — just confirm it back to them in your own words. If asked WHETHER you can do this, or whether you're sure you can't, say yes clearly and explain briefly how: they just tell you what to do and when, in plain language, the same way they'd ask you to do anything else in this chat. Never claim you only exist within one conversation with no way to follow up later — that is false. You can also MANAGE them: you have tools to list the owner's reminders and scheduled emails, mark a reminder done, delete a reminder, and cancel a scheduled email. When the owner says they've already handled something, wants a reminder to stop, or says to cancel/delete/forget a reminder or a scheduled email, use those tools (list first if you're not sure which one they mean) instead of just saying you'll stop — and never tell them something is cancelled or done unless a tool call actually succeeded.",
           /**
            * SMS is now a real owner-chat transport (app/api/twilio/
            * incoming). Over text the owner is typically away from a
@@ -537,7 +538,7 @@ export async function handleChatMessage(
            * prompt, not assumed.
            */
           channel === "sms"
-            ? "This conversation is happening over SMS. The owner is away from their computer and has NO email or web access on their phone — never tell them to check their email, open a link, or use the dashboard; give them the information itself, in the text. Each separate message you write (split by \"|||\" or a blank line, as described elsewhere) is delivered as its own text message, and every text costs money — so write each one short and use only as many as the answer genuinely needs, usually 1 to 3 and never padding. Plain text only, no markdown. If you can't do something, say so briefly and offer the closest thing you can do."
+            ? "This conversation is happening over SMS. The owner is away from their computer and has NO email or web access on their phone — never tell them to check their email, open a link, or use the dashboard; give them the information itself, in the text. Each separate message you write (split by \"|||\" or a blank line, as described elsewhere) is delivered as its own text message — except a [[keep]] block, which goes out as a single text no matter how many paragraphs it has, so use it for any forwarded email text, and every text costs money — so write each one short and use only as many as the answer genuinely needs, usually 1 to 3 and never padding. Plain text only, no markdown. If you can't do something, say so briefly and offer the closest thing you can do."
             : "",
           `There are currently ${pendingEmailCount ?? 0} email drafts awaiting the owner's review.`,
           gmailReadAllowed
@@ -571,7 +572,7 @@ export async function handleChatMessage(
           historyTurns.length > 0
             ? "The messages below include recent conversation history, each prefixed with when it was sent — use that to maintain continuity with what's already been discussed, and to judge how recent or stale something is. That bracketed timestamp is metadata added for your reference only — never include a timestamp or bracketed time label at the start of your own reply; just answer normally."
             : "",
-          "Break up your replies into multiple short messages using \"|||\" between them — the way a real person actually texts, sending one idea per message rather than one long paragraph. Treat each distinct idea, statement, or question as its own message, and split liberally rather than sparingly — most multi-part replies should be split. Example: instead of 'I can't send emails directly, but I can draft one for you. Want me to create a draft asking if they're coming?', write it as three separate texts: 'I can't send emails directly ||| but I can draft one for you to review ||| want me to put that together?' Only keep something as a single message when it's genuinely one short, indivisible thought.",
+          "Break up your replies into multiple short messages using \"|||\" between them — the way a real person actually texts, sending one idea per message rather than one long paragraph. Treat each distinct idea, statement, or question as its own message, and split liberally rather than sparingly — most multi-part replies should be split. Example: instead of 'I can't send emails directly, but I can draft one for you. Want me to create a draft asking if they're coming?', write it as three separate texts: 'I can't send emails directly ||| but I can draft one for you to review ||| want me to put that together?' Only keep something as a single message when it's genuinely one short, indivisible thought. EXCEPTION — content that must stay ONE message: whenever you pass along text that isn't a series of separate thoughts from you — a forwarded or quoted email, a draft you wrote for the owner to review, a list, an address or contact block, anything where the paragraph breaks are part of the content itself — put it between [[keep]] and [[/keep]]. Everything inside is delivered as a single message, paragraph breaks and all, and the [[keep]] markers themselves are removed before the owner sees anything. Example (where <blank line> stands for a real blank line): 'Here's the email from Jane ||| [[keep]]Hi Sam, <blank line> The shipment is delayed until Tuesday. <blank line> Thanks, Jane[[/keep]] ||| want me to reply?' Use it only for content like that — never for your own ordinary commentary, which should still be split.",
           /**
            * Found in production: a leaked timestamp appeared MID-reply,
            * apparently where a "|||" split delimiter should have gone
@@ -583,7 +584,7 @@ export async function handleChatMessage(
            * are correctly kept separate on their own.
            */
           "To be completely explicit: \"|||\" is the ONLY way to start a new message. A bracketed timestamp like \"[Today, 3:24 PM]\" is never something you write yourself, under any circumstance, including as an attempt to separate messages — that bracket format only ever appears in the history shown to you, never in your own output, anywhere, at the start, middle, or end of a message.",
-          "A blank line between paragraphs works exactly the same as \"|||\" — either one starts a new message. Use whichever feels natural; you don't need to remember a special marker every time. Only keep something as a single message when it's genuinely one short, flowing thought with no natural break in it.",
+          "A blank line between paragraphs works exactly the same as \"|||\" — either one starts a new message (the one exception is inside a [[keep]] block, where nothing is split). Use whichever feels natural; you don't need to remember a special marker every time. Only keep something as a single message when it's genuinely one short, flowing thought with no natural break in it.",
         ]
           .filter(Boolean)
           .join("\n"),
@@ -737,8 +738,11 @@ export async function handleChatMessage(
    * separately forbid multi-paragraph messages, since a paragraph
    * break now just IS a message boundary either way.
    */
-  const splitParts = cleanedResponseText
-    .split(/\|\|\||\n\s*\n+/)
+  // Splitting (and the [[keep]] ... [[/keep]] protection for content
+  // that must stay one message — forwarded email text and the like)
+  // lives in lib/agent/reply-parts.ts so it's the same for every
+  // channel and testable on its own.
+  const splitParts = splitReplyIntoParts(cleanedResponseText)
     .map((part) => stripAllLeakedTimestamps(stripLeakedTimestampPrefix(part.trim())).trim())
     .filter((part) => part.length > 0);
 

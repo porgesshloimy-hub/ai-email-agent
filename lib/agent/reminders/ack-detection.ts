@@ -52,6 +52,17 @@ const ACK_PHRASES = [
   "cool!",
   "will do",
   "on it",
+  // Plain completions — the reminder text itself now tells the owner to
+  // reply "done", so that exact word has to work. Still only ever
+  // applied when exactly one reminder is awaiting acknowledgment (see
+  // the disambiguation note above).
+  "done",
+  "done!",
+  "all done",
+  "did it",
+  "handled",
+  "taken care of",
+  "finished",
 ];
 
 function heuristicAcknowledgment(replyText: string): boolean {

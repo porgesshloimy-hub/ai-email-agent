@@ -169,7 +169,14 @@ async function dispatchReminderItem(
     return "nothing_queued";
   }
 
-  const sent = await notifyTenant(tenantId, tenant, `Reminder: ${reminder.content}`);
+  // The hint matters for an owner texting from a phone: replying "done"
+  // clears the reminder (lib/agent/reminders/ack-detection.ts), so they
+  // always have a way to make it stop without opening anything.
+  const sent = await notifyTenant(
+    tenantId,
+    tenant,
+    `Reminder: ${reminder.content}\n(Reply "done" to clear it.)`
+  );
 
   if (!sent) {
     // Leave the queue entry and the reminder's status alone — retried
@@ -180,25 +187,98 @@ async function dispatchReminderItem(
     return "failed";
   }
 
-  const { error: updateError } = await supabase
-    .from("agent_reminders")
-    .update({
-      status: "awaiting_ack",
-      attempt_count: (reminder.attempt_count ?? 0) + 1,
-      last_attempted_at: new Date().toISOString(),
-    })
-    .eq("id", reminder.id);
+  /**
+   * The reminder has REALLY been delivered at this point, so recording
+   * that must not be allowed to fail quietly. If the status never
+   * leaves 'pending', lib/agent/reminders/dispatch.ts sees a due
+   * reminder again on its next run and the owner is texted the same
+   * reminder every cycle, forever — and because it never reaches
+   * 'awaiting_ack', their replies can't clear it either. That is
+   * exactly what an owner reported: one reminder, repeating every 15
+   * minutes.
+   *
+   * Previously a failed update here was logged and then ignored.
+   * Now it falls back through progressively smaller updates (a missing
+   * optional column, such as last_attempted_at from migration 019 not
+   * having been run, no longer blocks the part that matters), and as a
+   * last resort parks the reminder in 'passive_queue' so the repeating
+   * stops even though the fuller bookkeeping couldn't be saved.
+   */
+  const recorded = await recordReminderDelivered(supabase, tenantId, {
+    id: reminder.id,
+    attemptCount: (reminder.attempt_count ?? 0) + 1,
+  });
 
-  if (updateError) {
-    console.error("DISPATCH OUTREACH: failed to update reminder after send:", updateError, {
+  if (!recorded) {
+    console.error(
+      "DISPATCH OUTREACH: CRITICAL — reminder was delivered but NO status update could be saved; it will be sent again next cycle:",
+      { tenantId, reminderId: reminder.id }
+    );
+  }
+
+  const { error: queueDeleteError } = await supabase
+    .from("agent_outreach_queue")
+    .delete()
+    .eq("id", queueItem.id);
+
+  if (queueDeleteError) {
+    // A queue entry left behind would be sent again regardless of the
+    // reminder's status, so this must be loud, not silent.
+    console.error("DISPATCH OUTREACH: failed to remove delivered queue entry (it may be re-sent):", queueDeleteError, {
+      tenantId,
+      queueItemId: queueItem.id,
+    });
+  }
+
+  return "sent";
+}
+
+export async function recordReminderDelivered(
+  supabase: ReturnType<typeof createServiceSupabase>,
+  tenantId: string,
+  reminder: { id: string; attemptCount: number }
+): Promise<boolean> {
+  const attempts: { label: string; values: Record<string, unknown> }[] = [
+    {
+      label: "full",
+      values: {
+        status: "awaiting_ack",
+        attempt_count: reminder.attemptCount,
+        last_attempted_at: new Date().toISOString(),
+      },
+    },
+    {
+      label: "without last_attempted_at",
+      values: { status: "awaiting_ack", attempt_count: reminder.attemptCount },
+    },
+    { label: "status only", values: { status: "awaiting_ack" } },
+    { label: "stop-repeating fallback (passive_queue)", values: { status: "passive_queue" } },
+  ];
+
+  for (const attempt of attempts) {
+    const { error } = await supabase
+      .from("agent_reminders")
+      .update(attempt.values)
+      .eq("id", reminder.id)
+      .eq("tenant_id", tenantId);
+
+    if (!error) {
+      if (attempt.label !== "full") {
+        console.error(
+          `DISPATCH OUTREACH: reminder status saved only via the "${attempt.label}" fallback — the fuller update failed, check that migration 019 (last_attempted_at) has been run:`,
+          { tenantId, reminderId: reminder.id }
+        );
+      }
+      return true;
+    }
+
+    console.error(`DISPATCH OUTREACH: reminder update ("${attempt.label}") failed:`, error, {
       tenantId,
       reminderId: reminder.id,
     });
   }
 
-  await supabase.from("agent_outreach_queue").delete().eq("id", queueItem.id);
-
-  return "sent";
+  return false;
 }
 
 /**

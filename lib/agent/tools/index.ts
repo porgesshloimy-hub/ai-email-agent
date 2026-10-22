@@ -23,6 +23,12 @@ import { checkPendingApprovalsTool } from "./check-pending-approvals";
 import { requestAdditionalCapabilityTool } from "./request-additional-capability";
 import { noActionRequiredTool } from "./no-action-required";
 import { searchContextTool } from "./search-context";
+import {
+  listRemindersTool,
+  completeReminderTool,
+  deleteReminderTool,
+  cancelScheduledEmailTool,
+} from "./manage-reminders";
 
 import type { ToolContext, ToolDefinition, ToolSurface } from "./types";
 
@@ -59,6 +65,10 @@ export const ALL_TOOLS: ToolDefinition[] = [
   requestAdditionalCapabilityTool,
   noActionRequiredTool,
   searchContextTool,
+  listRemindersTool,
+  completeReminderTool,
+  deleteReminderTool,
+  cancelScheduledEmailTool,
 ];
 
 /**

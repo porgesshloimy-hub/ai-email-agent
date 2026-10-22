@@ -986,13 +986,18 @@ Design notes worth keeping:
   an LLM turn with tools can exceed that, so the webhook returns an empty TwiML response and the
   answer goes out via the REST API afterward, as its own Inngest step so a failed send retries
   without regenerating (and re-billing) the reply.
-- **One text per paragraph.** The chat agent's replies are split into short parts (on `|||` or a
-  blank line, up to 6 — see `chat.ts`); the dashboard shows each as a bubble and SMS sends each as
-  its own text, in order, with a 1.5-second gap so carriers don't deliver them swapped. Each part
-  is its own Inngest step, so a failed send retries only that part and never re-sends earlier
-  ones. Over the cap, SMS folds the overflow into the last text rather than dropping it (the
-  widget just drops it), and each text is still trimmed to 1,500 characters. Every text is billed
-  separately, so the SMS prompt asks the model for as few parts as the answer needs.
+- **One text per message, with a way to keep things together.** The agent's reply is split into
+  separate messages on `|||` or a blank line (up to 6) — the dashboard shows each as a bubble and
+  SMS sends each as its own text, in order, 1.5 seconds apart so carriers don't deliver them
+  swapped, each as its own Inngest step so a failed send retries only that text. Some content must
+  NOT be split, though: a forwarded email's paragraphs belong together. The model wraps such
+  content in `[[keep]] ... [[/keep]]`; `lib/agent/reply-parts.ts` (shared by every chat channel,
+  not just SMS) then guarantees nothing inside is split and strips the markers. An unclosed marker
+  protects the rest of the reply, and stray markers are always removed. Past the part cap, SMS
+  folds the overflow into the last text rather than dropping it (the widget just drops it). A
+  single message longer than one text allows is split at paragraph/sentence boundaries by
+  `lib/sms/chunk.ts` and sent as several texts, never truncated — an owner with no web access on
+  their phone can't follow a "see the dashboard" pointer. Every text is billed separately.
 - **The agent is told the owner can't reach email or the web** (prompt line in `chat.ts`,
   `channel === "sms"` only), so it gives the information itself rather than "check your email."
 - **Unknown numbers get no reply** — answering strangers costs money per message and makes the
@@ -1011,6 +1016,37 @@ Setup: set `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`; in t
 point the number's "A message comes in" webhook (HTTP POST) at
 `https://<your-app>/api/twilio/incoming`; run migration `022_owner_sms_numbers.sql`; enter your
 phone number(s) under **Settings → Text messages**.
+
+---
+
+# Managing Reminders & Scheduled Emails
+
+The agent can create reminders (`agent_reminders`) and scheduled emails
+(`agent_scheduled_actions`) — and, on the owner-chat surface (dashboard and SMS), now manage them
+too. In the owner's words "tasks" and "to-dos" mean reminders; there is no separate task table.
+
+```
+list_reminders            everything outstanding, with ids, times in the business timezone
+complete_reminder         mark a reminder done (kept in history)
+delete_reminder           permanently remove a reminder
+cancel_scheduled_email    stop an email that hasn't been sent yet
+```
+
+`lib/agent/tools/manage-reminders.ts`. Each finds its target by exact id or a few distinctive words,
+and **changes nothing unless exactly one item matches** — ambiguity returns the candidates for the
+agent to ask about. With no id or words, a single outstanding item is unambiguous. Every query is
+scoped to the tenant. An already-sent email is reported as not cancellable rather than falsely
+cancelled. Reminder texts end with `(Reply "done" to clear it.)`, and "done" is now an
+acknowledgment phrase (`ack-detection.ts`).
+
+**Repeating-reminder bug.** A reminder was texted every dispatch cycle, forever. After a successful
+send, `dispatcher.ts` records `awaiting_ack` and the attempt; that update's failure used to be
+logged and ignored, leaving the reminder `pending` with a past trigger — re-queued on the next run,
+and un-clearable by replying since only `awaiting_ack` reminders are matched. The update now falls
+back through smaller updates (a missing optional column such as `last_attempted_at`, migration 019,
+no longer blocks the part that matters), parks the reminder in `passive_queue` as a last resort so
+repeating stops, and logs loudly at every stage. Queue-entry deletion failures are logged too.
+Normal behavior is two attempts three hours apart, then it stops.
 
 ---
 

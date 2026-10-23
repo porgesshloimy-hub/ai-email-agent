@@ -1,4 +1,5 @@
 import type { SupabaseServiceClient, ToolContext, ToolDefinition } from "./types";
+import { readBackRow, unverifiedMessage } from "./verify";
 import { createReminder } from "@/lib/agent/reminders/create";
 import { createScheduledEmailAction } from "@/lib/agent/scheduled-actions/create";
 import { writeMemory } from "@/lib/agent/memory/write";
@@ -124,8 +125,20 @@ export const createReminderTool: ToolDefinition = {
 
       if ("error" in result) return `The reminder was NOT saved: ${result.error}`;
 
+      // A write that returned no error isn't proof. Read it back and
+      // report success only if the stored row is what was meant.
+      const check = await readBackRow(context.supabase, "agent_reminders", result.id, context.tenantId, "id, status, trigger_at");
+      if (!check.ok) return unverifiedMessage("The reminder", check.error);
+      if (
+        !check.row ||
+        check.row.status !== "pending" ||
+        new Date(check.row.trigger_at).getTime() !== new Date(result.triggerAt).getTime()
+      ) {
+        return `The reminder was NOT confirmed: after saving it I read it back and it ${check.row ? "doesn't match what I saved" : "isn't there"}. Do not tell the owner it's set — tell them it didn't work.`;
+      }
+
       const timeZone = await getTimezone(context.supabase, context.tenantId);
-      return `Saved. Reminder "${content}" is set for ${formatWhen(result.triggerAt, timeZone)} (${timeZone}).`;
+      return `Saved and verified. Reminder "${content}" is set for ${formatWhen(result.triggerAt, timeZone)} (${timeZone}).`;
     });
   },
 };
@@ -173,6 +186,12 @@ export const scheduleEmailTool: ToolDefinition = {
 
       if ("error" in result) return `The email was NOT scheduled: ${result.error}`;
 
+      const check = await readBackRow(context.supabase, "agent_scheduled_actions", result.id, context.tenantId, "id, status, to_email");
+      if (!check.ok) return unverifiedMessage("The scheduled email", check.error);
+      if (!check.row || check.row.status !== "pending" || check.row.to_email !== to) {
+        return `The email was NOT confirmed as scheduled: after saving it I read it back and it ${check.row ? "doesn't match what I saved" : "isn't there"}. Do not tell the owner it's scheduled — tell them it didn't work.`;
+      }
+
       const timeZone = await getTimezone(context.supabase, context.tenantId);
       const when = formatWhen(result.triggerAt, timeZone);
 
@@ -189,8 +208,8 @@ export const scheduleEmailTool: ToolDefinition = {
       }
 
       return capability === "send"
-        ? `Scheduled. The email to ${to} (subject "${subject}") will be sent ${when} (${timeZone}).`
-        : `Scheduled, with a caveat: sending isn't currently enabled, so at ${when} (${timeZone}) it will be saved as a Gmail draft to ${to} (subject "${subject}") instead of being sent automatically. Tell the owner that.`;
+        ? `Scheduled and verified. The email to ${to} (subject "${subject}") will be sent ${when} (${timeZone}).`
+        : `Scheduled and verified, with a caveat: sending isn't currently enabled, so at ${when} (${timeZone}) it will be saved as a Gmail draft to ${to} (subject "${subject}") instead of being sent automatically. Tell the owner that.`;
     });
   },
 };
@@ -241,12 +260,21 @@ export const rememberTool: ToolDefinition = {
       }
 
       if (kind === "instruction") {
-        const { error } = await context.supabase
+        const { data: inserted, error } = await context.supabase
           .from("agent_instruction_notes")
-          .insert({ tenant_id: context.tenantId, content, source_thread_id: null, active: true });
+          .insert({ tenant_id: context.tenantId, content, source_thread_id: null, active: true })
+          .select("id")
+          .single();
 
-        if (error) return `The instruction was NOT saved: ${error.message}`;
-        return `Saved as a standing instruction: "${content}".`;
+        if (error || !inserted) return `The instruction was NOT saved: ${error?.message ?? "no row came back"}`;
+
+        const check = await readBackRow(context.supabase, "agent_instruction_notes", inserted.id, context.tenantId, "id, active, content");
+        if (!check.ok) return unverifiedMessage("The instruction", check.error);
+        if (!check.row || check.row.active !== true || check.row.content !== content) {
+          return `The instruction was NOT confirmed: after saving it I read it back and it ${check.row ? "doesn't match what I saved" : "isn't there"}. Do not tell the owner it's saved — tell them it didn't work.`;
+        }
+
+        return `Saved and verified as a standing instruction: "${content}".`;
       }
 
       const customerHint = typeof args.customer === "string" ? args.customer.trim() : "";
@@ -276,10 +304,16 @@ export const rememberTool: ToolDefinition = {
 
       if (!written) return "The memory was NOT saved — the write failed.";
 
+      const check = await readBackRow(context.supabase, "agent_memories", (written as any).id, context.tenantId, "id, content");
+      if (!check.ok) return unverifiedMessage("The memory", check.error);
+      if (!check.row) {
+        return "The memory was NOT confirmed: after saving it I read it back and it isn't there. Do not tell the owner it's saved — tell them it didn't work.";
+      }
+
       const about = resolution.status === "resolved" ? ` for ${resolution.email}` : "";
       return pinned
-        ? `Saved, and pinned so it's always kept in mind${about}: "${content}".`
-        : `Saved${about}: "${content}".`;
+        ? `Saved and verified, and pinned so it's always kept in mind${about}: "${content}".`
+        : `Saved and verified${about}: "${content}".`;
     });
   },
 };

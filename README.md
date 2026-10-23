@@ -1060,6 +1060,33 @@ tool reported success. When the classifier handles a message the agent never run
 created twice. The classifier also retries once on a failed/empty result and logs its decision
 (`OWNER INTENT: classified { intent }`), so a miss shows up in the logs instead of being guessed at.
 
+**Verification — the agent's "done" is checked, not trusted.** The email path has had a grounding
+guard since an agent described a Zoom meeting as booked when it wasn't; the owner chat had none, so
+"I'm setting it now" / "noted" / "done" could be said over nothing. Two layers now, in line with the
+rest of the design (the backend, not the model, decides what happened):
+
+- *Verify the work.* Every tool that writes (`create_reminder`, `schedule_email`, `remember`,
+  `complete_reminder`, `delete_reminder`, `cancel_scheduled_email`) reads the row back
+  (`lib/agent/tools/verify.ts`) and reports success only if what is stored is what was meant — a
+  write that "returned no error" but matched zero rows, or was altered, is reported as NOT confirmed,
+  and a read-back that itself fails is reported as "could not verify", never as success.
+- *Verify the claim.* The agent's final message is compared with the turn's actual tool calls and
+  their RESULTS by a cheap model (`lib/agent/chat-grounding.ts`), after a free regex gate so ordinary
+  replies cost nothing extra. A claim or promise of action that nothing backs (including "I'll keep
+  that in mind" with no tool call, a claim contradicting what the tool recorded, or a statement about
+  current state that no lookup this turn supports) sends the agent back — up to 2 rounds — to either
+  do it with a tool or correct itself; if it still can't, the owner receives an honest correction
+  instead of the false confirmation. If the check itself can't run, the reply is sent with an
+  explicit "couldn't double-check" note (neither blindly trusted nor withheld).
+
+Also closed: the loop used to end the turn with the model's text or the literal word "Done." when it
+named a tool that doesn't exist, and crashed on unparseable tool arguments; both now report back to
+the model that nothing was done. A stale prompt sentence telling the agent reminders were "handled
+automatically — just confirm it back in your own words" (an instruction to confirm without
+verifying) was removed. Not covered by the reply check: messages the classifier handled on the fast
+path (their confirmation is built from the database's own response) and backend-authored text such
+as owner-confirmation prompts.
+
 **Repeating-reminder bug.** A reminder was texted every dispatch cycle, forever. After a successful
 send, `dispatcher.ts` records `awaiting_ack` and the attempt; that update's failure used to be
 logged and ignored, leaving the reminder `pending` with a past trigger — re-queued on the next run,

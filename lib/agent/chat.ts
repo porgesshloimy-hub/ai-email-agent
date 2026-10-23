@@ -20,6 +20,13 @@ import {
 } from "@/lib/agent/models";
 import { getToolsForSurface, findToolForSurface } from "@/lib/agent/tools";
 import { splitReplyIntoParts } from "@/lib/agent/reply-parts";
+import {
+  checkChatReplyGrounding,
+  verifyAndCorrect,
+  CHAT_GROUNDING_PROVIDER,
+  CHAT_GROUNDING_MODEL,
+} from "@/lib/agent/chat-grounding";
+import type { ToolTranscriptEntry, TurnOutcome } from "@/lib/agent/chat-grounding";
 import type { ToolContext } from "@/lib/agent/tools";
 import { buildCurrentDateContext } from "@/lib/agent/date-context";
 import { resolveCategory, describeResolvedCategory } from "@/lib/agent/tools/categories";
@@ -526,7 +533,7 @@ export async function handleChatMessage(
            * this codebase: never let the model deny a real capability
            * out of simple ignorance that it exists.
            */
-          "You CAN hold onto something to bring up later and you CAN schedule sending an email for a future time — these are real, working features, not things you lack. If the owner directly asks you to remind them of something later (e.g. \"remind me tomorrow morning to call the supplier\"), or to send an email at a future time (e.g. \"email Jane tomorrow at 9am to confirm\"), that request is understood and handled automatically — just confirm it back to them in your own words. If asked WHETHER you can do this, or whether you're sure you can't, say yes clearly and explain briefly how: they just tell you what to do and when, in plain language, the same way they'd ask you to do anything else in this chat. Never claim you only exist within one conversation with no way to follow up later — that is false. You can also MANAGE them: you have tools to list the owner's reminders and scheduled emails, mark a reminder done, delete a reminder, and cancel a scheduled email. When the owner says they've already handled something, wants a reminder to stop, or says to cancel/delete/forget a reminder or a scheduled email, use those tools (list first if you're not sure which one they mean) instead of just saying you'll stop — and never tell them something is cancelled or done unless a tool call actually succeeded. You can also CREATE these directly with your tools: create_reminder (a reminder to the owner at a set time), schedule_email (an email to someone else at a set time) and remember (a fact, a standing instruction, or something to always keep in mind). When the owner asks for any of these, call the tool — do not just say you'll do it or that you've noted it, because saying so without calling the tool does nothing and nothing gets saved. Resolve times like 'in an hour' or 'Friday at 11' into an exact date-time WITH a UTC offset using the current date and business timezone given above; if the time they named has already passed, tell them and ask for a new one. If a message holds several requests, make a separate tool call for each. Never tell the owner something has been set, scheduled or saved unless the tool reported success; if it reported failure, say so plainly.",
+          "You CAN hold onto something to bring up later and you CAN schedule sending an email for a future time — these are real, working features, not things you lack. If the owner directly asks you to remind them of something later (e.g. \"remind me tomorrow morning to call the supplier\"), or to send an email at a future time (e.g. \"email Jane tomorrow at 9am to confirm\"), use your tools to do it (create_reminder / schedule_email, described below). Many simple requests like these are recognized and saved automatically before they ever reach you, in which case the saved confirmation is already in the conversation history; but anything that reaches YOU is yours to actually do, and you must not confirm it to the owner until a tool has really done it. If asked WHETHER you can do this, or whether you're sure you can't, say yes clearly and explain briefly how: they just tell you what to do and when, in plain language, the same way they'd ask you to do anything else in this chat. Never claim you only exist within one conversation with no way to follow up later — that is false. You can also MANAGE them: you have tools to list the owner's reminders and scheduled emails, mark a reminder done, delete a reminder, and cancel a scheduled email. When the owner says they've already handled something, wants a reminder to stop, or says to cancel/delete/forget a reminder or a scheduled email, use those tools (list first if you're not sure which one they mean) instead of just saying you'll stop — and never tell them something is cancelled or done unless a tool call actually succeeded. You can also CREATE these directly with your tools: create_reminder (a reminder to the owner at a set time), schedule_email (an email to someone else at a set time) and remember (a fact, a standing instruction, or something to always keep in mind). When the owner asks for any of these, call the tool — do not just say you'll do it or that you've noted it, because saying so without calling the tool does nothing and nothing gets saved. Resolve times like 'in an hour' or 'Friday at 11' into an exact date-time WITH a UTC offset using the current date and business timezone given above; if the time they named has already passed, tell them and ask for a new one. If a message holds several requests, make a separate tool call for each. Never tell the owner something has been set, scheduled or saved unless the tool reported success; if it reported failure, say so plainly. When the owner asks whether something is set, saved or scheduled, look it up with list_reminders instead of answering from what you remember of the conversation — earlier messages can be stale or wrong. Your replies are automatically checked against the real tool results from the turn: a claim or promise of action that nothing backs gets sent back to you for correction, so don't make one.",
           /**
            * SMS is now a real owner-chat transport (app/api/twilio/
            * incoming). Over text the owner is typically away from a
@@ -616,93 +623,153 @@ export async function handleChatMessage(
      * limits the blast radius if a tool call ever gets stuck looping.
      */
     const MAX_CHAT_TOOL_STEPS = 6;
-    let currentMessages: LlmMessage[] = [...messages];
 
-    for (let step = 0; step < MAX_CHAT_TOOL_STEPS; step++) {
-      const result = await runChatCompletion(aiProvider, {
-        model: aiModel,
+    /**
+     * Every tool call this turn and what it actually returned. This is
+     * the evidence the reply is checked against (see
+     * lib/agent/chat-grounding.ts): the model's own account of what it
+     * did is never trusted, only these results.
+     */
+    const toolTranscript: ToolTranscriptEntry[] = [];
+
+    const runToolLoop = async (startMessages: LlmMessage[]): Promise<TurnOutcome> => {
+      let currentMessages: LlmMessage[] = [...startMessages];
+
+      for (let step = 0; step < MAX_CHAT_TOOL_STEPS; step++) {
+        const result = await runChatCompletion(aiProvider, {
+          model: aiModel,
+          messages: currentMessages,
+          tools,
+        });
+
+        await meterChatUsage(tenantId, aiProvider, aiModel, result.usage);
+
+        const toolCall = result.toolCalls[0];
+
+        if (!toolCall) {
+          return {
+            text: result.content ?? "I'm not sure how to respond to that.",
+            // The model's own words, claiming whatever it likes — the
+            // one thing that must be checked before it reaches the owner.
+            verify: true,
+            messages: currentMessages,
+          };
+        }
+
+        /**
+         * Feeds a result back to the model as if the tool had run and
+         * said this — used for the cases where it effectively didn't
+         * (unknown tool, unreadable arguments), so the model is TOLD
+         * nothing happened instead of this loop guessing. Previously an
+         * unknown tool name ended the turn with the model's own text or
+         * the literal word "Done." — a confirmation of nothing.
+         */
+        const feedBack = (resultText: string, argsText: string) => {
+          toolTranscript.push({ tool: toolCall.name, args: argsText, result: resultText });
+          currentMessages = [
+            ...currentMessages,
+            { role: "assistant", content: result.content, toolCalls: [toolCall] },
+            { role: "tool", toolCallId: toolCall.id, name: toolCall.name, content: resultText },
+          ];
+        };
+
+        let args: Record<string, any>;
+
+        try {
+          args = JSON.parse(toolCall.arguments || "{}");
+        } catch {
+          feedBack("ERROR: the arguments were not valid JSON, so nothing was done.", toolCall.arguments ?? "");
+          continue;
+        }
+
+        const toolDef = findToolForSurface(toolCall.name, "chat", toolContext);
+
+        if (!toolDef) {
+          feedBack(`ERROR: there is no tool named "${toolCall.name}" available here, so nothing was done.`, JSON.stringify(args));
+          continue;
+        }
+
+        /**
+         * Bug found in production: a tool's own external API call
+         * throwing (e.g. delete_calendar_event's Google Calendar call
+         * failing on a stale event ID) propagated all the way up
+         * uncaught, into the Inngest step running this whole reply.
+         * Inngest retries a failing step, and if the cause is
+         * deterministic, every retry fails identically until the whole
+         * function gives up — meaning NO reply is ever persisted, not
+         * even an error message. Reported as "the agent didn't delete
+         * the event" with no visible explanation at all. The three
+         * owner-directed action tools were fixed individually to catch
+         * their own specific external calls with a clear message, but
+         * this catch exists as a systemic backstop too — any OTHER
+         * tool, including ones added later, that forgets its own
+         * error handling still can't take down the whole turn silently.
+         */
+        let toolResult;
+        try {
+          toolResult = await toolDef.execute(args, toolContext);
+        } catch (err) {
+          console.error("CHAT TOOL EXECUTION THREW:", { tenantId, toolName: toolCall.name, error: err });
+          toolTranscript.push({ tool: toolCall.name, args: JSON.stringify(args), result: "ERROR: the tool threw an error." });
+          return {
+            text: "Something went wrong while I was working on that — nothing should have changed, but please check and let me know if anything looks off.",
+            verify: false,
+            messages: currentMessages,
+          };
+        }
+
+        /**
+         * A tool holding for owner confirmation (see
+         * lib/agent/approval/resolve.ts's SyncConfirmHold) must STOP the
+         * loop immediately and return that text as the final reply —
+         * there is nothing productive left to do until the owner
+         * actually replies. Distinguishing this from a normal completed-
+         * action string (e.g. "Done — booked X", which SHOULD loop back
+         * so the model can decide whether to call another tool) is
+         * exactly why that sentinel exists instead of string-sniffing.
+         * The text is the backend's own, not the model's, so it is not
+         * run through the reply check.
+         */
+        if (isSyncConfirmHold(toolResult)) {
+          return { text: toolResult.message, verify: false, messages: currentMessages };
+        }
+
+        // Every other result — whether a plain string like "Done — X" or
+        // a structured object like check_calendar_availability's JSON —
+        // gets fed back to the model, which decides whether to call
+        // another tool (e.g. delete a second event) or produce final text.
+        feedBack(typeof toolResult === "string" ? toolResult : JSON.stringify(toolResult), JSON.stringify(args));
+      }
+
+      // Hit MAX_CHAT_TOOL_STEPS without the model producing final text —
+      // extremely unlikely given the cap, but fail toward a plain
+      // message rather than silence.
+      console.error("CHAT TOOL LOOP: hit MAX_CHAT_TOOL_STEPS without a final response", { tenantId });
+      return {
+        text: "I've made some progress on that, but I'm not sure how to summarize it — could you check and let me know if anything's missing?",
+        verify: false,
         messages: currentMessages,
-        tools,
-      });
+      };
+    };
 
-      await meterChatUsage(tenantId, aiProvider, aiModel, result.usage);
-
-      const toolCall = result.toolCalls[0];
-
-      if (!toolCall) {
-        return result.content ?? "I'm not sure how to respond to that.";
-      }
-
-      const args = JSON.parse(toolCall.arguments || "{}");
-      const toolDef = findToolForSurface(toolCall.name, "chat", toolContext);
-
-      if (!toolDef) {
-        return result.content ?? "Done.";
-      }
-
-      /**
-       * Bug found in production: a tool's own external API call
-       * throwing (e.g. delete_calendar_event's Google Calendar call
-       * failing on a stale event ID) propagated all the way up
-       * uncaught, into the Inngest step running this whole reply.
-       * Inngest retries a failing step, and if the cause is
-       * deterministic, every retry fails identically until the whole
-       * function gives up — meaning NO reply is ever persisted, not
-       * even an error message. Reported as "the agent didn't delete
-       * the event" with no visible explanation at all. The three
-       * owner-directed action tools were fixed individually to catch
-       * their own specific external calls with a clear message, but
-       * this catch exists as a systemic backstop too — any OTHER
-       * tool, including ones added later, that forgets its own
-       * error handling still can't take down the whole turn silently.
-       */
-      let toolResult;
-      try {
-        toolResult = await toolDef.execute(args, toolContext);
-      } catch (err) {
-        console.error("CHAT TOOL EXECUTION THREW:", { tenantId, toolName: toolCall.name, error: err });
-        return "Something went wrong while I was working on that — nothing should have changed, but please check and let me know if anything looks off.";
-      }
-
-      /**
-       * A tool holding for owner confirmation (see
-       * lib/agent/approval/resolve.ts's SyncConfirmHold) must STOP the
-       * loop immediately and return that text as the final reply —
-       * there is nothing productive left to do until the owner
-       * actually replies. Distinguishing this from a normal completed-
-       * action string (e.g. "Done — booked X", which SHOULD loop back
-       * so the model can decide whether to call another tool) is
-       * exactly why that sentinel exists instead of string-sniffing.
-       */
-      if (isSyncConfirmHold(toolResult)) {
-        return toolResult.message;
-      }
-
-      // Every other result — whether a plain string like "Done — X" or
-      // a structured object like check_calendar_availability's JSON —
-      // gets fed back to the model, which decides whether to call
-      // another tool (e.g. delete a second event) or produce final text.
-      currentMessages = [
-        ...currentMessages,
-        {
-          role: "assistant",
-          content: result.content,
-          toolCalls: [toolCall],
-        },
-        {
-          role: "tool",
-          toolCallId: toolCall.id,
-          name: toolCall.name,
-          content: typeof toolResult === "string" ? toolResult : JSON.stringify(toolResult),
-        },
-      ];
-    }
-
-    // Hit MAX_CHAT_TOOL_STEPS without the model producing final text —
-    // extremely unlikely given the cap, but fail toward a plain
-    // message rather than silence.
-    console.error("CHAT TOOL LOOP: hit MAX_CHAT_TOOL_STEPS without a final response", { tenantId });
-    return "I've made some progress on that, but I'm not sure how to summarize it — could you check and let me know if anything's missing?";
+    /**
+     * Verify the model's final words against what actually happened
+     * before they reach the owner; send it back to fix them, or replace
+     * them with an honest correction, when they don't match. See
+     * lib/agent/chat-grounding.ts for why this exists and how it fails.
+     */
+    return verifyAndCorrect({
+      first: await runToolLoop(messages),
+      runAgain: runToolLoop,
+      check: (reply) =>
+        checkChatReplyGrounding(
+          { ownerMessage: messageText, reply, transcript: toolTranscript },
+          {
+            onUsage: (usage) =>
+              meterChatUsage(tenantId, CHAT_GROUNDING_PROVIDER, CHAT_GROUNDING_MODEL, usage),
+          }
+        ),
+    });
   }
 
   const rawResponseText = await computeResponse();

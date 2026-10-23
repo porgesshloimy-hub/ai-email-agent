@@ -1,5 +1,6 @@
 import type { SupabaseServiceClient, ToolContext, ToolDefinition } from "./types";
 import { isValidTimezone } from "@/lib/timezones";
+import { readBackRow, unverifiedMessage } from "./verify";
 
 /**
  * Owner-chat tools for looking at, finishing, and removing the two
@@ -337,7 +338,14 @@ export const completeReminderTool: ToolDefinition = {
       if (!data || data.length === 0) return "That reminder couldn't be updated (it may have just changed). It was not marked done.";
 
       await clearQueueEntries(context.supabase, context.tenantId, reminder.id);
-      return `Marked done: "${reminder.content}". It won't come up again.`;
+
+      const check = await readBackRow(context.supabase, "agent_reminders", reminder.id, context.tenantId, "id, status");
+      if (!check.ok) return unverifiedMessage("The change", check.error);
+      if (!check.row || check.row.status !== "done") {
+        return `NOT confirmed: after updating, the reminder's status is "${check.row?.status ?? "missing"}", not done. Do not tell the owner it's done — tell them it didn't work.`;
+      }
+
+      return `Marked done (verified): "${reminder.content}". It won't come up again.`;
     });
   },
 };
@@ -373,7 +381,13 @@ export const deleteReminderTool: ToolDefinition = {
       if (error) return `Failed to delete that reminder: ${error.message}. It is still active.`;
       if (!data || data.length === 0) return "That reminder couldn't be deleted (it may have just changed). It is still active.";
 
-      return `Deleted the reminder: "${reminder.content}". It won't come up again.`;
+      const check = await readBackRow(context.supabase, "agent_reminders", reminder.id, context.tenantId, "id");
+      if (!check.ok) return unverifiedMessage("The deletion", check.error);
+      if (check.row) {
+        return "NOT confirmed: after deleting, the reminder is still there. Do not tell the owner it's deleted — tell them it didn't work.";
+      }
+
+      return `Deleted the reminder (verified gone): "${reminder.content}". It won't come up again.`;
     });
   },
 };
@@ -426,7 +440,13 @@ export const cancelScheduledEmailTool: ToolDefinition = {
         return "That email is no longer pending — it may have just been sent — so it could not be cancelled.";
       }
 
-      return `Cancelled the email to ${action.to_email} ("${action.subject}"). It will not be sent.`;
+      const check = await readBackRow(context.supabase, "agent_scheduled_actions", action.id, context.tenantId, "id, status");
+      if (!check.ok) return unverifiedMessage("The cancellation", check.error);
+      if (!check.row || check.row.status !== "cancelled") {
+        return `NOT confirmed: after cancelling, the email's status is "${check.row?.status ?? "missing"}", not cancelled. Do not tell the owner it's cancelled — tell them it didn't work.`;
+      }
+
+      return `Cancelled the email to ${action.to_email} ("${action.subject}") (verified). It will not be sent.`;
     });
   },
 };

@@ -29,7 +29,8 @@ export interface CreateScheduledEmailActionResult {
 }
 
 export async function createScheduledEmailAction(
-  input: CreateScheduledEmailActionInput
+  input: CreateScheduledEmailActionInput,
+  client?: ReturnType<typeof createServiceSupabase>
 ): Promise<CreateScheduledEmailActionResult | { error: string }> {
   const toEmail = input.toEmail.trim();
   const subject = input.subject.trim();
@@ -69,7 +70,7 @@ export async function createScheduledEmailAction(
     };
   }
 
-  const supabase = createServiceSupabase();
+  const supabase = client ?? createServiceSupabase();
 
   const { data, error } = await supabase
     .from("agent_scheduled_actions")

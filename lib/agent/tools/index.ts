@@ -23,6 +23,7 @@ import { checkPendingApprovalsTool } from "./check-pending-approvals";
 import { requestAdditionalCapabilityTool } from "./request-additional-capability";
 import { noActionRequiredTool } from "./no-action-required";
 import { searchContextTool } from "./search-context";
+import { createReminderTool, scheduleEmailTool, rememberTool } from "./owner-requests";
 import {
   listRemindersTool,
   completeReminderTool,
@@ -69,6 +70,9 @@ export const ALL_TOOLS: ToolDefinition[] = [
   completeReminderTool,
   deleteReminderTool,
   cancelScheduledEmailTool,
+  createReminderTool,
+  scheduleEmailTool,
+  rememberTool,
 ];
 
 /**

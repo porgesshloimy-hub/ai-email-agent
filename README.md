@@ -1039,6 +1039,27 @@ scoped to the tenant. An already-sent email is reported as not cancellable rathe
 cancelled. Reminder texts end with `(Reply "done" to clear it.)`, and "done" is now an
 acknowledgment phrase (`ack-detection.ts`).
 
+**Creating them — two paths, by design.** The cheap intent classifier
+(`lib/agent/memory/owner-intent.ts`) is the fast path: it recognises "remind me…", "remember that…",
+"email Jane tomorrow" before the main agent runs and saves directly. It fails quietly by design
+(an error, a model that answers in text instead of calling its tool, or one message holding two
+requests all fall through), and until the tools below existed the main agent had *no way to save
+anything* while its prompt said it could — so a missed classification produced "I'm setting it now"
+and nothing happened. Now the main agent has real tools too (`lib/agent/tools/owner-requests.ts`):
+
+```
+create_reminder    a reminder to the owner at a set time
+schedule_email     an email to someone else at a set time (sent, or drafted if sending isn't allowed)
+remember           a fact, a standing instruction, or something to always keep in mind
+```
+
+Each requires a full ISO date-time **with a UTC offset** (an offset-less string would be filed in
+server time), rejects a time more than a few minutes in the past with an explanation, and reports
+exactly what happened; the system prompt forbids saying something was set/scheduled/saved unless a
+tool reported success. When the classifier handles a message the agent never runs, so nothing is
+created twice. The classifier also retries once on a failed/empty result and logs its decision
+(`OWNER INTENT: classified { intent }`), so a miss shows up in the logs instead of being guessed at.
+
 **Repeating-reminder bug.** A reminder was texted every dispatch cycle, forever. After a successful
 send, `dispatcher.ts` records `awaiting_ack` and the attempt; that update's failure used to be
 logged and ignored, leaving the reminder `pending` with a past trigger — re-queued on the next run,

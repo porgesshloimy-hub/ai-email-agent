@@ -28,7 +28,8 @@ export interface CreateReminderResult {
 }
 
 export async function createReminder(
-  input: CreateReminderInput
+  input: CreateReminderInput,
+  client?: ReturnType<typeof createServiceSupabase>
 ): Promise<CreateReminderResult | { error: string }> {
   const content = input.content.trim();
 
@@ -64,7 +65,7 @@ export async function createReminder(
     };
   }
 
-  const supabase = createServiceSupabase();
+  const supabase = client ?? createServiceSupabase();
 
   const { data, error } = await supabase
     .from("agent_reminders")

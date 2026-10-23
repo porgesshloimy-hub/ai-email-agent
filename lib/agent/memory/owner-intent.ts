@@ -143,7 +143,7 @@ function buildClassifyTool(): LlmToolDefinition {
   };
 }
 
-async function classifyOwnerMessage(
+async function classifyOwnerMessageOnce(
   message: string,
   timezone: string | null
 ): Promise<ClassifiedOwnerMessage | null> {
@@ -186,7 +186,43 @@ async function classifyOwnerMessage(
   }
 }
 
-type CustomerResolution =
+/**
+ * The classifier is what turns "remind me…" / "remember that…" into an
+ * actual saved reminder or memory on the fast path, and it fails quietly
+ * by design (a null just means "let the normal agent handle it"). A
+ * single hiccup — a transient provider error, or the model answering in
+ * text instead of calling the tool — used to mean the request silently
+ * skipped the fast path. One retry covers the transient cases cheaply,
+ * and the outcome is now logged so a miss can be seen instead of
+ * guessed at. (If both attempts fail, the main agent now has real
+ * create_reminder / schedule_email / remember tools of its own — see
+ * lib/agent/tools/owner-requests.ts — so the request is still honored.)
+ */
+async function classifyOwnerMessage(
+  message: string,
+  timezone: string | null
+): Promise<ClassifiedOwnerMessage | null> {
+  if (!isProviderConfigured(CHEAP_PROVIDER)) {
+    console.error("OWNER INTENT: classifier provider not configured");
+    return null;
+  }
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const classified = await classifyOwnerMessageOnce(message, timezone);
+
+    if (classified) {
+      console.log("OWNER INTENT: classified", { intent: classified.intent, attempt });
+      return classified;
+    }
+
+    console.error(`OWNER INTENT: attempt ${attempt} produced no usable classification`);
+  }
+
+  console.error("OWNER INTENT: both attempts failed — handing the message to the main agent");
+  return null;
+}
+
+export type CustomerResolution =
   | { status: "none" }
   | { status: "resolved"; email: string }
   | { status: "ambiguous"; candidates: string[] }
@@ -197,7 +233,7 @@ type CustomerResolution =
  * several, and an ask-for-detail when there are none — per the plan's
  * "ambiguity resolution scales with actual uncertainty" principle.
  */
-async function resolveCustomerReference(
+export async function resolveCustomerReference(
   tenantId: string,
   hint: string | undefined
 ): Promise<CustomerResolution> {
